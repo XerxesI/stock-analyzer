@@ -31,12 +31,9 @@ LOOKBACK_BUFFER_DAYS = 260
 DEFAULT_INITIAL_CAPITAL = 10_000.0
 DEFAULT_MAX_POSITIONS = 10
 KEEP_RANK_THRESHOLD = 0.45
-KEEP_CONFIDENCE_THRESHOLD = 0.50
 LOSS_CUT_PCT = 0.08
-TRAILING_STOP_PCT = 0.20
-HOLD_BONUS_DAYS = 14
-HOLD_BONUS_MULTIPLIER = 1.10
 KEEP_WEIGHT_FLOOR_RATIO = 0.80
+MAX_REPLACEMENTS = 2
 
 
 def _normalize_download_frame(data: pd.DataFrame) -> pd.DataFrame:
@@ -112,8 +109,11 @@ def should_keep_position(old_position: dict[str, Any], new_position: dict[str, A
 
     _ = old_position
     new_rank = float(new_position.get("rank", 0) or 0)
-    new_confidence = float(new_position.get("confidence", 0) or 0)
-    return new_rank >= KEEP_RANK_THRESHOLD and new_confidence >= KEEP_CONFIDENCE_THRESHOLD
+    if new_rank >= 0.50:
+        return True
+    if new_rank >= KEEP_RANK_THRESHOLD:
+        return True
+    return False
 
 
 def _normalize_weights(positions: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -149,25 +149,13 @@ def should_cut_loss(entry_price: float | None, current_price: float | None) -> b
     )
 
 
-def should_trigger_trailing_stop(peak_price: float | None, current_price: float | None) -> bool:
-    return (
-        peak_price is not None
-        and peak_price > 0
-        and current_price is not None
-        and current_price < (peak_price * (1.0 - TRAILING_STOP_PCT))
-    )
-
-
 def should_exit(position: dict[str, Any], current_data: dict[str, float | None]) -> bool:
     entry_price = float(position.get("entry_price", 0) or 0) or None
-    peak_price = float(position.get("peak_price", 0) or 0) or entry_price
     current_price = current_data.get("price")
     sma50 = current_data.get("sma50")
     if should_cut_loss(entry_price, current_price):
         return True
     if should_exit_on_trend_break(current_price, sma50):
-        return True
-    if should_trigger_trailing_stop(peak_price, current_price):
         return True
     return False
 
@@ -178,6 +166,7 @@ def merge_rebalanced_portfolio(
     frames: dict[str, pd.DataFrame],
     current_date: pd.Timestamp,
     max_positions: int,
+    max_replacements: int = MAX_REPLACEMENTS,
 ) -> list[dict[str, Any]]:
     """Merge old and new portfolios to reduce turnover while preserving quality."""
 
@@ -206,12 +195,15 @@ def merge_rebalanced_portfolio(
             kept["holding_days"] = int(old_position.get("holding_days", 0) or 0)
             old_weight = float(old_position.get("weight", 0) or 0)
             kept["weight"] = max(float(kept.get("weight", 0) or 0), old_weight * KEEP_WEIGHT_FLOOR_RATIO)
-            if kept["holding_days"] > HOLD_BONUS_DAYS:
-                kept["weight"] = float(kept.get("weight", 0) or 0) * HOLD_BONUS_MULTIPLIER
             updated.append(kept)
 
     existing_symbols = {str(item.get("symbol", "")).upper() for item in updated}
+    replacements_added = 0
     for new_position in new_active:
+        if replacements_added >= max_replacements:
+            break
+        if len(updated) >= max_positions:
+            break
         symbol = str(new_position.get("symbol", "")).upper()
         if symbol in existing_symbols:
             continue
@@ -219,8 +211,7 @@ def merge_rebalanced_portfolio(
         added["holding_days"] = 0
         updated.append(added)
         existing_symbols.add(symbol)
-        if len(updated) >= max_positions:
-            break
+        replacements_added += 1
 
     if not updated:
         return [dict(item) for item in new_portfolio]
