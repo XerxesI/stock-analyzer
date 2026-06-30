@@ -42,10 +42,12 @@ def run(
 
     print(f"TOP BUY OPPORTUNITIES ({display_name}):")
     for index, item in enumerate(ranked, start=1):
+        selection_mode = item.get("selection_mode")
+        override_note = f", mode {selection_mode}" if selection_mode else ""
         print(
             f"{index}. {item['symbol']} -> {item['signal']} "
             f"(rank {float(item.get('rank', 0) or 0):.2f}, confidence {float(item.get('confidence', 0) or 0):.2f}, "
-            f"type {item.get('opportunity_type', 'mixed')})"
+            f"type {item.get('opportunity_type', 'mixed')}{override_note})"
         )
 
     if not ranked:

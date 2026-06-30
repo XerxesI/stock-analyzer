@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import yfinance as yf
@@ -9,7 +10,7 @@ import yfinance as yf
 from cache_utils import TTLCache
 
 
-FUNDAMENTALS_TTL_SECONDS = 3600
+FUNDAMENTALS_TTL_SECONDS = 86400
 _fundamentals_cache: TTLCache[str, dict[str, float | None]] = TTLCache(
     maxsize=512,
     default_ttl_seconds=FUNDAMENTALS_TTL_SECONDS,
@@ -59,62 +60,76 @@ def get_fundamentals(symbol: str) -> dict[str, float | None]:
     return dict(snapshot)
 
 
-def _normalize_score(raw_score: int, max_abs: int = 4) -> float:
+def _normalize_score(raw_score: float, max_abs: int = 4) -> float:
     normalized = (raw_score + max_abs) / (2 * max_abs)
     return round(max(0.0, min(1.0, normalized)), 2)
 
 
-def score_fundamentals(fundamentals: dict[str, float | None]) -> dict[str, object]:
+def _clamp(value: float, low: float = -1.0, high: float = 1.0) -> float:
+    return max(low, min(high, value))
+
+
+def score_fundamentals(
+    fundamentals: dict[str, float | None],
+    penalize_missing: bool = False,
+    missing_penalty_weight: float = 0.15,
+) -> dict[str, object]:
     """Score fundamentals across valuation, growth, quality, and risk."""
 
-    raw_score = 0
+    factor_scores: dict[str, float] = {
+        "valuation": 0.0,
+        "growth": 0.0,
+        "quality": 0.0,
+        "risk": 0.0,
+    }
     reasons: list[str] = []
 
     pe = fundamentals.get("pe")
     if pe is None:
         reasons.append("Valuation: P/E unavailable.")
-    elif pe < 20:
-        raw_score += 1
-        reasons.append(f"Valuation: P/E {pe:.2f} is attractive (<20).")
-    elif pe > 40:
-        raw_score -= 1
-        reasons.append(f"Valuation: P/E {pe:.2f} is expensive (>40).")
     else:
-        reasons.append(f"Valuation: P/E {pe:.2f} is neutral.")
+        factor_scores["valuation"] = _clamp((20.0 - pe) / 20.0)
+        reasons.append(f"Valuation: P/E {pe:.2f} scored {factor_scores['valuation']:+.2f}.")
 
     revenue_growth = fundamentals.get("revenue_growth")
     if revenue_growth is None:
         reasons.append("Growth: revenue growth unavailable.")
-    elif revenue_growth > 0.10:
-        raw_score += 1
-        reasons.append(f"Growth: revenue growth {revenue_growth:.2%} is strong (>10%).")
-    elif revenue_growth < 0:
-        raw_score -= 1
-        reasons.append(f"Growth: revenue growth {revenue_growth:.2%} is negative.")
     else:
-        reasons.append(f"Growth: revenue growth {revenue_growth:.2%} is moderate.")
+        factor_scores["growth"] = _clamp(math.tanh(revenue_growth * 3.0))
+        reasons.append(f"Growth: revenue growth {revenue_growth:.2%} scored {factor_scores['growth']:+.2f}.")
 
     roe = fundamentals.get("roe")
     if roe is None:
         reasons.append("Quality: ROE unavailable.")
-    elif roe > 0.15:
-        raw_score += 1
-        reasons.append(f"Quality: ROE {roe:.2%} is strong (>15%).")
     else:
-        reasons.append(f"Quality: ROE {roe:.2%} is below preferred threshold.")
+        factor_scores["quality"] = _clamp((roe - 0.15) / 0.15)
+        reasons.append(f"Quality: ROE {roe:.2%} scored {factor_scores['quality']:+.2f}.")
 
     debt_to_equity = fundamentals.get("debt_to_equity")
     if debt_to_equity is None:
         reasons.append("Risk: debt-to-equity unavailable.")
-    elif debt_to_equity > 2:
-        raw_score -= 1
-        reasons.append(f"Risk: debt-to-equity {debt_to_equity:.2f} is elevated (>2).")
     else:
-        reasons.append(f"Risk: debt-to-equity {debt_to_equity:.2f} is acceptable.")
+        factor_scores["risk"] = _clamp((2.0 - debt_to_equity) / 2.0)
+        reasons.append(f"Risk: debt-to-equity {debt_to_equity:.2f} scored {factor_scores['risk']:+.2f}.")
+
+    raw_score = sum(factor_scores.values())
+    missing_fields = [key for key, value in fundamentals.items() if value is None]
+    missing_ratio = len(missing_fields) / len(_FUNDAMENTAL_KEYS)
+    fundamental_score = _normalize_score(raw_score)
+    if penalize_missing and missing_ratio > 0:
+        fundamental_score = round(max(0.0, fundamental_score - (missing_ratio * missing_penalty_weight)), 2)
+        reasons.append(
+            f"Missing-data penalty applied ({missing_ratio:.0%} missing, weight {missing_penalty_weight:.2f})."
+        )
+    else:
+        reasons.append(f"Missing fundamentals: {len(missing_fields)}/{len(_FUNDAMENTAL_KEYS)} ({missing_ratio:.0%}).")
 
     return {
-        "fundamental_score": _normalize_score(raw_score),
-        "raw_score": raw_score,
+        "fundamental_score": fundamental_score,
+        "raw_score": round(raw_score, 2),
+        "factor_scores": factor_scores,
+        "missing_fundamentals_ratio": round(missing_ratio, 2),
+        "missing_fundamentals_fields": missing_fields,
         "reasons": reasons,
     }
 

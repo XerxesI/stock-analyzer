@@ -21,6 +21,8 @@ from strategy import generate_signal
 
 DEFAULT_PERIOD = "1y"
 RANK_LIMIT = 1.0
+PENALIZE_MISSING_FUNDAMENTALS = False
+MISSING_FUNDAMENTALS_PENALTY_WEIGHT = 0.15
 MAX_WORKERS = ANALYSIS_BATCH_WORKERS
 _ANALYSIS_SEMAPHORE = BoundedSemaphore(GLOBAL_ANALYSIS_CONCURRENCY)
 _METRICS_LOCK = Lock()
@@ -107,7 +109,7 @@ def normalize_rank(signal_data: dict[str, object]) -> float:
 def combine_hybrid_rank(technical_rank: float, fundamental_score: float) -> float:
     """Combine technical and fundamentals into one interpretable hybrid rank."""
 
-    hybrid_rank = (technical_rank * 0.7) + (fundamental_score * 0.3)
+    hybrid_rank = technical_rank * (0.5 + (0.5 * fundamental_score))
     return round(min(RANK_LIMIT, max(0.0, hybrid_rank)), 2)
 
 
@@ -128,11 +130,16 @@ def analyze_symbol_data(
             enriched_data = calculate_indicators(raw_data)
             signal_data = generate_signal(enriched_data, market_context=market_context)
             fundamentals = get_fundamentals(symbol)
-            fundamental_details = score_fundamentals(fundamentals)
+            fundamental_details = score_fundamentals(
+                fundamentals,
+                penalize_missing=PENALIZE_MISSING_FUNDAMENTALS,
+                missing_penalty_weight=MISSING_FUNDAMENTALS_PENALTY_WEIGHT,
+            )
             technical_rank = normalize_rank(signal_data)
+            fundamental_score = float(fundamental_details.get("fundamental_score", 0.5) or 0.5)
             rank = combine_hybrid_rank(
                 technical_rank=technical_rank,
-                fundamental_score=float(fundamental_details.get("fundamental_score", 0.5) or 0.5),
+                fundamental_score=fundamental_score,
             )
             technical_score = signal_data.get("technical_score", signal_data.get("score"))
             result = {
@@ -157,8 +164,11 @@ def analyze_symbol_data(
                 "market_bias": signal_data.get("market_bias"),
                 "technical_rank": technical_rank,
                 "fundamentals": fundamentals,
-                "fundamental_score": fundamental_details.get("fundamental_score"),
+                "fundamental_score": fundamental_score,
                 "fundamental_raw_score": fundamental_details.get("raw_score"),
+                "fundamental_factor_scores": fundamental_details.get("factor_scores", {}),
+                "missing_fundamentals_ratio": fundamental_details.get("missing_fundamentals_ratio"),
+                "missing_fundamentals_fields": fundamental_details.get("missing_fundamentals_fields", []),
                 "fundamental_reasons": fundamental_details.get("reasons", []),
                 "rank": rank,
                 "confidence_interpretation": confidence_interpretation(signal_data.get("confidence_label")),

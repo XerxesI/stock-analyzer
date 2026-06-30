@@ -29,6 +29,9 @@ def build_explanation(signal_data: dict[str, Any]) -> str:
     technical_rank = signal_data.get("technical_rank")
     fundamental_score = signal_data.get("fundamental_score")
     fundamental_raw_score = signal_data.get("fundamental_raw_score")
+    fundamental_factor_scores = signal_data.get("fundamental_factor_scores") or {}
+    missing_fundamentals_ratio = signal_data.get("missing_fundamentals_ratio")
+    missing_fundamentals_fields = signal_data.get("missing_fundamentals_fields") or []
     fundamental_reasons = signal_data.get("fundamental_reasons") or []
     fundamentals = signal_data.get("fundamentals") or {}
 
@@ -126,12 +129,22 @@ def build_explanation(signal_data: dict[str, Any]) -> str:
         lines.append(
             f"Fundamental score: {float(fundamental_score):.2f}"
             + (
-                f" (raw {int(fundamental_raw_score)})"
+                f" (raw {float(fundamental_raw_score):.2f})"
                 if isinstance(fundamental_raw_score, (int, float))
                 else ""
             )
             + "."
         )
+    if isinstance(fundamental_factor_scores, dict) and fundamental_factor_scores:
+        lines.append(
+            "Fundamental factor scores: "
+            + ", ".join(f"{name}={float(value):+.2f}" for name, value in fundamental_factor_scores.items())
+            + "."
+        )
+    if isinstance(missing_fundamentals_ratio, (int, float)):
+        lines.append(f"Missing fundamentals ratio: {float(missing_fundamentals_ratio):.0%}.")
+    if missing_fundamentals_fields:
+        lines.append("Missing fundamentals fields: " + ", ".join(str(field) for field in missing_fundamentals_fields))
     if fundamental_reasons:
         lines.append("Fundamental factors: " + " ".join(str(reason) for reason in fundamental_reasons))
 
