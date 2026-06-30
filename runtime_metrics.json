@@ -1,9 +1,9 @@
 {
   "analysis": {
-    "batch_requests": 152,
-    "symbol_failures": 104,
-    "symbol_latency_ms_total": 9328419.814700095,
-    "symbol_latency_samples": 1768,
-    "symbol_requests": 1768
+    "batch_requests": 171,
+    "symbol_failures": 117,
+    "symbol_latency_ms_total": 10751593.578200042,
+    "symbol_latency_samples": 1989,
+    "symbol_requests": 1989
   }
 }

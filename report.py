@@ -19,6 +19,7 @@ def build_explanation(signal_data: dict[str, Any]) -> str:
     market_context_error = signal_data.get("market_context_error")
     rank = signal_data.get("rank")
     opportunity_type = signal_data.get("opportunity_type")
+    investment_type = signal_data.get("investment_type")
     reasons = signal_data.get("reasons") or []
     rsi = signal_data.get("rsi")
     price = signal_data.get("price")
@@ -110,6 +111,8 @@ def build_explanation(signal_data: dict[str, Any]) -> str:
 
     if opportunity_type:
         lines.append(f"Opportunity type: {opportunity_type}.")
+    if investment_type:
+        lines.append(f"Investment type: {investment_type}.")
 
     if confidence_interpretation:
         lines.append(f"Confidence interpretation: {confidence_interpretation}.")
@@ -186,6 +189,8 @@ def build_explanation(signal_data: dict[str, Any]) -> str:
         lines.append(f"Fundamental completeness: {float(fundamental_completeness):.0%}.")
     if isinstance(fundamental_interaction_penalty, (int, float)) and float(fundamental_interaction_penalty) != 0:
         lines.append(f"Interaction adjustment: {float(fundamental_interaction_penalty):+.2f}.")
+        if float(fundamental_interaction_penalty) < 0:
+            lines.append("Factor interaction penalty applied due to conflicting signals.")
     if isinstance(missing_fundamentals_ratio, (int, float)):
         lines.append(f"Missing fundamentals ratio: {float(missing_fundamentals_ratio):.0%}.")
     if missing_fundamentals_fields:
