@@ -38,6 +38,8 @@ REPLACEMENT_RATIO = 0.25
 WEAK_HOLD_DAYS = 28
 WEAK_MIN_GAIN = 0.98
 BETTER_RANK_GAP = 0.15
+MIN_ENTRY_RANK = 0.60
+UNKNOWN_SECTOR_RANK_PENALTY = 0.80
 
 
 def _normalize_download_frame(data: pd.DataFrame) -> pd.DataFrame:
@@ -137,7 +139,7 @@ def _price_snapshot(frame: pd.DataFrame, current_date: pd.Timestamp) -> dict[str
 
 
 def should_exit_on_trend_break(price: float | None, sma50: float | None) -> bool:
-    return price is not None and sma50 is not None and price < sma50
+    return price is not None and sma50 is not None and price < (sma50 * 0.97)
 
 
 def should_cut_loss(entry_price: float | None, current_price: float | None) -> bool:
@@ -283,6 +285,8 @@ def _build_opportunity(
     bias_adjusted_rank = apply_fundamental_bias_adjustment(base_hybrid_rank, fundamental_score)
     stretched_rank = stretch_rank_distribution(bias_adjusted_rank)
     final_rank = apply_completeness_penalty(stretched_rank, completeness)
+    if not fundamental_sector or fundamental_sector == "unknown":
+        final_rank *= UNKNOWN_SECTOR_RANK_PENALTY
     final_rank = round(min(1.0, max(0.0, final_rank)), 2)
 
     technical_score = signal_data.get("technical_score", signal_data.get("score"))
@@ -320,9 +324,32 @@ def _build_opportunity(
         "market_context": market_context,
     }
 
-    if not is_buy_opportunity(opportunity, min_confidence=0.5, min_rank=0.45):
+    if not is_buy_opportunity(opportunity, min_confidence=0.5, min_rank=MIN_ENTRY_RANK):
         return None
     return opportunity
+
+
+def _force_open_top_candidates(
+    opportunities: list[dict[str, Any]],
+    max_positions: int,
+) -> list[dict[str, Any]]:
+    """Fallback entry when strict filters leave the portfolio empty."""
+
+    ranked = sorted(
+        (dict(item) for item in opportunities if float(item.get("rank", 0) or 0) >= MIN_ENTRY_RANK),
+        key=lambda item: float(item.get("rank", 0) or 0),
+        reverse=True,
+    )[:max_positions]
+    if not ranked:
+        return []
+    total_rank_sq = sum((float(item.get("rank", 0) or 0) ** 2) for item in ranked)
+    if total_rank_sq <= 0:
+        return []
+    for item in ranked:
+        rank = float(item.get("rank", 0) or 0)
+        item["weight"] = (rank**2) / total_rank_sq
+        item["holding_days"] = int(item.get("holding_days", 0) or 0)
+    return ranked
 
 
 def scan_market_at_date(
@@ -556,7 +583,14 @@ def run_backtest(
         active_positions = [p for p in current_portfolio if str(p.get("symbol", "")).upper() != "CASH"]
         if not active_positions and candidate_portfolio:
             # freeze/hold testis peab see avama positsioonid ka siis, kui rebalance_days on suur
-            current_portfolio = allocate_capital(candidate_portfolio, capital, current_date, frames)
+            if all(str(item.get("symbol", "")).upper() == "CASH" for item in candidate_portfolio):
+                forced = _force_open_top_candidates(opportunities, max_positions=max_positions)
+                if forced:
+                    current_portfolio = allocate_capital(forced, capital, current_date, frames)
+                else:
+                    current_portfolio = allocate_capital(candidate_portfolio, capital, current_date, frames)
+            else:
+                current_portfolio = allocate_capital(candidate_portfolio, capital, current_date, frames)
 
         # 2) REBALANCE ainult perioodiliselt
         elif is_rebalance_day(current_date, start, rebalance_days) and candidate_portfolio:
