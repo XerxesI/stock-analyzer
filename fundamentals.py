@@ -28,6 +28,12 @@ _FUNDAMENTAL_KEYS: dict[str, str] = {
     "debt_to_equity": "debtToEquity",
 }
 SUPPORTED_SCORING_MODES = ("growth", "balanced", "defensive")
+SECTOR_RISK_SCALES = {
+    "energy": 300,
+    "utilities": 300,
+    "financial": 200,
+    "default": 2,
+}
 _MODE_WEIGHTS: dict[str, dict[str, float]] = {
     "growth": {"valuation": 0.5, "growth": 1.5, "quality": 1.0, "risk": 0.5},
     "balanced": {"valuation": 1.0, "growth": 1.0, "quality": 1.0, "risk": 1.0},
@@ -109,6 +115,7 @@ def classify_fundamental_bias(
 def score_fundamental_factors(
     fundamentals: dict[str, float | None],
     mode: str = "balanced",
+    sector: str | None = None,
     penalize_missing: bool = False,
     missing_penalty_weight: float = 0.15,
 ) -> dict[str, object]:
@@ -126,27 +133,41 @@ def score_fundamental_factors(
     pe = fundamentals.get("pe")
     revenue_growth = fundamentals.get("revenue_growth")
     roe = fundamentals.get("roe")
+    profit_margin = fundamentals.get("profit_margin")
     debt_to_equity = fundamentals.get("debt_to_equity")
 
     factor_scores: dict[str, float] = {
         "valuation": _normalize_inverse(pe, low=10.0, high=40.0),
         "growth": _normalize(revenue_growth, low=-0.1, high=0.3),
-        "quality": _normalize(roe, low=0.05, high=0.25),
-        "risk": _normalize_inverse(debt_to_equity, low=0.0, high=2.0),
+        "quality": round((0.6 * _normalize(roe, low=0.05, high=0.25)) + (0.4 * _normalize(profit_margin, low=0.05, high=0.3)), 2),
+        "risk": _normalize_inverse(debt_to_equity, low=0.0, high=float(SECTOR_RISK_SCALES.get((sector or "default").lower().strip(), SECTOR_RISK_SCALES["default"]))),
     }
 
     reasons.append(f"Valuation factor: {factor_scores['valuation']:.2f} (P/E={pe if pe is not None else 'N/A'}).")
     reasons.append(
         f"Growth factor: {factor_scores['growth']:.2f} (rev growth={f'{revenue_growth:.2%}' if revenue_growth is not None else 'N/A'})."
     )
-    reasons.append(f"Quality factor: {factor_scores['quality']:.2f} (ROE={f'{roe:.2%}' if roe is not None else 'N/A'}).")
     reasons.append(
-        f"Risk factor: {factor_scores['risk']:.2f} (debt/equity={f'{debt_to_equity:.2f}' if debt_to_equity is not None else 'N/A'})."
+        f"Quality factor: {factor_scores['quality']:.2f} (ROE={f'{roe:.2%}' if roe is not None else 'N/A'}, margin={f'{profit_margin:.2%}' if profit_margin is not None else 'N/A'})."
+    )
+    reasons.append(
+        f"Risk factor: {factor_scores['risk']:.2f} (debt/equity={f'{debt_to_equity:.2f}' if debt_to_equity is not None else 'N/A'}, scale={SECTOR_RISK_SCALES.get((sector or 'default').lower().strip(), SECTOR_RISK_SCALES['default'])})."
     )
 
     weighted_scores = {factor: factor_scores[factor] * weights[factor] for factor in factor_scores}
     total_weight = sum(weights.values())
     weighted_score = sum(weighted_scores.values()) / total_weight if total_weight else 0.5
+    interaction_penalty = 0.0
+    if factor_scores["growth"] > 0.7 and factor_scores["risk"] < 0.3:
+        interaction_penalty -= 0.1
+        reasons.append("Interaction penalty: high growth with elevated financial risk.")
+    if factor_scores["valuation"] > 0.7 and factor_scores["quality"] < 0.3:
+        interaction_penalty -= 0.1
+        reasons.append("Interaction penalty: possible value trap (cheap but weak quality).")
+    if factor_scores["growth"] > 0.7 and factor_scores["quality"] > 0.7:
+        interaction_penalty += 0.05
+        reasons.append("Interaction bonus: strong growth and high quality align.")
+    weighted_score = max(0.0, min(1.0, weighted_score + interaction_penalty))
     missing_fields = [key for key, value in fundamentals.items() if value is None]
     missing_ratio = len(missing_fields) / len(_FUNDAMENTAL_KEYS)
     fundamental_score = round(max(0.0, min(1.0, weighted_score)), 2)
@@ -165,6 +186,7 @@ def score_fundamental_factors(
         "factors": factor_scores,
         "weighted_factor_scores": weighted_scores,
         "weights": weights,
+        "interaction_penalty": round(interaction_penalty, 2),
         "missing_fundamentals_ratio": round(missing_ratio, 2),
         "fundamental_completeness": round(1.0 - missing_ratio, 2),
         "missing_fundamentals_fields": missing_fields,
@@ -175,6 +197,7 @@ def score_fundamental_factors(
 def score_fundamentals(
     fundamentals: dict[str, float | None],
     mode: str = "balanced",
+    sector: str | None = None,
     penalize_missing: bool = False,
     missing_penalty_weight: float = 0.15,
 ) -> dict[str, object]:
@@ -183,6 +206,7 @@ def score_fundamentals(
     return score_fundamental_factors(
         fundamentals,
         mode=mode,
+        sector=sector,
         penalize_missing=penalize_missing,
         missing_penalty_weight=missing_penalty_weight,
     )
