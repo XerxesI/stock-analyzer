@@ -9,7 +9,7 @@ from time import perf_counter
 from typing import Any, Sequence
 
 from data_fetcher import get_stock_data
-from fundamentals import get_fundamentals, score_fundamentals
+from fundamentals import classify_fundamental_bias, get_fundamentals, score_fundamentals
 from indicators import calculate_indicators
 from market_context import resolve_market_context
 from metrics_store import load_metrics_section, persist_metrics_section
@@ -23,6 +23,7 @@ DEFAULT_PERIOD = "1y"
 RANK_LIMIT = 1.0
 PENALIZE_MISSING_FUNDAMENTALS = False
 MISSING_FUNDAMENTALS_PENALTY_WEIGHT = 0.15
+BIAS_RANK_ADJUSTMENT = 0.05
 MAX_WORKERS = ANALYSIS_BATCH_WORKERS
 _ANALYSIS_SEMAPHORE = BoundedSemaphore(GLOBAL_ANALYSIS_CONCURRENCY)
 _METRICS_LOCK = Lock()
@@ -106,11 +107,25 @@ def normalize_rank(signal_data: dict[str, object]) -> float:
     return round(min(RANK_LIMIT, rank), 2)
 
 
-def combine_hybrid_rank(technical_rank: float, fundamental_score: float) -> float:
+def combine_hybrid_rank(technical_rank: float, fundamental_score: float | None) -> float:
     """Combine technical and fundamentals into one interpretable hybrid rank."""
 
-    hybrid_rank = technical_rank * (0.5 + (0.5 * fundamental_score))
+    if fundamental_score is None:
+        hybrid_rank = technical_rank
+    else:
+        hybrid_rank = technical_rank * (0.5 + (0.5 * fundamental_score))
     return round(min(RANK_LIMIT, max(0.0, hybrid_rank)), 2)
+
+
+def apply_fundamental_bias_adjustment(rank: float, fundamental_bias: str) -> float:
+    """Apply small bias-based rank adjustment without dominating technical logic."""
+
+    adjusted_rank = rank
+    if fundamental_bias == "bullish":
+        adjusted_rank = rank * (1.0 + BIAS_RANK_ADJUSTMENT)
+    elif fundamental_bias == "bearish":
+        adjusted_rank = rank * (1.0 - BIAS_RANK_ADJUSTMENT)
+    return round(min(RANK_LIMIT, max(0.0, adjusted_rank)), 2)
 
 
 def analyze_symbol_data(
@@ -136,11 +151,14 @@ def analyze_symbol_data(
                 missing_penalty_weight=MISSING_FUNDAMENTALS_PENALTY_WEIGHT,
             )
             technical_rank = normalize_rank(signal_data)
-            fundamental_score = float(fundamental_details.get("fundamental_score", 0.5) or 0.5)
-            rank = combine_hybrid_rank(
+            raw_fundamental_score = fundamental_details.get("fundamental_score")
+            fundamental_score = float(raw_fundamental_score) if isinstance(raw_fundamental_score, (int, float)) else None
+            fundamental_bias = classify_fundamental_bias(fundamental_score)
+            base_hybrid_rank = combine_hybrid_rank(
                 technical_rank=technical_rank,
                 fundamental_score=fundamental_score,
             )
+            rank = apply_fundamental_bias_adjustment(base_hybrid_rank, fundamental_bias)
             technical_score = signal_data.get("technical_score", signal_data.get("score"))
             result = {
                 "symbol": symbol.upper(),
@@ -165,11 +183,13 @@ def analyze_symbol_data(
                 "technical_rank": technical_rank,
                 "fundamentals": fundamentals,
                 "fundamental_score": fundamental_score,
+                "fundamental_bias": fundamental_bias,
                 "fundamental_raw_score": fundamental_details.get("raw_score"),
                 "fundamental_factor_scores": fundamental_details.get("factor_scores", {}),
                 "missing_fundamentals_ratio": fundamental_details.get("missing_fundamentals_ratio"),
                 "missing_fundamentals_fields": fundamental_details.get("missing_fundamentals_fields", []),
                 "fundamental_reasons": fundamental_details.get("reasons", []),
+                "base_hybrid_rank": base_hybrid_rank,
                 "rank": rank,
                 "confidence_interpretation": confidence_interpretation(signal_data.get("confidence_label")),
                 "opportunity_type": classify_opportunity({**signal_data, "rank": rank}),

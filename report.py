@@ -28,6 +28,8 @@ def build_explanation(signal_data: dict[str, Any]) -> str:
     volume_sma20 = signal_data.get("volume_sma20")
     technical_rank = signal_data.get("technical_rank")
     fundamental_score = signal_data.get("fundamental_score")
+    fundamental_bias = signal_data.get("fundamental_bias")
+    base_hybrid_rank = signal_data.get("base_hybrid_rank")
     fundamental_raw_score = signal_data.get("fundamental_raw_score")
     fundamental_factor_scores = signal_data.get("fundamental_factor_scores") or {}
     missing_fundamentals_ratio = signal_data.get("missing_fundamentals_ratio")
@@ -89,6 +91,8 @@ def build_explanation(signal_data: dict[str, Any]) -> str:
         lines.append(f"Rank score: {float(rank):.2f}.")
     if technical_rank is not None:
         lines.append(f"Technical rank component: {float(technical_rank):.2f}.")
+    if base_hybrid_rank is not None:
+        lines.append(f"Hybrid rank before bias-adjustment: {float(base_hybrid_rank):.2f}.")
 
     if opportunity_type:
         lines.append(f"Opportunity type: {opportunity_type}.")
@@ -135,6 +139,8 @@ def build_explanation(signal_data: dict[str, Any]) -> str:
             )
             + "."
         )
+    if fundamental_bias:
+        lines.append(f"Fundamental bias: {fundamental_bias}.")
     if isinstance(fundamental_factor_scores, dict) and fundamental_factor_scores:
         lines.append(
             "Fundamental factor scores: "
@@ -147,5 +153,14 @@ def build_explanation(signal_data: dict[str, Any]) -> str:
         lines.append("Missing fundamentals fields: " + ", ".join(str(field) for field in missing_fundamentals_fields))
     if fundamental_reasons:
         lines.append("Fundamental factors: " + " ".join(str(reason) for reason in fundamental_reasons))
+
+    if signal in {"BUY", "STRONG BUY"} and fundamental_bias == "bearish":
+        lines.append("Note: Strong technical signal but weak fundamentals (possible short-term trade).")
+    elif signal in {"SELL", "STRONG SELL"} and fundamental_bias == "bullish":
+        lines.append("Note: Bearish technical signal but strong fundamentals (possible long-term opportunity).")
+    elif fundamental_bias == "bullish":
+        lines.append("Fundamentals support the current setup.")
+    elif fundamental_bias == "bearish":
+        lines.append("Fundamentals weaken the current setup.")
 
     return "\n".join(lines) if lines else "No clear signal was generated."

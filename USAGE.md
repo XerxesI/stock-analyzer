@@ -106,6 +106,7 @@ python scan_all.py --confidence 0.5 --period 1y --top 25
 
 **Rank:** 0.0–1.0 skoor, kõrgem = parem
 - Rank on nüüd **hybrid modulaator**: `technical_rank * (0.5 + 0.5 * fundamental_score)`
+- `fundamental_bias`: bullish / neutral / bearish (sekundaarne conviction-kiht)
 
 **Type:** trend_following | reversal | mixed_buy
 
