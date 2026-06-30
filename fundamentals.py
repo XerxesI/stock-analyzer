@@ -11,7 +11,7 @@ from cache_utils import TTLCache
 
 
 FUNDAMENTALS_TTL_SECONDS = 86400
-_fundamentals_cache: TTLCache[str, dict[str, float | None]] = TTLCache(
+_fundamentals_cache: TTLCache[str, dict[str, Any]] = TTLCache(
     maxsize=512,
     default_ttl_seconds=FUNDAMENTALS_TTL_SECONDS,
     name="fundamentals",
@@ -52,17 +52,27 @@ def _safe_float(payload: dict[str, Any], key: str) -> float | None:
     return None
 
 
-def _fetch_fundamentals(symbol: str) -> dict[str, float | None]:
+def extract_real_sector(info: dict[str, Any] | None) -> str:
+    """Extract the real sector from a Yahoo Finance info payload."""
+
+    if not info:
+        return ""
+    return str(info.get("sector") or "").lower().strip()
+
+
+def _fetch_fundamentals(symbol: str) -> dict[str, Any]:
     try:
         info = yf.Ticker(symbol).info
     except (ConnectionError, TimeoutError, OSError, RuntimeError, ValueError, KeyError, TypeError):
-        return {field: None for field in _FUNDAMENTAL_KEYS}
+        return {field: None for field in _FUNDAMENTAL_KEYS} | {"sector": ""}
     if not isinstance(info, dict):
-        return {field: None for field in _FUNDAMENTAL_KEYS}
-    return {field: _safe_float(info, source_key) for field, source_key in _FUNDAMENTAL_KEYS.items()}
+        return {field: None for field in _FUNDAMENTAL_KEYS} | {"sector": ""}
+    fundamentals = {field: _safe_float(info, source_key) for field, source_key in _FUNDAMENTAL_KEYS.items()}
+    fundamentals["sector"] = extract_real_sector(info)
+    return fundamentals
 
 
-def get_fundamentals(symbol: str) -> dict[str, float | None]:
+def get_fundamentals(symbol: str) -> dict[str, Any]:
     """Fetch and normalize selected fundamental metrics for one symbol."""
 
     cleaned_symbol = symbol.strip().upper()
@@ -124,7 +134,7 @@ def classify_fundamental_bias(
 
 
 def score_fundamental_factors(
-    fundamentals: dict[str, float | None],
+    fundamentals: dict[str, Any],
     mode: str = "balanced",
     sector: str | None = None,
     penalize_missing: bool = False,
@@ -209,7 +219,7 @@ def score_fundamental_factors(
 
 
 def score_fundamentals(
-    fundamentals: dict[str, float | None],
+    fundamentals: dict[str, Any],
     mode: str = "balanced",
     sector: str | None = None,
     penalize_missing: bool = False,

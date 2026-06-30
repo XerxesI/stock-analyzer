@@ -248,7 +248,7 @@ def analyze_symbol_data(
             signal_data = generate_signal(enriched_data, market_context=market_context)
             fundamentals = get_fundamentals(symbol)
             effective_mode = resolve_scoring_mode(mode, market=market, universe_category=universe_category)
-            fundamental_sector = resolve_fundamental_sector(market, universe_category)
+            fundamental_sector = str(fundamentals.get("sector") or "").lower().strip() or None
             fundamental_details = score_fundamental_factors(
                 fundamentals,
                 mode=effective_mode,

@@ -158,6 +158,7 @@ def build_explanation(signal_data: dict[str, Any]) -> str:
             )
             + "."
         )
+    lines.append(f"Sector: {fundamental_sector or 'unknown'}.")
     if fundamental_sector or fundamental_risk_scale is not None:
         lines.append(
             f"Risk model scaling applied for sector: {fundamental_sector or 'n/a'} (scale={fundamental_risk_scale})."

@@ -20,6 +20,7 @@ python finder.py --market ai --mode growth --min-growth-score 0.55 --max-risk-sc
 # KÕIKI indekseid korraga (deduplicate!)
 python scan_all.py --confidence 0.5 --top 20
 python scan_all.py --mode auto --confidence 0.5 --top 20
+python scan_all.py --mode auto --confidence 0.5 --top 20 --portfolio
 ```
 
 ---
