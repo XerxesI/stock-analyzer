@@ -34,11 +34,10 @@ KEEP_RANK_THRESHOLD = 0.45
 LOSS_CUT_PCT = 0.08
 KEEP_WEIGHT_FLOOR_RATIO = 0.80
 MAX_REPLACEMENTS = 2
-REPLACEMENT_RATIO = 0.40
-WEAK_HOLD_DAYS = 14
-WEAK_MIN_GAIN = 1.02
-BORDERLINE_MAX_HOLD_DAYS = 21
-BETTER_RANK_GAP = 0.10
+REPLACEMENT_RATIO = 0.25
+WEAK_HOLD_DAYS = 28
+WEAK_MIN_GAIN = 0.98
+BETTER_RANK_GAP = 0.15
 
 
 def _normalize_download_frame(data: pd.DataFrame) -> pd.DataFrame:
@@ -112,13 +111,9 @@ def _cash_only_portfolio(capital: float) -> list[dict[str, Any]]:
 def should_keep_position(old_position: dict[str, Any], new_position: dict[str, Any]) -> bool:
     """Keep an existing holding only if refreshed signal quality is still acceptable."""
 
-    old_holding_days = int(old_position.get("holding_days", 0) or 0)
+    _ = old_position
     new_rank = float(new_position.get("rank", 0) or 0)
-    if new_rank >= 0.55:
-        return True
-    if new_rank >= 0.50 and old_holding_days < BORDERLINE_MAX_HOLD_DAYS:
-        return True
-    return False
+    return new_rank >= 0.50
 
 
 def _normalize_weights(positions: list[dict[str, Any]]) -> list[dict[str, Any]]:
