@@ -40,7 +40,9 @@ WEAK_MIN_GAIN = 0.98
 BETTER_RANK_GAP = 0.15
 MIN_ENTRY_RANK = 0.60
 UNKNOWN_SECTOR_RANK_PENALTY = 0.80
-MOMENTUM_RANK_WEIGHT = 0.30
+MOMENTUM_RANK_WEIGHT = 0.20
+BEAR_MARKET_MIN_RANK = 0.70
+MIN_ACTIVE_POSITIONS = 4
 
 
 def _normalize_download_frame(data: pd.DataFrame) -> pd.DataFrame:
@@ -142,8 +144,8 @@ def _price_snapshot(frame: pd.DataFrame, current_date: pd.Timestamp) -> dict[str
 def _momentum_component(price: float | None, sma50: float | None) -> float:
     if price is None or sma50 is None or sma50 <= 0:
         return 0.5
-    ratio = price / sma50
-    normalized = (ratio - 0.95) / 0.15
+    momentum = (price / sma50) - 1.0
+    normalized = (max(-0.2, min(0.2, momentum)) + 0.2) / 0.4
     return max(0.0, min(1.0, normalized))
 
 
@@ -354,11 +356,12 @@ def _build_opportunity(
 def _force_open_top_candidates(
     opportunities: list[dict[str, Any]],
     max_positions: int,
+    min_rank: float = MIN_ENTRY_RANK,
 ) -> list[dict[str, Any]]:
     """Fallback entry when strict filters leave the portfolio empty."""
 
     ranked = sorted(
-        (dict(item) for item in opportunities if float(item.get("rank", 0) or 0) >= MIN_ENTRY_RANK),
+        (dict(item) for item in opportunities if float(item.get("rank", 0) or 0) >= min_rank),
         key=lambda item: float(item.get("rank", 0) or 0),
         reverse=True,
     )[:max_positions]
@@ -596,21 +599,39 @@ def run_backtest(
         update_position_peaks(current_portfolio, current_date, frames)
         capital = compute_portfolio_value(current_portfolio, current_date, frames)
         spy_ok = _is_spy_above_sma200(spy_frame, current_date)
+        effective_min_rank = MIN_ENTRY_RANK if spy_ok else BEAR_MARKET_MIN_RANK
 
         # 1) DAILY entry scan (mitte rebalance-gated)
-        opportunities: list[dict[str, Any]] = []
-        candidate_portfolio: list[dict[str, Any]] = []
-        if spy_ok:
-            opportunities = scan_market_at_date(
-                cleaned_symbols, frames, current_date, mode, spy_frame, debug=debug
+        opportunities = scan_market_at_date(
+            cleaned_symbols, frames, current_date, mode, spy_frame, debug=debug
+        )
+        gated_opportunities = [
+            item for item in opportunities if float(item.get("rank", 0) or 0) >= effective_min_rank
+        ]
+        candidate_portfolio: list[dict[str, Any]] = build_portfolio(
+            gated_opportunities, max_positions=max_positions, debug=debug
+        )
+        candidate_active = [
+            item for item in candidate_portfolio if str(item.get("symbol", "")).upper() != "CASH"
+        ]
+        if len(candidate_active) < MIN_ACTIVE_POSITIONS:
+            forced_candidates = _force_open_top_candidates(
+                opportunities,
+                max_positions=max_positions,
+                min_rank=effective_min_rank,
             )
-            candidate_portfolio = build_portfolio(opportunities, max_positions=max_positions, debug=debug)
+            if forced_candidates:
+                candidate_portfolio = forced_candidates
 
         active_positions = [p for p in current_portfolio if str(p.get("symbol", "")).upper() != "CASH"]
         if not active_positions and candidate_portfolio:
             # freeze/hold testis peab see avama positsioonid ka siis, kui rebalance_days on suur
             if all(str(item.get("symbol", "")).upper() == "CASH" for item in candidate_portfolio):
-                forced = _force_open_top_candidates(opportunities, max_positions=max_positions)
+                forced = _force_open_top_candidates(
+                    opportunities,
+                    max_positions=max_positions,
+                    min_rank=effective_min_rank,
+                )
                 if forced:
                     current_portfolio = allocate_capital(forced, capital, current_date, frames)
                 else:
