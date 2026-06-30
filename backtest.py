@@ -61,6 +61,9 @@ def _normalize_download_frame(data: pd.DataFrame) -> pd.DataFrame:
         raise ValueError(f"Fetched data is missing required columns: {', '.join(missing_columns)}.")
 
     cleaned = frame.loc[:, REQUIRED_COLUMNS].copy()
+    cleaned = cleaned.dropna(subset=["Close"])
+    if cleaned.empty:
+        raise ValueError("No usable Close data returned.")
     cleaned.index = pd.to_datetime(cleaned.index).tz_localize(None)
     return cleaned.sort_index()
 
@@ -283,8 +286,14 @@ def _build_opportunity(
     history = frame.loc[:current_date]
     if history.empty:
         return None
+    history = history.dropna(subset=["Close"])
+    if history.empty:
+        return None
 
-    signal_data = generate_signal(history, market_context=market_context)
+    try:
+        signal_data = generate_signal(history, market_context=market_context)
+    except (ValueError, RuntimeError):
+        return None
     if str(signal_data.get("signal", "HOLD")) not in BUY_SIGNALS:
         return None
 
@@ -404,7 +413,10 @@ def scan_market_at_date(
         frame = frames.get(symbol.upper())
         if frame is None:
             continue
-        opportunity = _build_opportunity(symbol, frame, current_date, mode, market_context)
+        try:
+            opportunity = _build_opportunity(symbol, frame, current_date, mode, market_context)
+        except (ValueError, RuntimeError):
+            continue
         if opportunity is None:
             continue
         if debug:
