@@ -188,7 +188,14 @@ def scan_market_at_date(
     market_context = None
     if not spy_slice.empty:
         spy_signal = generate_signal(spy_slice)
-        market_context = {"bias": spy_signal.get("market_bias", "neutral")}
+        spy_decision = str(spy_signal.get("signal", "HOLD"))
+        if spy_decision in {"BUY", "STRONG BUY"}:
+            bias = "bullish"
+        elif spy_decision in {"SELL", "STRONG SELL"}:
+            bias = "bearish"
+        else:
+            bias = "neutral"
+        market_context = {"bias": bias}
 
     opportunities: list[dict[str, Any]] = []
     for symbol in symbols:
@@ -383,12 +390,16 @@ def run_backtest(
                 current_portfolio = _cash_only_portfolio(capital)
 
         portfolio_value = compute_portfolio_value(current_portfolio, current_date, frames)
+        active_positions = len([pos for pos in current_portfolio if str(pos.get("symbol", "")).upper() != "CASH"])
+        if debug:
+            print(f"{current_date.date()} | positions={active_positions} | value={portfolio_value:.2f}")
         history.append(
             {
                 "date": current_date,
+                "value": portfolio_value,
                 "portfolio_value": portfolio_value,
                 "rebalance": is_rebalance_day(current_date, start, rebalance_days),
-                "positions": len([pos for pos in current_portfolio if str(pos.get("symbol", "")).upper() != "CASH"]),
+                "positions": active_positions,
             }
         )
         current_date += pd.Timedelta(days=1)
