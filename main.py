@@ -7,8 +7,9 @@ from typing import Sequence
 
 from analysis_service import (
     DEFAULT_PERIOD,
+    DEFAULT_SCORING_MODE,
+    SUPPORTED_SCORING_MODES,
     analyze_symbol_data,
-    analyze_symbols_data,
     confidence_interpretation,
 )
 
@@ -49,10 +50,10 @@ def _print_result(symbol: str, signal_data: dict[str, object], explanation: str)
     print("===================================")
 
 
-def analyze_symbol(symbol: str, period: str = DEFAULT_PERIOD) -> None:
+def analyze_symbol(symbol: str, period: str = DEFAULT_PERIOD, mode: str = DEFAULT_SCORING_MODE, debug: bool = False) -> None:
     """Run the full analysis pipeline for a single symbol and print the result."""
 
-    result = analyze_symbol_data(symbol, period)
+    result = analyze_symbol_data(symbol, period, mode=mode, debug=debug)
     _print_result(symbol, result, str(result["explanation"]))
 
 
@@ -66,12 +67,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=DEFAULT_PERIOD,
         help="Yahoo Finance history period (default: 1y).",
     )
+    parser.add_argument(
+        "--mode",
+        default=DEFAULT_SCORING_MODE,
+        choices=list(SUPPORTED_SCORING_MODES),
+        help="Fundamentals scoring mode (growth, balanced, defensive, auto).",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Print per-symbol scoring debug lines.",
+    )
     args = parser.parse_args(argv)
 
     exit_code = 0
     for symbol in args.symbols:
         try:
-            analyze_symbol(symbol, args.period)
+            analyze_symbol(symbol, args.period, mode=args.mode, debug=args.debug)
         except (ValueError, RuntimeError) as exc:
             exit_code = 1
             print("===================================")

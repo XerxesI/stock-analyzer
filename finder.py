@@ -5,8 +5,9 @@ from __future__ import annotations
 import argparse
 from typing import Sequence
 
+from analysis_service import DEFAULT_SCORING_MODE, SUPPORTED_SCORING_MODES
 from opportunity_service import analyze_and_rank_opportunities
-from universes import get_universe, get_universes_by_category, list_universes, UNIVERSES
+from universes import get_meta, get_universe, get_universes_by_category, list_universes, UNIVERSES
 
 
 DEFAULT_PERIOD = "1y"
@@ -19,6 +20,8 @@ def run(
     period: str = DEFAULT_PERIOD,
     symbols: Sequence[str] | None = None,
     category: str | None = None,
+    mode: str = DEFAULT_SCORING_MODE,
+    debug: bool = False,
 ) -> int:
     """Find and print the strongest buy opportunities for a universe or category."""
 
@@ -32,13 +35,25 @@ def run(
             except ValueError:
                 pass
         universe = all_symbols
+        market_name_for_mode = None
+        universe_category_for_mode = category
     else:
         if market is None:
             market = "sp500"
         universe = get_universe(market, symbols)
         display_name = market.upper()
+        market_name_for_mode = market
+        universe_category_for_mode = str(get_meta(market).get("category", "sector"))
 
-    ranked = analyze_and_rank_opportunities(universe, period, top_n=top_n)
+    ranked = analyze_and_rank_opportunities(
+        universe,
+        period,
+        top_n=top_n,
+        mode=mode,
+        market=market_name_for_mode,
+        universe_category=universe_category_for_mode,
+        debug=debug,
+    )
 
     print(f"TOP BUY OPPORTUNITIES ({display_name}):")
     for index, item in enumerate(ranked, start=1):
@@ -88,6 +103,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Yahoo Finance history period (default: 1y).",
     )
     parser.add_argument(
+        "--mode",
+        default=DEFAULT_SCORING_MODE,
+        choices=list(SUPPORTED_SCORING_MODES),
+        help="Fundamentals scoring mode (growth, balanced, defensive, auto).",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Print per-symbol scoring debug lines.",
+    )
+    parser.add_argument(
         "symbols",
         nargs="*",
         help="Optional custom symbols when using --market custom.",
@@ -106,7 +132,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.market = "sp500"
 
     try:
-        return run(args.market, args.top, args.period, args.symbols, args.category)
+        return run(args.market, args.top, args.period, args.symbols, args.category, args.mode, args.debug)
     except (ValueError, RuntimeError) as exc:
         print(f"Error: {exc}")
         return 1

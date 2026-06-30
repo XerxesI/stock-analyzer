@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Sequence
 
-from analysis_service import analyze_symbols_data
+from analysis_service import DEFAULT_SCORING_MODE, analyze_symbols_data
 from opportunities import classify_opportunity, is_buy_opportunity, rank_opportunities
 from strategy import apply_universe_weight
 
@@ -22,6 +22,7 @@ def select_buy_opportunities(
     market: str | None = None,
     universe_category: str | None = None,
     weight_by_universe: bool = False,
+    debug: bool = False,
 ) -> list[dict[str, Any]]:
     """Filter analysis results down to buy opportunities with optional metadata/weighting."""
 
@@ -34,6 +35,7 @@ def select_buy_opportunities(
             min_confidence=min_confidence,
             min_rank=min_rank,
             min_fundamental_score=min_fundamental_score,
+            debug=debug,
         ):
             continue
         candidate = dict(item)
@@ -81,6 +83,7 @@ def analyze_and_rank_opportunities(
     symbols: Sequence[str],
     period: str,
     top_n: int,
+    mode: str = DEFAULT_SCORING_MODE,
     min_confidence: float = DEFAULT_MIN_CONFIDENCE,
     min_rank: float = DEFAULT_MIN_RANK,
     min_fundamental_score: float | None = None,
@@ -88,10 +91,18 @@ def analyze_and_rank_opportunities(
     market: str | None = None,
     universe_category: str | None = None,
     weight_by_universe: bool = False,
+    debug: bool = False,
 ) -> list[dict[str, Any]]:
     """Analyze a symbol list and return ranked buy opportunities."""
 
-    results = analyze_symbols_data(symbols, period)
+    results = analyze_symbols_data(
+        symbols,
+        period,
+        mode=mode,
+        market=market,
+        universe_category=universe_category,
+        debug=debug,
+    )
     selected = select_buy_opportunities(
         results,
         min_confidence=min_confidence,
@@ -100,6 +111,7 @@ def analyze_and_rank_opportunities(
         market=market,
         universe_category=universe_category,
         weight_by_universe=weight_by_universe,
+        debug=debug,
     )
     if selected:
         return rank_buy_opportunities(selected, top_n=top_n)

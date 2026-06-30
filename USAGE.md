@@ -9,13 +9,16 @@ Seniorlevel refaktooritud indeksite kataloog. **18 indeksit, 0 dubleeringud.**
 ```bash
 # Üksikut aktsiat analüüsida
 python main.py AAPL --period 6mo
+python main.py DUK --mode defensive
 
 # Konkreetse indeksi scanneerimine
 python finder.py --market ai --top 15
 python finder.py --market biotech_genomics --top 10
+python finder.py --market energy --mode defensive --top 10
 
 # KÕIKI indekseid korraga (deduplicate!)
 python scan_all.py --confidence 0.5 --top 20
+python scan_all.py --mode auto --confidence 0.5 --top 20
 ```
 
 ---
@@ -104,12 +107,15 @@ python scan_all.py --confidence 0.5 --period 1y --top 25
 - 🟡 medium (0.3-0.7) - mõõdukas
 - 🔴 low (< 0.3) - nõrk
 - `adjusted_confidence` = confidence, mida fundamentals kiht modifitseerib.
+- Filtreerimine kasutab nüüd ainult **technical confidence** (`confidence`), mitte `adjusted_confidence`.
 
 **Rank:** 0.0–1.0 skoor, kõrgem = parem
 - Rank on nüüd **hybrid modulaator**: `technical_rank * (0.5 + 0.5 * fundamental_score)`
 - Bias mõju rankile on nüüd **sujuv**: `(fundamental_score - 0.5) * 0.1`
+- Hybrid multiplier on kaitstud alumise piiriga (`>= 0.7`), et fundamentals ei suruks ranki liiga agressiivselt alla.
 - `fundamental_bias`: bullish / neutral / bearish (sekundaarne conviction-kiht)
 - `fundamental_completeness`: kui palju fundamentals välju oli saadaval (0.0–1.0)
+- `--mode`: `growth | balanced | defensive | auto`
 
 **Type:** trend_following | reversal | mixed_buy
 

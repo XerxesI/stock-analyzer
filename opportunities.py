@@ -35,13 +35,23 @@ def is_buy_opportunity(
     min_confidence: float = 0.5,
     min_rank: float = 0.4,
     min_fundamental_score: float | None = None,
+    debug: bool = False,
 ) -> bool:
     """Return True when a result is worth surfacing as a buy opportunity."""
 
     signal = str(item.get("signal", "HOLD"))
-    confidence = float(item.get("adjusted_confidence", item.get("confidence", 0)) or 0)
+    technical_confidence = float(item.get("confidence", 0) or 0)
+    adjusted_confidence = float(item.get("adjusted_confidence", technical_confidence) or 0)
     rank = float(item.get("rank", 0) or 0)
-    if signal not in BUY_SIGNALS or confidence < min_confidence or rank < min_rank:
+    if debug:
+        print(
+            str(item.get("symbol", "UNKNOWN")),
+            f"tech_conf={technical_confidence:.2f}",
+            f"adj_conf={adjusted_confidence:.2f}",
+            f"fund={float(item.get('fundamental_score', 0) or 0):.2f}",
+            f"rank={rank:.2f}",
+        )
+    if signal not in BUY_SIGNALS or technical_confidence < min_confidence or rank < min_rank:
         return False
     if min_fundamental_score is None:
         return True
