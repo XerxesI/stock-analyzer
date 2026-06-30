@@ -150,7 +150,7 @@ def combine_hybrid_rank(technical_rank: float, fundamental_score: float | None) 
 
     if fundamental_score is None:
         return round(min(RANK_LIMIT, max(0.0, technical_rank)), 2)
-    multiplier = max(0.7, 0.5 + (0.5 * fundamental_score))
+    multiplier = max(0.8, 0.6 + (0.4 * fundamental_score))
     hybrid_rank = technical_rank * multiplier
     return round(min(RANK_LIMIT, max(0.0, hybrid_rank)), 2)
 
@@ -170,6 +170,18 @@ def stretch_rank_distribution(rank: float) -> float:
 
     stretched = max(0.0, rank) ** RANK_DISTRIBUTION_EXPONENT
     return round(min(RANK_LIMIT, stretched), 2)
+
+
+def resolve_fundamental_sector(
+    market: str | None,
+    universe_category: str | None,
+) -> str | None:
+    """Resolve the actual sector label used for sector-aware fundamentals."""
+
+    category = (universe_category or "").lower().strip()
+    if category in {"core", "sector", "thematic", "experimental"}:
+        return (market or "").lower().strip() or None
+    return category or (market or "").lower().strip() or None
 
 
 def distribute_confidence(base_confidence: float) -> float:
@@ -236,10 +248,11 @@ def analyze_symbol_data(
             signal_data = generate_signal(enriched_data, market_context=market_context)
             fundamentals = get_fundamentals(symbol)
             effective_mode = resolve_scoring_mode(mode, market=market, universe_category=universe_category)
+            fundamental_sector = resolve_fundamental_sector(market, universe_category)
             fundamental_details = score_fundamental_factors(
                 fundamentals,
                 mode=effective_mode,
-                sector=universe_category,
+                sector=fundamental_sector,
                 penalize_missing=PENALIZE_MISSING_FUNDAMENTALS,
                 missing_penalty_weight=MISSING_FUNDAMENTALS_PENALTY_WEIGHT,
             )
@@ -260,6 +273,7 @@ def analyze_symbol_data(
             bias_adjusted_rank = apply_fundamental_bias_adjustment(base_hybrid_rank, fundamental_score)
             stretched_rank = stretch_rank_distribution(bias_adjusted_rank)
             rank = apply_completeness_penalty(stretched_rank, fundamental_completeness)
+            rank = round(min(RANK_LIMIT, max(0.0, rank)), 2)
             technical_score = signal_data.get("technical_score", signal_data.get("score"))
             base_technical_confidence = float(signal_data.get("confidence", 0) or 0)
             technical_confidence = distribute_confidence(float(technical_score or 0))
@@ -275,6 +289,7 @@ def analyze_symbol_data(
                 "period": period,
                 "market": market,
                 "universe_category": universe_category,
+                "fundamental_sector": fundamental_sector,
                 "market_context": market_context,
                 "market_context_error": market_context.get("error"),
                 "price": signal_data.get("price"),
@@ -300,6 +315,7 @@ def analyze_symbol_data(
                 "fundamental_bias": fundamental_bias,
                 "fundamental_mode": effective_mode,
                 "fundamental_raw_score": fundamental_details.get("raw_score"),
+                "fundamental_risk_scale": fundamental_details.get("risk_scale"),
                 "fundamental_factors": factors,
                 "fundamental_factor_scores": factors,
                 "fundamental_weighted_factor_scores": fundamental_details.get("weighted_factor_scores", {}),
@@ -322,6 +338,8 @@ def analyze_symbol_data(
             if debug:
                 print(
                     result["symbol"],
+                    f"sector={fundamental_sector or 'n/a'}",
+                    f"risk_scale={fundamental_details.get('risk_scale', 'n/a')}",
                     f"tech={technical_rank:.2f}",
                     f"fund={(fundamental_score if fundamental_score is not None else 0.0):.2f}",
                     f"growth={float(factors.get('growth', 0) or 0):.2f}",
