@@ -73,7 +73,7 @@ def run(
     backtest: bool = False,
     start_date: str | None = None,
     end_date: str | None = None,
-    rebalance_days: int = 7,
+    rebalance_days: int = 14,
     initial_capital: float = 10_000.0,
 ) -> int:
     """Scan all indices and find buy opportunities with confidence filter."""
@@ -253,8 +253,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--rebalance-days",
         type=int,
-        default=7,
-        help="Backtest rebalance interval in days (default: 7).",
+        default=14,
+        help="Backtest rebalance interval in days (default: 14).",
     )
     parser.add_argument(
         "--initial-capital",
