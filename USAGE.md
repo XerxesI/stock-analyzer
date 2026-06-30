@@ -15,6 +15,7 @@ python main.py DUK --mode defensive
 python finder.py --market ai --top 15
 python finder.py --market biotech_genomics --top 10
 python finder.py --market energy --mode defensive --top 10
+python finder.py --market ai --mode growth --min-growth-score 0.55 --max-risk-score 0.70 --top 10
 
 # KÕIKI indekseid korraga (deduplicate!)
 python scan_all.py --confidence 0.5 --top 20
@@ -108,14 +109,17 @@ python scan_all.py --confidence 0.5 --period 1y --top 25
 - 🔴 low (< 0.3) - nõrk
 - `adjusted_confidence` = confidence, mida fundamentals kiht modifitseerib.
 - Filtreerimine kasutab nüüd ainult **technical confidence** (`confidence`), mitte `adjusted_confidence`.
+- Confidence distribution kasutab venitamist: `confidence = base_confidence ** 1.2`
 
 **Rank:** 0.0–1.0 skoor, kõrgem = parem
 - Rank on nüüd **hybrid modulaator**: `technical_rank * (0.5 + 0.5 * fundamental_score)`
 - Bias mõju rankile on nüüd **sujuv**: `(fundamental_score - 0.5) * 0.1`
 - Hybrid multiplier on kaitstud alumise piiriga (`>= 0.7`), et fundamentals ei suruks ranki liiga agressiivselt alla.
+- Rank separation kasutab venitamist: `final_rank = final_rank ** 1.3`
 - `fundamental_bias`: bullish / neutral / bearish (sekundaarne conviction-kiht)
 - `fundamental_completeness`: kui palju fundamentals välju oli saadaval (0.0–1.0)
 - `--mode`: `growth | balanced | defensive | auto`
+- Optional factor filters: `--min-growth-score`, `--max-risk-score`
 
 **Type:** trend_following | reversal | mixed_buy
 
@@ -135,6 +139,9 @@ curl "http://localhost:8000/opportunities?market=ai&limit=10"
 
 # TOP signaalid + minimaalne fundamentals filter (optional)
 curl "http://localhost:8000/opportunities?market=ai&limit=10&min_fundamental_score=0.4"
+
+# Factor-põhine filter (optional)
+curl "http://localhost:8000/opportunities?market=ai&limit=10&mode=growth&min_growth_score=0.55&max_risk_score=0.70"
 
 # Võrdlus
 curl "http://localhost:8000/compare?symbols=NVDA,AMD,INTC"

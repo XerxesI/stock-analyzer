@@ -167,6 +167,8 @@ def _build_opportunity_results(
     period: str,
     symbols: str | None,
     min_fundamental_score: float | None,
+    min_growth_score: float | None,
+    max_risk_score: float | None,
     mode: str,
     debug: bool,
 ) -> dict[str, object]:
@@ -186,7 +188,16 @@ def _build_opportunity_results(
         universe_category = None
     return _cached_response(
         "opportunities",
-        (market, top_n, normalized_symbols, normalized_period, min_fundamental_score, normalized_mode),
+        (
+            market,
+            top_n,
+            normalized_symbols,
+            normalized_period,
+            min_fundamental_score,
+            min_growth_score,
+            max_risk_score,
+            normalized_mode,
+        ),
         lambda: {
             "market": market,
             "top": top_n,
@@ -196,6 +207,8 @@ def _build_opportunity_results(
                 top_n=top_n,
                 mode=normalized_mode,
                 min_fundamental_score=min_fundamental_score,
+                min_growth_score=min_growth_score,
+                max_risk_score=max_risk_score,
                 market=market,
                 universe_category=universe_category,
                 debug=debug,
@@ -211,6 +224,8 @@ async def opportunities(
     symbols: str | None = Query(default=None),
     period: str = Query("1y", min_length=1),
     min_fundamental_score: float | None = Query(default=None, ge=0.0, le=1.0),
+    min_growth_score: float | None = Query(default=None, ge=0.0, le=1.0),
+    max_risk_score: float | None = Query(default=None, ge=0.0, le=1.0),
     mode: str = Query(DEFAULT_SCORING_MODE, pattern="^(growth|balanced|defensive|auto)$"),
     debug: bool = Query(False),
 ) -> dict[str, object]:
@@ -226,6 +241,8 @@ async def opportunities(
             period,
             symbols,
             min_fundamental_score,
+            min_growth_score,
+            max_risk_score,
             mode,
             debug,
         )
@@ -242,6 +259,8 @@ async def top(
     symbols: str | None = Query(default=None),
     period: str = Query("1y", min_length=1),
     min_fundamental_score: float | None = Query(default=None, ge=0.0, le=1.0),
+    min_growth_score: float | None = Query(default=None, ge=0.0, le=1.0),
+    max_risk_score: float | None = Query(default=None, ge=0.0, le=1.0),
     mode: str = Query(DEFAULT_SCORING_MODE, pattern="^(growth|balanced|defensive|auto)$"),
     debug: bool = Query(False),
 ) -> dict[str, object]:
@@ -257,6 +276,8 @@ async def top(
             period,
             symbols,
             min_fundamental_score,
+            min_growth_score,
+            max_risk_score,
             mode,
             debug,
         )

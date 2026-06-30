@@ -21,6 +21,8 @@ def run(
     symbols: Sequence[str] | None = None,
     category: str | None = None,
     mode: str = DEFAULT_SCORING_MODE,
+    min_growth_score: float | None = None,
+    max_risk_score: float | None = None,
     debug: bool = False,
 ) -> int:
     """Find and print the strongest buy opportunities for a universe or category."""
@@ -50,6 +52,8 @@ def run(
         period,
         top_n=top_n,
         mode=mode,
+        min_growth_score=min_growth_score,
+        max_risk_score=max_risk_score,
         market=market_name_for_mode,
         universe_category=universe_category_for_mode,
         debug=debug,
@@ -109,6 +113,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Fundamentals scoring mode (growth, balanced, defensive, auto).",
     )
     parser.add_argument(
+        "--min-growth-score",
+        type=float,
+        default=None,
+        help="Optional minimum growth factor score (0.0-1.0).",
+    )
+    parser.add_argument(
+        "--max-risk-score",
+        type=float,
+        default=None,
+        help="Optional maximum risk factor score (0.0-1.0).",
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Print per-symbol scoring debug lines.",
@@ -132,7 +148,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.market = "sp500"
 
     try:
-        return run(args.market, args.top, args.period, args.symbols, args.category, args.mode, args.debug)
+        return run(
+            args.market,
+            args.top,
+            args.period,
+            args.symbols,
+            args.category,
+            args.mode,
+            args.min_growth_score,
+            args.max_risk_score,
+            args.debug,
+        )
     except (ValueError, RuntimeError) as exc:
         print(f"Error: {exc}")
         return 1
