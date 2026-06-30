@@ -11,6 +11,7 @@ def build_explanation(signal_data: dict[str, Any]) -> str:
     signal = signal_data.get("signal", "HOLD")
     score = signal_data.get("score")
     confidence = signal_data.get("confidence")
+    adjusted_confidence = signal_data.get("adjusted_confidence")
     confidence_label = signal_data.get("confidence_label")
     confidence_interpretation = signal_data.get("confidence_interpretation")
     trend_strength = signal_data.get("trend_strength")
@@ -30,8 +31,10 @@ def build_explanation(signal_data: dict[str, Any]) -> str:
     fundamental_score = signal_data.get("fundamental_score")
     fundamental_bias = signal_data.get("fundamental_bias")
     base_hybrid_rank = signal_data.get("base_hybrid_rank")
+    bias_adjusted_rank = signal_data.get("bias_adjusted_rank")
     fundamental_raw_score = signal_data.get("fundamental_raw_score")
     fundamental_factor_scores = signal_data.get("fundamental_factor_scores") or {}
+    fundamental_completeness = signal_data.get("fundamental_completeness")
     missing_fundamentals_ratio = signal_data.get("missing_fundamentals_ratio")
     missing_fundamentals_fields = signal_data.get("missing_fundamentals_fields") or []
     fundamental_reasons = signal_data.get("fundamental_reasons") or []
@@ -86,6 +89,8 @@ def build_explanation(signal_data: dict[str, Any]) -> str:
                 lines.append(f"Score: {score}. Confidence: {float(confidence):.2f}. Final signal: {signal}.")
         else:
             lines.append(f"Score: {score}. Final signal: {signal}.")
+    if isinstance(adjusted_confidence, (int, float)):
+        lines.append(f"Adjusted confidence (fundamentals-aware): {float(adjusted_confidence):.2f}.")
 
     if rank is not None:
         lines.append(f"Rank score: {float(rank):.2f}.")
@@ -93,6 +98,8 @@ def build_explanation(signal_data: dict[str, Any]) -> str:
         lines.append(f"Technical rank component: {float(technical_rank):.2f}.")
     if base_hybrid_rank is not None:
         lines.append(f"Hybrid rank before bias-adjustment: {float(base_hybrid_rank):.2f}.")
+    if bias_adjusted_rank is not None:
+        lines.append(f"Hybrid rank after bias-adjustment: {float(bias_adjusted_rank):.2f}.")
 
     if opportunity_type:
         lines.append(f"Opportunity type: {opportunity_type}.")
@@ -147,6 +154,8 @@ def build_explanation(signal_data: dict[str, Any]) -> str:
             + ", ".join(f"{name}={float(value):+.2f}" for name, value in fundamental_factor_scores.items())
             + "."
         )
+    if isinstance(fundamental_completeness, (int, float)):
+        lines.append(f"Fundamental completeness: {float(fundamental_completeness):.0%}.")
     if isinstance(missing_fundamentals_ratio, (int, float)):
         lines.append(f"Missing fundamentals ratio: {float(missing_fundamentals_ratio):.0%}.")
     if missing_fundamentals_fields:
@@ -156,8 +165,12 @@ def build_explanation(signal_data: dict[str, Any]) -> str:
 
     if signal in {"BUY", "STRONG BUY"} and fundamental_bias == "bearish":
         lines.append("Note: Strong technical signal but weak fundamentals (possible short-term trade).")
+    elif signal in {"BUY", "STRONG BUY"} and fundamental_bias == "bullish":
+        lines.append("Note: Technical momentum and fundamentals are aligned (high-conviction setup).")
     elif signal in {"SELL", "STRONG SELL"} and fundamental_bias == "bullish":
         lines.append("Note: Bearish technical signal but strong fundamentals (possible long-term opportunity).")
+    elif signal in {"SELL", "STRONG SELL"} and fundamental_bias == "bearish":
+        lines.append("Note: Technical and fundamental weakness are aligned (higher downside conviction).")
     elif fundamental_bias == "bullish":
         lines.append("Fundamentals support the current setup.")
     elif fundamental_bias == "bearish":

@@ -103,10 +103,13 @@ python scan_all.py --confidence 0.5 --period 1y --top 25
 - 🟢 high (0.7-1.0) - väga usaldusväärne
 - 🟡 medium (0.3-0.7) - mõõdukas
 - 🔴 low (< 0.3) - nõrk
+- `adjusted_confidence` = confidence, mida fundamentals kiht modifitseerib.
 
 **Rank:** 0.0–1.0 skoor, kõrgem = parem
 - Rank on nüüd **hybrid modulaator**: `technical_rank * (0.5 + 0.5 * fundamental_score)`
+- Bias mõju rankile on nüüd **sujuv**: `(fundamental_score - 0.5) * 0.1`
 - `fundamental_bias`: bullish / neutral / bearish (sekundaarne conviction-kiht)
+- `fundamental_completeness`: kui palju fundamentals välju oli saadaval (0.0–1.0)
 
 **Type:** trend_following | reversal | mixed_buy
 
