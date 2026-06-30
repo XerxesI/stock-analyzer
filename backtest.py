@@ -30,6 +30,8 @@ REQUIRED_COLUMNS = ("Open", "High", "Low", "Close", "Volume")
 LOOKBACK_BUFFER_DAYS = 260
 DEFAULT_INITIAL_CAPITAL = 10_000.0
 DEFAULT_MAX_POSITIONS = 10
+KEEP_RANK_THRESHOLD = 0.45
+KEEP_CONFIDENCE_THRESHOLD = 0.50
 
 
 def _normalize_download_frame(data: pd.DataFrame) -> pd.DataFrame:
@@ -98,6 +100,63 @@ def _cash_only_portfolio(capital: float) -> list[dict[str, Any]]:
             "entry_price": 0.0,
         }
     ]
+
+
+def should_keep_position(old_position: dict[str, Any], new_position: dict[str, Any]) -> bool:
+    """Keep an existing holding only if refreshed signal quality is still acceptable."""
+
+    _ = old_position
+    new_rank = float(new_position.get("rank", 0) or 0)
+    new_confidence = float(new_position.get("confidence", 0) or 0)
+    return new_rank >= KEEP_RANK_THRESHOLD and new_confidence >= KEEP_CONFIDENCE_THRESHOLD
+
+
+def _normalize_weights(positions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    weighted = [dict(item) for item in positions]
+    total_weight = sum(float(item.get("weight", 0) or 0) for item in weighted)
+    if total_weight <= 0:
+        return weighted
+    for item in weighted:
+        item["weight"] = float(item.get("weight", 0) or 0) / total_weight
+    return weighted
+
+
+def merge_rebalanced_portfolio(
+    old_portfolio: list[dict[str, Any]],
+    new_portfolio: list[dict[str, Any]],
+    max_positions: int,
+) -> list[dict[str, Any]]:
+    """Merge old and new portfolios to reduce turnover while preserving quality."""
+
+    new_active = [dict(item) for item in new_portfolio if str(item.get("symbol", "")).upper() != "CASH"]
+    if not new_active:
+        return [dict(item) for item in new_portfolio]
+
+    new_by_symbol = {str(item.get("symbol", "")).upper(): item for item in new_active}
+    updated: list[dict[str, Any]] = []
+
+    for old_position in old_portfolio:
+        symbol = str(old_position.get("symbol", "")).upper()
+        if not symbol or symbol == "CASH":
+            continue
+        new_position = new_by_symbol.get(symbol)
+        if new_position and should_keep_position(old_position, new_position):
+            updated.append(dict(new_position))
+
+    existing_symbols = {str(item.get("symbol", "")).upper() for item in updated}
+    for new_position in new_active:
+        symbol = str(new_position.get("symbol", "")).upper()
+        if symbol in existing_symbols:
+            continue
+        updated.append(dict(new_position))
+        existing_symbols.add(symbol)
+        if len(updated) >= max_positions:
+            break
+
+    if not updated:
+        return [dict(item) for item in new_portfolio]
+
+    return _normalize_weights(updated)
 
 
 def _build_opportunity(
@@ -385,7 +444,8 @@ def run_backtest(
             )
             rebuilt = build_portfolio(opportunities, max_positions=max_positions, debug=debug)
             if rebuilt:
-                current_portfolio = allocate_capital(rebuilt, capital, current_date, frames)
+                rebalanced = merge_rebalanced_portfolio(current_portfolio, rebuilt, max_positions=max_positions)
+                current_portfolio = allocate_capital(rebalanced, capital, current_date, frames)
             else:
                 current_portfolio = _cash_only_portfolio(capital)
 
