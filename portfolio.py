@@ -36,6 +36,13 @@ def _is_bullish(item: dict[str, Any]) -> bool:
     return str(item.get("market_bias", item.get("market", ""))).lower().strip() == "bullish"
 
 
+def _rank_spread_weight(rank: float, min_rank: float, max_rank: float) -> float:
+    spread = max_rank - min_rank
+    if spread <= 0:
+        return 1.0
+    return max(0.05, (rank - min_rank) / (spread + 1e-6))
+
+
 def build_portfolio(opportunities: list[dict[str, Any]], max_positions: int = 10, debug: bool = False) -> list[dict[str, Any]]:
     """
     Build a portfolio from ranked opportunities.
@@ -75,10 +82,17 @@ def build_portfolio(opportunities: list[dict[str, Any]], max_positions: int = 10
             }
         ]
 
-    total_rank_sq = sum((float(item.get("rank", 0) or 0) ** 2) for item in selected)
+    max_rank = max(float(item.get("rank", 0) or 0) for item in selected)
+    min_rank = min(float(item.get("rank", 0) or 0) for item in selected)
+    spread_scores = [
+        _rank_spread_weight(float(item.get("rank", 0) or 0), min_rank=min_rank, max_rank=max_rank)
+        for item in selected
+    ]
+    total_spread = sum(spread_scores)
     for item in selected:
         rank = float(item.get("rank", 0) or 0)
-        base_weight = (rank**2) / total_rank_sq if total_rank_sq > 0 else 0.0
+        score = _rank_spread_weight(rank, min_rank=min_rank, max_rank=max_rank)
+        base_weight = score / total_spread if total_spread > 0 else 0.0
         risk = float((item.get("fundamental_factors") or {}).get("risk", 0.5) or 0.5)
         item["sector"] = _sector_key(item)
         item["weight"] = base_weight * _risk_multiplier(risk) * _type_multiplier(str(item.get("investment_type") or ""))

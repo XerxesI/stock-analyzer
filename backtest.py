@@ -40,6 +40,7 @@ WEAK_MIN_GAIN = 0.98
 BETTER_RANK_GAP = 0.15
 MIN_ENTRY_RANK = 0.60
 UNKNOWN_SECTOR_RANK_PENALTY = 0.80
+MOMENTUM_RANK_WEIGHT = 0.30
 
 
 def _normalize_download_frame(data: pd.DataFrame) -> pd.DataFrame:
@@ -136,6 +137,25 @@ def _price_snapshot(frame: pd.DataFrame, current_date: pd.Timestamp) -> dict[str
     price = float(row["Close"]) if pd.notna(row.get("Close")) else None
     sma50 = float(row["SMA50"]) if pd.notna(row.get("SMA50")) else None
     return {"price": price, "sma50": sma50}
+
+
+def _momentum_component(price: float | None, sma50: float | None) -> float:
+    if price is None or sma50 is None or sma50 <= 0:
+        return 0.5
+    ratio = price / sma50
+    normalized = (ratio - 0.95) / 0.15
+    return max(0.0, min(1.0, normalized))
+
+
+def _is_spy_above_sma200(spy_frame: pd.DataFrame, current_date: pd.Timestamp) -> bool:
+    snap = _price_snapshot(spy_frame, current_date)
+    available = spy_frame.loc[:current_date]
+    if available.empty:
+        return False
+    row = available.iloc[-1]
+    sma200 = float(row["SMA200"]) if pd.notna(row.get("SMA200")) else None
+    price = snap.get("price")
+    return price is not None and sma200 is not None and price > sma200
 
 
 def should_exit_on_trend_break(price: float | None, sma50: float | None) -> bool:
@@ -285,6 +305,8 @@ def _build_opportunity(
     bias_adjusted_rank = apply_fundamental_bias_adjustment(base_hybrid_rank, fundamental_score)
     stretched_rank = stretch_rank_distribution(bias_adjusted_rank)
     final_rank = apply_completeness_penalty(stretched_rank, completeness)
+    momentum_rank = _momentum_component(signal_data.get("price"), signal_data.get("sma50"))
+    final_rank = ((1.0 - MOMENTUM_RANK_WEIGHT) * final_rank) + (MOMENTUM_RANK_WEIGHT * momentum_rank)
     if not fundamental_sector or fundamental_sector == "unknown":
         final_rank *= UNKNOWN_SECTOR_RANK_PENALTY
     final_rank = round(min(1.0, max(0.0, final_rank)), 2)
@@ -573,12 +595,16 @@ def run_backtest(
     while current_date <= end:
         update_position_peaks(current_portfolio, current_date, frames)
         capital = compute_portfolio_value(current_portfolio, current_date, frames)
+        spy_ok = _is_spy_above_sma200(spy_frame, current_date)
 
         # 1) DAILY entry scan (mitte rebalance-gated)
-        opportunities = scan_market_at_date(
-            cleaned_symbols, frames, current_date, mode, spy_frame, debug=debug
-        )
-        candidate_portfolio = build_portfolio(opportunities, max_positions=max_positions, debug=debug)
+        opportunities: list[dict[str, Any]] = []
+        candidate_portfolio: list[dict[str, Any]] = []
+        if spy_ok:
+            opportunities = scan_market_at_date(
+                cleaned_symbols, frames, current_date, mode, spy_frame, debug=debug
+            )
+            candidate_portfolio = build_portfolio(opportunities, max_positions=max_positions, debug=debug)
 
         active_positions = [p for p in current_portfolio if str(p.get("symbol", "")).upper() != "CASH"]
         if not active_positions and candidate_portfolio:
