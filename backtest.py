@@ -40,9 +40,7 @@ WEAK_MIN_GAIN = 0.98
 BETTER_RANK_GAP = 0.15
 MIN_ENTRY_RANK = 0.60
 UNKNOWN_SECTOR_RANK_PENALTY = 0.80
-MOMENTUM_RANK_WEIGHT = 0.20
-BEAR_MARKET_MIN_RANK = 0.70
-MIN_ACTIVE_POSITIONS = 4
+MIN_HOLD_DAYS = 5
 
 
 def _normalize_download_frame(data: pd.DataFrame) -> pd.DataFrame:
@@ -183,6 +181,8 @@ def should_exit_weak(position: dict[str, Any], current_data: dict[str, float | N
 
 
 def should_exit(position: dict[str, Any], current_data: dict[str, float | None]) -> bool:
+    if int(position.get("holding_days", 0) or 0) < MIN_HOLD_DAYS:
+        return False
     entry_price = float(position.get("entry_price", 0) or 0) or None
     current_price = current_data.get("price")
     sma50 = current_data.get("sma50")
@@ -308,7 +308,8 @@ def _build_opportunity(
     stretched_rank = stretch_rank_distribution(bias_adjusted_rank)
     final_rank = apply_completeness_penalty(stretched_rank, completeness)
     momentum_rank = _momentum_component(signal_data.get("price"), signal_data.get("sma50"))
-    final_rank = ((1.0 - MOMENTUM_RANK_WEIGHT) * final_rank) + (MOMENTUM_RANK_WEIGHT * momentum_rank)
+    if momentum_rank < 0.5:
+        return None
     if not fundamental_sector or fundamental_sector == "unknown":
         final_rank *= UNKNOWN_SECTOR_RANK_PENALTY
     final_rank = round(min(1.0, max(0.0, final_rank)), 2)
@@ -599,29 +600,18 @@ def run_backtest(
         update_position_peaks(current_portfolio, current_date, frames)
         capital = compute_portfolio_value(current_portfolio, current_date, frames)
         spy_ok = _is_spy_above_sma200(spy_frame, current_date)
-        effective_min_rank = MIN_ENTRY_RANK if spy_ok else BEAR_MARKET_MIN_RANK
+        effective_max_positions = 8 if spy_ok else 4
 
         # 1) DAILY entry scan (mitte rebalance-gated)
         opportunities = scan_market_at_date(
             cleaned_symbols, frames, current_date, mode, spy_frame, debug=debug
         )
         gated_opportunities = [
-            item for item in opportunities if float(item.get("rank", 0) or 0) >= effective_min_rank
+            item for item in opportunities if float(item.get("rank", 0) or 0) >= MIN_ENTRY_RANK
         ]
         candidate_portfolio: list[dict[str, Any]] = build_portfolio(
-            gated_opportunities, max_positions=max_positions, debug=debug
+            gated_opportunities, max_positions=effective_max_positions, debug=debug
         )
-        candidate_active = [
-            item for item in candidate_portfolio if str(item.get("symbol", "")).upper() != "CASH"
-        ]
-        if len(candidate_active) < MIN_ACTIVE_POSITIONS:
-            forced_candidates = _force_open_top_candidates(
-                opportunities,
-                max_positions=max_positions,
-                min_rank=effective_min_rank,
-            )
-            if forced_candidates:
-                candidate_portfolio = forced_candidates
 
         active_positions = [p for p in current_portfolio if str(p.get("symbol", "")).upper() != "CASH"]
         if not active_positions and candidate_portfolio:
@@ -629,8 +619,8 @@ def run_backtest(
             if all(str(item.get("symbol", "")).upper() == "CASH" for item in candidate_portfolio):
                 forced = _force_open_top_candidates(
                     opportunities,
-                    max_positions=max_positions,
-                    min_rank=effective_min_rank,
+                    max_positions=effective_max_positions,
+                    min_rank=MIN_ENTRY_RANK,
                 )
                 if forced:
                     current_portfolio = allocate_capital(forced, capital, current_date, frames)
@@ -646,7 +636,7 @@ def run_backtest(
                 candidate_portfolio,
                 frames,
                 current_date,
-                max_positions=max_positions,
+                max_positions=effective_max_positions,
             )
             current_portfolio = allocate_capital(rebalanced, capital, current_date, frames)
 

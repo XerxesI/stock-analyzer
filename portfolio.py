@@ -13,6 +13,7 @@ CASH_BUFFER = 0.10
 ELITE_RANK_THRESHOLD = 0.55
 MIN_CONFIDENCE = 0.60
 MIN_ACTIVE_POSITIONS = 3
+USE_TOP_HEAVY = False
 
 
 def _sector_key(item: dict[str, Any]) -> str:
@@ -91,8 +92,11 @@ def build_portfolio(opportunities: list[dict[str, Any]], max_positions: int = 10
     total_spread = sum(spread_scores)
     for item in selected:
         rank = float(item.get("rank", 0) or 0)
-        score = _rank_spread_weight(rank, min_rank=min_rank, max_rank=max_rank)
-        base_weight = score / total_spread if total_spread > 0 else 0.0
+        if USE_TOP_HEAVY:
+            score = _rank_spread_weight(rank, min_rank=min_rank, max_rank=max_rank)
+            base_weight = score / total_spread if total_spread > 0 else 0.0
+        else:
+            base_weight = 1.0 / len(selected)
         risk = float((item.get("fundamental_factors") or {}).get("risk", 0.5) or 0.5)
         item["sector"] = _sector_key(item)
         item["weight"] = base_weight * _risk_multiplier(risk) * _type_multiplier(str(item.get("investment_type") or ""))
