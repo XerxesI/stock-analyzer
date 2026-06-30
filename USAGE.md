@@ -133,9 +133,9 @@ curl "http://localhost:8000/metrics"
 
 ## 🛠️ RUNBOOK (production hardening)
 
-- **Parallelism:** `analysis_service` analüüsib sümboleid thread pooliga ja `scan_all.py` skännib universumeid paralleelselt.
-- **Caching:** `data_fetcher`, `market_context` ja API vastused kasutavad TTL cache'i, et vähendada dubleerivaid Yahoo päringuid.
-- **Metrics:** `/metrics` endpoint näitab request latency/error rate ning cache hit-rate statistikat.
+- **Parallelism:** globaalne concurrency cap + fetch throttle hoiavad nested parallelismi kontrolli all.
+- **Caching:** `data_fetcher`, `market_context` ja API vastused kasutavad TTL cache'i LRU evictioniga.
+- **Metrics:** `/metrics` endpoint näitab request latency/error rate, cache hit-rate ja persistib loendurid faili `runtime_metrics.json` (või `STOCK_ANALYZER_METRICS_FILE`).
 
 ## ✅ SENIOR-LEVEL PARANDUSED (v2.1)
 

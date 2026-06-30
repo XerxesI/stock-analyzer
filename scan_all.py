@@ -8,13 +8,14 @@ from typing import Sequence
 
 from analysis_service import analyze_symbols_data
 from opportunity_service import rank_buy_opportunities, select_buy_opportunities
+from runtime_limits import UNIVERSE_SCAN_WORKERS
 from universes import UNIVERSES, get_meta
 
 
 DEFAULT_PERIOD = "1y"
 DEFAULT_TOP = 20
 DEFAULT_CONFIDENCE = 0.5
-MAX_UNIVERSE_WORKERS = 8
+MAX_UNIVERSE_WORKERS = UNIVERSE_SCAN_WORKERS
 
 
 def _scan_single_universe(

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+from threading import BoundedSemaphore
 from time import sleep
 
 import pandas as pd
 import yfinance as yf
 
 from cache_utils import TTLCache
+from runtime_limits import FETCH_CONCURRENCY
 
 
 REQUIRED_COLUMNS = ("Open", "High", "Low", "Close", "Volume")
@@ -22,6 +24,7 @@ _data_cache: TTLCache[tuple[str, str], pd.DataFrame] = TTLCache(
     default_ttl_seconds=CACHE_TTL_SECONDS,
     name="stock_data",
 )
+_fetch_semaphore = BoundedSemaphore(FETCH_CONCURRENCY)
 
 # yfinance emits noisy per-symbol error logs; we surface failures via raised exceptions.
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
@@ -57,15 +60,16 @@ def _fetch_with_retry(cleaned_symbol: str, cleaned_period: str) -> pd.DataFrame:
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            data = yf.download(
-                cleaned_symbol,
-                period=cleaned_period,
-                interval="1d",
-                auto_adjust=False,
-                progress=False,
-                threads=False,
-                timeout=REQUEST_TIMEOUT_SECONDS,
-            )
+            with _fetch_semaphore:
+                data = yf.download(
+                    cleaned_symbol,
+                    period=cleaned_period,
+                    interval="1d",
+                    auto_adjust=False,
+                    progress=False,
+                    threads=False,
+                    timeout=REQUEST_TIMEOUT_SECONDS,
+                )
             return _normalize_data(data)
         except (ConnectionError, TimeoutError, OSError, ValueError, RuntimeError) as exc:
             last_error = exc
@@ -118,5 +122,6 @@ def get_fetcher_metrics() -> dict[str, object]:
             "max_retries": MAX_RETRIES,
             "base_backoff_seconds": RETRY_SLEEP_SECONDS,
             "request_timeout_seconds": REQUEST_TIMEOUT_SECONDS,
+            "fetch_concurrency": FETCH_CONCURRENCY,
         },
     }

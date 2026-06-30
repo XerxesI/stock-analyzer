@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass
 from threading import Lock
 from time import monotonic
@@ -19,7 +20,7 @@ class _CacheEntry(Generic[V]):
 
 
 class TTLCache(Generic[K, V]):
-    """Simple in-memory TTL cache with bounded size and basic metrics."""
+    """Simple in-memory TTL cache with bounded size, LRU eviction, and metrics."""
 
     def __init__(self, maxsize: int, default_ttl_seconds: float, name: str) -> None:
         if maxsize <= 0:
@@ -29,15 +30,17 @@ class TTLCache(Generic[K, V]):
         self._maxsize = maxsize
         self._default_ttl_seconds = default_ttl_seconds
         self._name = name
-        self._store: dict[K, _CacheEntry[V]] = {}
+        self._store: OrderedDict[K, _CacheEntry[V]] = OrderedDict()
         self._lock = Lock()
         self._hits = 0
         self._misses = 0
+        self._evictions = 0
 
     def _purge_expired_locked(self, now: float) -> None:
         expired_keys = [key for key, entry in self._store.items() if entry.expires_at <= now]
         for key in expired_keys:
             self._store.pop(key, None)
+            self._evictions += 1
 
     def get(self, key: K) -> V | None:
         """Get cached value or None when absent/expired."""
@@ -50,6 +53,7 @@ class TTLCache(Generic[K, V]):
                 self._misses += 1
                 return None
             self._hits += 1
+            self._store.move_to_end(key, last=True)
             return entry.value
 
     def set(self, key: K, value: V, ttl_seconds: float | None = None) -> V:
@@ -63,9 +67,10 @@ class TTLCache(Generic[K, V]):
         with self._lock:
             self._purge_expired_locked(now)
             if key not in self._store and len(self._store) >= self._maxsize:
-                oldest_key = next(iter(self._store))
-                self._store.pop(oldest_key, None)
+                self._store.popitem(last=False)
+                self._evictions += 1
             self._store[key] = _CacheEntry(value=value, expires_at=expires_at)
+            self._store.move_to_end(key, last=True)
         return value
 
     def get_or_set(self, key: K, factory: Callable[[], V], ttl_seconds: float | None = None) -> V:
@@ -85,15 +90,18 @@ class TTLCache(Generic[K, V]):
             self._purge_expired_locked(now)
             hits = self._hits
             misses = self._misses
+            evictions = self._evictions
             size = len(self._store)
         total = hits + misses
         hit_rate = (hits / total) if total else 0.0
         return {
             "name": self._name,
+            "eviction_policy": "lru",
             "size": size,
             "maxsize": self._maxsize,
             "ttl_seconds": self._default_ttl_seconds,
             "hits": hits,
             "misses": misses,
+            "evictions": evictions,
             "hit_rate": round(hit_rate, 4),
         }

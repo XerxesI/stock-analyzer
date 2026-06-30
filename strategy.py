@@ -62,6 +62,7 @@ def generate_signal(df: pd.DataFrame, market_context: dict[str, Any] | None = No
         return {
             "signal": "HOLD",
             "score": 0,
+            "technical_score": 0,
             "confidence": 0.0,
             "confidence_label": "low",
             "rsi": rsi,
@@ -79,58 +80,58 @@ def generate_signal(df: pd.DataFrame, market_context: dict[str, Any] | None = No
             "market_bias": "neutral",
         }
 
-    score = 0
+    technical_score = 0
     reasons: list[str] = []
     market_bias = "neutral"
 
     if rsi < 30:
-        score += 1
+        technical_score += 1
         reasons.append(f"RSI is oversold at {rsi:.1f}.")
     elif rsi > 70:
-        score -= 1
+        technical_score -= 1
         reasons.append(f"RSI is overbought at {rsi:.1f}.")
     else:
         reasons.append(f"RSI is neutral at {rsi:.1f}.")
 
     trend_score, trend_strength, trend_reason = _trend_label(price, sma50, sma200)
-    score += trend_score
+    technical_score += trend_score
     reasons.append(trend_reason)
 
     if macd is not None and macd_signal is not None:
         if macd > macd_signal and (macd_hist is None or macd_hist >= 0):
-            score += 2
+            technical_score += 2
             reasons.append("MACD confirms bullish momentum.")
         elif macd > macd_signal:
-            score += 1
+            technical_score += 1
             reasons.append("MACD is slightly bullish.")
         elif macd < macd_signal and (macd_hist is None or macd_hist <= 0):
-            score -= 2
+            technical_score -= 2
             reasons.append("MACD confirms bearish momentum.")
         elif macd < macd_signal:
-            score -= 1
+            technical_score -= 1
             reasons.append("MACD is slightly bearish.")
         else:
             reasons.append("MACD is flat.")
 
     if volume is not None and volume_sma20 is not None:
         if volume > volume_sma20:
-            score += 1
+            technical_score += 1
             reasons.append("Volume is above its 20-day average and confirms participation.")
         else:
             reasons.append("Volume is below its 20-day average, so it does not confirm the move.")
 
     if market_context is not None:
         market_bias = str(market_context.get("bias", "neutral"))
-        if market_bias == "bullish" and score > 0:
+        if market_bias == "bullish" and technical_score > 0:
             reasons.append("Bullish market context from SPY supports this bullish setup.")
-        elif market_bias == "bearish" and score < 0:
+        elif market_bias == "bearish" and technical_score < 0:
             reasons.append("Bearish market context from SPY supports this bearish setup.")
-        elif market_bias == "bearish" and score > 0:
+        elif market_bias == "bearish" and technical_score > 0:
             reasons.append("Bearish market context from SPY tempers upside conviction.")
-        elif market_bias == "bullish" and score < 0:
+        elif market_bias == "bullish" and technical_score < 0:
             reasons.append("Bullish market context from SPY tempers downside conviction.")
 
-    confidence = min(1.0, (abs(score) / MAX_SCORE) ** 1.3)
+    confidence = min(1.0, (abs(technical_score) / MAX_SCORE) ** 1.3)
     if confidence < 0.3:
         confidence_label = "low"
     elif confidence < 0.7:
@@ -138,13 +139,13 @@ def generate_signal(df: pd.DataFrame, market_context: dict[str, Any] | None = No
     else:
         confidence_label = "high"
 
-    if score >= 4 and confidence_label == "high":
+    if technical_score >= 4 and confidence_label == "high":
         signal = "STRONG BUY"
-    elif score >= 2:
+    elif technical_score >= 2:
         signal = "BUY"
-    elif score <= -4 and confidence_label == "high":
+    elif technical_score <= -4 and confidence_label == "high":
         signal = "STRONG SELL"
-    elif score <= -2:
+    elif technical_score <= -2:
         signal = "SELL"
     else:
         signal = "HOLD"
@@ -162,7 +163,8 @@ def generate_signal(df: pd.DataFrame, market_context: dict[str, Any] | None = No
 
     return {
         "signal": signal,
-        "score": score,
+        "score": technical_score,
+        "technical_score": technical_score,
         "confidence": round(confidence, 2),
         "confidence_label": confidence_label,
         "rsi": rsi,

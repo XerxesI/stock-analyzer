@@ -14,6 +14,7 @@ from analysis_service import analyze_symbol_data, analyze_symbols_data, get_anal
 from cache_utils import TTLCache
 from data_fetcher import get_fetcher_metrics
 from market_context import get_market_context_metrics
+from metrics_store import load_metrics_section, metrics_store_path, persist_metrics_section
 from opportunity_service import analyze_and_rank_opportunities, rank_analysis_results
 from universes import get_universe
 
@@ -31,14 +32,33 @@ _API_METRICS: dict[str, float | int] = {
     "failures": 0,
     "latency_ms_total": 0.0,
 }
+_API_METRICS.update(load_metrics_section("api", _API_METRICS))
+_API_METRICS_UPDATES = 0
+_API_METRICS_PERSIST_EVERY = 10
+
+
+def _persist_api_metrics() -> None:
+    with _API_METRICS_LOCK:
+        snapshot = {
+            "requests": int(_API_METRICS["requests"]),
+            "failures": int(_API_METRICS["failures"]),
+            "latency_ms_total": float(_API_METRICS["latency_ms_total"]),
+        }
+    persist_metrics_section("api", snapshot)
 
 
 def _record_api_request(successful: bool, latency_ms: float) -> None:
+    should_persist = False
     with _API_METRICS_LOCK:
+        global _API_METRICS_UPDATES
         _API_METRICS["requests"] = int(_API_METRICS["requests"]) + 1
         _API_METRICS["latency_ms_total"] = float(_API_METRICS["latency_ms_total"]) + latency_ms
         if not successful:
             _API_METRICS["failures"] = int(_API_METRICS["failures"]) + 1
+        _API_METRICS_UPDATES += 1
+        should_persist = (_API_METRICS_UPDATES % _API_METRICS_PERSIST_EVERY) == 0
+    if should_persist:
+        _persist_api_metrics()
 
 
 def _api_metrics_snapshot() -> dict[str, float | int | dict[str, float | int | str]]:
@@ -222,7 +242,9 @@ async def compare(symbols: str = Query(..., min_length=1), period: str = Query("
 async def metrics() -> dict[str, object]:
     """Return runtime metrics for API, analysis pipeline, and cache behavior."""
 
+    _persist_api_metrics()
     return {
+        "metrics_store_path": metrics_store_path(),
         "api": _api_metrics_snapshot(),
         "analysis": get_analysis_metrics(),
         "data_fetcher": get_fetcher_metrics(),
