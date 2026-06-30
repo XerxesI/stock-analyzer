@@ -105,6 +105,7 @@ python scan_all.py --confidence 0.5 --period 1y --top 25
 - 🔴 low (< 0.3) - nõrk
 
 **Rank:** 0.0–1.0 skoor, kõrgem = parem
+- Rank on nüüd **hybrid**: `0.7 * technical_rank + 0.3 * fundamental_score`
 
 **Type:** trend_following | reversal | mixed_buy
 
@@ -121,6 +122,9 @@ curl "http://localhost:8000/analyze?symbol=AAPL"
 
 # TOP signaalid
 curl "http://localhost:8000/opportunities?market=ai&limit=10"
+
+# TOP signaalid + minimaalne fundamentals filter (optional)
+curl "http://localhost:8000/opportunities?market=ai&limit=10&min_fundamental_score=0.4"
 
 # Võrdlus
 curl "http://localhost:8000/compare?symbols=NVDA,AMD,INTC"

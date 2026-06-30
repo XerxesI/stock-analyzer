@@ -26,6 +26,11 @@ def build_explanation(signal_data: dict[str, Any]) -> str:
     macd_signal = signal_data.get("macd_signal")
     volume = signal_data.get("volume")
     volume_sma20 = signal_data.get("volume_sma20")
+    technical_rank = signal_data.get("technical_rank")
+    fundamental_score = signal_data.get("fundamental_score")
+    fundamental_raw_score = signal_data.get("fundamental_raw_score")
+    fundamental_reasons = signal_data.get("fundamental_reasons") or []
+    fundamentals = signal_data.get("fundamentals") or {}
 
     lines = []
 
@@ -79,6 +84,8 @@ def build_explanation(signal_data: dict[str, Any]) -> str:
 
     if rank is not None:
         lines.append(f"Rank score: {float(rank):.2f}.")
+    if technical_rank is not None:
+        lines.append(f"Technical rank component: {float(technical_rank):.2f}.")
 
     if opportunity_type:
         lines.append(f"Opportunity type: {opportunity_type}.")
@@ -99,5 +106,33 @@ def build_explanation(signal_data: dict[str, Any]) -> str:
 
     if reasons:
         lines.append("Key factors: " + " ".join(str(reason) for reason in reasons))
+
+    if isinstance(fundamentals, dict):
+        lines.append("")
+        lines.append("Fundamental analysis:")
+        pe = fundamentals.get("pe")
+        roe = fundamentals.get("roe")
+        revenue_growth = fundamentals.get("revenue_growth")
+        debt_to_equity = fundamentals.get("debt_to_equity")
+        lines.append(f"- P/E: {f'{float(pe):.2f}' if pe is not None else 'N/A'}")
+        lines.append(f"- ROE: {f'{float(roe):.2%}' if roe is not None else 'N/A'}")
+        lines.append(
+            f"- Revenue growth: {f'{float(revenue_growth):.2%}' if revenue_growth is not None else 'N/A'}"
+        )
+        lines.append(
+            f"- Debt-to-equity: {f'{float(debt_to_equity):.2f}' if debt_to_equity is not None else 'N/A'}"
+        )
+    if fundamental_score is not None:
+        lines.append(
+            f"Fundamental score: {float(fundamental_score):.2f}"
+            + (
+                f" (raw {int(fundamental_raw_score)})"
+                if isinstance(fundamental_raw_score, (int, float))
+                else ""
+            )
+            + "."
+        )
+    if fundamental_reasons:
+        lines.append("Fundamental factors: " + " ".join(str(reason) for reason in fundamental_reasons))
 
     return "\n".join(lines) if lines else "No clear signal was generated."

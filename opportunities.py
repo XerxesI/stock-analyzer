@@ -30,13 +30,23 @@ def classify_opportunity(item: dict[str, Any]) -> str:
     return "mixed"
 
 
-def is_buy_opportunity(item: dict[str, Any], min_confidence: float = 0.5, min_rank: float = 0.4) -> bool:
+def is_buy_opportunity(
+    item: dict[str, Any],
+    min_confidence: float = 0.5,
+    min_rank: float = 0.4,
+    min_fundamental_score: float | None = None,
+) -> bool:
     """Return True when a result is worth surfacing as a buy opportunity."""
 
     signal = str(item.get("signal", "HOLD"))
     confidence = float(item.get("confidence", 0) or 0)
     rank = float(item.get("rank", 0) or 0)
-    return signal in BUY_SIGNALS and confidence >= min_confidence and rank >= min_rank
+    if signal not in BUY_SIGNALS or confidence < min_confidence or rank < min_rank:
+        return False
+    if min_fundamental_score is None:
+        return True
+    fundamental_score = float(item.get("fundamental_score", 0) or 0)
+    return fundamental_score >= min_fundamental_score
 
 
 def rank_opportunities(items: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -9,6 +9,7 @@ from time import perf_counter
 from typing import Any, Sequence
 
 from data_fetcher import get_stock_data
+from fundamentals import get_fundamentals, score_fundamentals
 from indicators import calculate_indicators
 from market_context import resolve_market_context
 from metrics_store import load_metrics_section, persist_metrics_section
@@ -91,7 +92,7 @@ def confidence_interpretation(confidence_label: str | None) -> str:
 
 
 def normalize_rank(signal_data: dict[str, object]) -> float:
-    """Combine confidence, trend, and market context into a normalized rank."""
+    """Combine confidence, trend, and market context into a normalized technical rank."""
 
     confidence = float(signal_data.get("confidence", 0) or 0)
     trend_weight = _trend_weight(str(signal_data.get("trend_strength", "unknown")))
@@ -101,6 +102,13 @@ def normalize_rank(signal_data: dict[str, object]) -> float:
     )
     rank = confidence * trend_weight * market_weight
     return round(min(RANK_LIMIT, rank), 2)
+
+
+def combine_hybrid_rank(technical_rank: float, fundamental_score: float) -> float:
+    """Combine technical and fundamentals into one interpretable hybrid rank."""
+
+    hybrid_rank = (technical_rank * 0.7) + (fundamental_score * 0.3)
+    return round(min(RANK_LIMIT, max(0.0, hybrid_rank)), 2)
 
 
 def analyze_symbol_data(
@@ -119,11 +127,15 @@ def analyze_symbol_data(
             raw_data = get_stock_data(symbol, period)
             enriched_data = calculate_indicators(raw_data)
             signal_data = generate_signal(enriched_data, market_context=market_context)
-            explanation = build_explanation(signal_data)
-            rank = normalize_rank(signal_data)
+            fundamentals = get_fundamentals(symbol)
+            fundamental_details = score_fundamentals(fundamentals)
+            technical_rank = normalize_rank(signal_data)
+            rank = combine_hybrid_rank(
+                technical_rank=technical_rank,
+                fundamental_score=float(fundamental_details.get("fundamental_score", 0.5) or 0.5),
+            )
             technical_score = signal_data.get("technical_score", signal_data.get("score"))
-            successful = True
-            return {
+            result = {
                 "symbol": symbol.upper(),
                 "period": period,
                 "market_context": market_context,
@@ -143,12 +155,20 @@ def analyze_symbol_data(
                 "confidence_label": signal_data.get("confidence_label"),
                 "trend_strength": signal_data.get("trend_strength"),
                 "market_bias": signal_data.get("market_bias"),
+                "technical_rank": technical_rank,
+                "fundamentals": fundamentals,
+                "fundamental_score": fundamental_details.get("fundamental_score"),
+                "fundamental_raw_score": fundamental_details.get("raw_score"),
+                "fundamental_reasons": fundamental_details.get("reasons", []),
                 "rank": rank,
                 "confidence_interpretation": confidence_interpretation(signal_data.get("confidence_label")),
                 "opportunity_type": classify_opportunity({**signal_data, "rank": rank}),
                 "signal": signal_data.get("signal"),
-                "explanation": explanation,
+                "reasons": signal_data.get("reasons", []),
             }
+            result["explanation"] = build_explanation(result)
+            successful = True
+            return result
     finally:
         should_persist = False
         latency_ms = (perf_counter() - started_at) * 1000

@@ -17,6 +17,7 @@ def select_buy_opportunities(
     results: Sequence[dict[str, Any]],
     min_confidence: float = DEFAULT_MIN_CONFIDENCE,
     min_rank: float = DEFAULT_MIN_RANK,
+    min_fundamental_score: float | None = None,
     market: str | None = None,
     universe_category: str | None = None,
     weight_by_universe: bool = False,
@@ -27,7 +28,12 @@ def select_buy_opportunities(
     for item in results:
         if "error" in item:
             continue
-        if not is_buy_opportunity(item, min_confidence=min_confidence, min_rank=min_rank):
+        if not is_buy_opportunity(
+            item,
+            min_confidence=min_confidence,
+            min_rank=min_rank,
+            min_fundamental_score=min_fundamental_score,
+        ):
             continue
         candidate = dict(item)
         if market is not None:
@@ -76,6 +82,7 @@ def analyze_and_rank_opportunities(
     top_n: int,
     min_confidence: float = DEFAULT_MIN_CONFIDENCE,
     min_rank: float = DEFAULT_MIN_RANK,
+    min_fundamental_score: float | None = None,
     market: str | None = None,
     universe_category: str | None = None,
     weight_by_universe: bool = False,
@@ -87,6 +94,7 @@ def analyze_and_rank_opportunities(
         results,
         min_confidence=min_confidence,
         min_rank=min_rank,
+        min_fundamental_score=min_fundamental_score,
         market=market,
         universe_category=universe_category,
         weight_by_universe=weight_by_universe,
