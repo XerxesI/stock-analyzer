@@ -146,7 +146,8 @@ def run(
         print(
             f"\nPortfolio summary: positions={int(summary['positions'])}, "
             f"avg_rank={summary['avg_rank']:.2f}, avg_confidence={summary['avg_confidence']:.2f}, "
-            f"avg_fundamental={summary['avg_fundamental']:.2f}"
+            f"avg_fundamental={summary['avg_fundamental']:.2f}, portfolio_risk={summary['portfolio_risk']:.2f}, "
+            f"diversification={summary['diversification']:.2f}"
         )
 
     return 0
