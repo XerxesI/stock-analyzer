@@ -120,13 +120,22 @@ uvicorn api:app --reload
 curl "http://localhost:8000/analyze?symbol=AAPL"
 
 # TOP signaalid
-curl "http://localhost:8000/opportunities?market=ai&top=10"
+curl "http://localhost:8000/opportunities?market=ai&limit=10"
 
 # Võrdlus
 curl "http://localhost:8000/compare?symbols=NVDA,AMD,INTC"
+
+# Runtime metrics
+curl "http://localhost:8000/metrics"
 ```
 
 ---
+
+## 🛠️ RUNBOOK (production hardening)
+
+- **Parallelism:** globaalne concurrency cap + fetch throttle hoiavad nested parallelismi kontrolli all.
+- **Caching:** `data_fetcher`, `market_context` ja API vastused kasutavad TTL cache'i LRU evictioniga.
+- **Metrics:** `/metrics` endpoint näitab request latency/error rate, cache hit-rate ja persistib loendurid faili `runtime_metrics.json` (või `STOCK_ANALYZER_METRICS_FILE`).
 
 ## ✅ SENIOR-LEVEL PARANDUSED (v2.1)
 

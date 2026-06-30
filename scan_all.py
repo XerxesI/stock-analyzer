@@ -3,27 +3,46 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Sequence
 
 from analysis_service import analyze_symbols_data
-from opportunities import classify_opportunity, is_buy_opportunity, rank_opportunities
-from strategy import apply_universe_weight
+from opportunity_service import rank_buy_opportunities, select_buy_opportunities
+from runtime_limits import UNIVERSE_SCAN_WORKERS
 from universes import UNIVERSES, get_meta
 
 
 DEFAULT_PERIOD = "1y"
 DEFAULT_TOP = 20
 DEFAULT_CONFIDENCE = 0.5
+MAX_UNIVERSE_WORKERS = UNIVERSE_SCAN_WORKERS
 
 
-def deduplicate_by_symbol(results: list[dict]) -> list[dict]:
-    """Remove duplicate symbols, keeping the one with highest rank."""
-    seen = {}
-    for item in results:
-        symbol = item.get("symbol")
-        if symbol not in seen or float(item.get("rank", 0) or 0) > float(seen[symbol].get("rank", 0) or 0):
-            seen[symbol] = item
-    return list(seen.values())
+def _scan_single_universe(
+    market_name: str,
+    symbols: Sequence[str],
+    period: str,
+    min_confidence: float,
+) -> dict[str, object]:
+    """Analyze one universe and return filtered opportunities plus errors."""
+
+    results = analyze_symbols_data(symbols, period)
+    failed = [item for item in results if "error" in item]
+    meta = get_meta(market_name)
+    category = str(meta.get("category", "sector"))
+    filtered = select_buy_opportunities(
+        results,
+        min_confidence=min_confidence,
+        market=market_name,
+        universe_category=category,
+        weight_by_universe=True,
+    )
+    return {
+        "market": market_name,
+        "category": category,
+        "filtered": filtered,
+        "failed": failed,
+    }
 
 
 def run(
@@ -37,49 +56,39 @@ def run(
 
     print(f"Scanning all {len(UNIVERSES)} indices (confidence >= {min_confidence})...\n")
 
-    for market_name, symbols in UNIVERSES.items():
-        print(f"  Scanning {market_name.upper()}... ", end="", flush=True)
-
-        try:
-            results = analyze_symbols_data(symbols, period)
-            failed = [item for item in results if "error" in item]
-            meta = get_meta(market_name)
-            category = meta.get("category", "sector")
-            filtered = [
-                {
-                    **item,
-                    "market": market_name,
-                    "universe_category": category,
-                    "rank": float(item.get("rank", 0) or 0) * apply_universe_weight(1.0, category),
-                }
-                for item in results
-                if "error" not in item
-                and is_buy_opportunity(item)
-                and float(item.get("confidence") or 0.0) >= min_confidence
-            ]
-            print(f"found {len(filtered)} opportunities")
-            if failed:
-                failed_symbols = ", ".join(str(item.get("symbol", "UNKNOWN")) for item in failed[:5])
-                suffix = "..." if len(failed) > 5 else ""
-                print(f"    skipped {len(failed)} symbol(s): {failed_symbols}{suffix}")
-            all_results.extend(filtered)
-        except (ValueError, RuntimeError) as exc:
-            print(f"error: {exc}")
+    workers = min(MAX_UNIVERSE_WORKERS, len(UNIVERSES))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(_scan_single_universe, market_name, symbols, period, min_confidence): market_name
+            for market_name, symbols in UNIVERSES.items()
+        }
+        for future in as_completed(futures):
+            market_name = futures[future]
+            print(f"  Scanning {market_name.upper()}... ", end="", flush=True)
+            try:
+                scan_data = future.result()
+                filtered = list(scan_data["filtered"])
+                failed = list(scan_data["failed"])
+                print(f"found {len(filtered)} opportunities")
+                if failed:
+                    failed_symbols = ", ".join(str(item.get("symbol", "UNKNOWN")) for item in failed[:5])
+                    suffix = "..." if len(failed) > 5 else ""
+                    print(f"    skipped {len(failed)} symbol(s): {failed_symbols}{suffix}")
+                all_results.extend(filtered)
+            except (ValueError, RuntimeError) as exc:
+                print(f"error: {exc}")
 
     if not all_results:
         print(f"\nNo buy opportunities with confidence >= {min_confidence} found.")
         return 0
 
-    # Deduplicate by symbol, keeping highest ranked
-    unique_results = deduplicate_by_symbol(all_results)
-    ranked = rank_opportunities(unique_results)[:top_n]
+    ranked = rank_buy_opportunities(all_results, top_n=top_n, deduplicate=True)
 
     print(f"\n{'=' * 90}")
     print(f"TOP BUY OPPORTUNITIES (All Indices, confidence >= {min_confidence}, deduplicated):")
     print(f"{'=' * 90}\n")
 
     for index, item in enumerate(ranked, start=1):
-        signal_type = classify_opportunity(item)
         market = item.get("market", "unknown")
         category = item.get("universe_category", "unknown")
         confidence = float(item.get("confidence", 0) or 0)
@@ -87,7 +96,8 @@ def run(
 
         print(
             f"{index:2d}. {item['symbol']:8s} [{market:15s}] ({category:12s}) "
-            f"-> {item['signal']:11s} (rank: {rank_score:.2f}, conf: {confidence:.2f})"
+            f"-> {item['signal']:11s} (rank: {rank_score:.2f}, conf: {confidence:.2f}, "
+            f"type: {item.get('opportunity_type', 'mixed')})"
         )
 
     print(f"\n{'=' * 90}\n")

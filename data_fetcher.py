@@ -3,17 +3,28 @@
 from __future__ import annotations
 
 import logging
-from functools import lru_cache
+from threading import BoundedSemaphore
 from time import sleep
 
 import pandas as pd
 import yfinance as yf
+
+from cache_utils import TTLCache
+from runtime_limits import FETCH_CONCURRENCY
 
 
 REQUIRED_COLUMNS = ("Open", "High", "Low", "Close", "Volume")
 MAX_RETRIES = 3
 RETRY_SLEEP_SECONDS = 0.4
 REQUEST_TIMEOUT_SECONDS = 15
+CACHE_TTL_SECONDS = 300
+
+_data_cache: TTLCache[tuple[str, str], pd.DataFrame] = TTLCache(
+    maxsize=512,
+    default_ttl_seconds=CACHE_TTL_SECONDS,
+    name="stock_data",
+)
+_fetch_semaphore = BoundedSemaphore(FETCH_CONCURRENCY)
 
 # yfinance emits noisy per-symbol error logs; we surface failures via raised exceptions.
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
@@ -42,7 +53,6 @@ def _normalize_data(data: pd.DataFrame) -> pd.DataFrame:
     return data.loc[:, REQUIRED_COLUMNS].copy()
 
 
-@lru_cache(maxsize=256)
 def _fetch_with_retry(cleaned_symbol: str, cleaned_period: str) -> pd.DataFrame:
     """Fetch and cache stock data with retry support."""
 
@@ -50,20 +60,21 @@ def _fetch_with_retry(cleaned_symbol: str, cleaned_period: str) -> pd.DataFrame:
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            data = yf.download(
-                cleaned_symbol,
-                period=cleaned_period,
-                interval="1d",
-                auto_adjust=False,
-                progress=False,
-                threads=False,
-                timeout=REQUEST_TIMEOUT_SECONDS,
-            )
+            with _fetch_semaphore:
+                data = yf.download(
+                    cleaned_symbol,
+                    period=cleaned_period,
+                    interval="1d",
+                    auto_adjust=False,
+                    progress=False,
+                    threads=False,
+                    timeout=REQUEST_TIMEOUT_SECONDS,
+                )
             return _normalize_data(data)
         except (ConnectionError, TimeoutError, OSError, ValueError, RuntimeError) as exc:
             last_error = exc
             if attempt < MAX_RETRIES:
-                sleep(RETRY_SLEEP_SECONDS * attempt)
+                sleep(RETRY_SLEEP_SECONDS * (2 ** (attempt - 1)))
 
     if isinstance(last_error, ValueError):
         raise ValueError(f"No usable data returned for symbol '{cleaned_symbol}'.") from last_error
@@ -95,5 +106,22 @@ def get_stock_data(symbol: str, period: str) -> pd.DataFrame:
     if not cleaned_period:
         raise ValueError("Period must not be empty.")
 
+    cache_key = (cleaned_symbol, cleaned_period)
+    cached_frame = _data_cache.get_or_set(cache_key, lambda: _fetch_with_retry(cleaned_symbol, cleaned_period))
+
     # Return a copy so downstream indicator enrichment never mutates cached frames.
-    return _fetch_with_retry(cleaned_symbol, cleaned_period).copy()
+    return cached_frame.copy()
+
+
+def get_fetcher_metrics() -> dict[str, object]:
+    """Expose retry and cache metrics for runtime monitoring."""
+
+    return {
+        "cache": _data_cache.snapshot(),
+        "retry": {
+            "max_retries": MAX_RETRIES,
+            "base_backoff_seconds": RETRY_SLEEP_SECONDS,
+            "request_timeout_seconds": REQUEST_TIMEOUT_SECONDS,
+            "fetch_concurrency": FETCH_CONCURRENCY,
+        },
+    }

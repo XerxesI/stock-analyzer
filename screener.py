@@ -6,24 +6,18 @@ import argparse
 from typing import Sequence
 
 from analysis_service import analyze_symbols_data
+from opportunity_service import rank_analysis_results
 
 
 DEFAULT_PERIOD = "1y"
 DEFAULT_SYMBOLS = ["AAPL", "MSFT", "TSLA", "NVDA", "AMZN"]
 
 
-def _score_item(item: dict[str, object]) -> tuple[float, float]:
-    rank = float(item.get("rank", 0) or 0)
-    confidence = float(item.get("confidence", 0) or 0)
-    return rank, confidence
-
-
 def run(symbols: Sequence[str], period: str = DEFAULT_PERIOD) -> int:
     """Analyze a set of symbols and print the strongest signals."""
 
     results = analyze_symbols_data(symbols, period)
-    valid_results = [item for item in results if "error" not in item]
-    valid_results.sort(key=_score_item, reverse=True)
+    valid_results = rank_analysis_results(results)
 
     print("TOP SIGNALS TODAY:")
     for index, item in enumerate(valid_results, start=1):
