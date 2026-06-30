@@ -81,6 +81,17 @@ def _clamp(value: float, low: float = -1.0, high: float = 1.0) -> float:
     return max(low, min(high, value))
 
 
+def _sector_risk_scale(sector: str | None) -> int:
+    sector_name = (sector or "").lower().strip()
+    if "energy" in sector_name or "oil" in sector_name or "gas" in sector_name:
+        return SECTOR_RISK_SCALES["energy"]
+    if "utility" in sector_name:
+        return SECTOR_RISK_SCALES["utilities"]
+    if "financial" in sector_name or "bank" in sector_name or "insurance" in sector_name:
+        return SECTOR_RISK_SCALES["financial"]
+    return SECTOR_RISK_SCALES["default"]
+
+
 def _normalize(value: float | None, low: float, high: float) -> float:
     if value is None:
         return 0.5
@@ -136,11 +147,12 @@ def score_fundamental_factors(
     profit_margin = fundamentals.get("profit_margin")
     debt_to_equity = fundamentals.get("debt_to_equity")
 
+    sector_scale = _sector_risk_scale(sector)
     factor_scores: dict[str, float] = {
         "valuation": _normalize_inverse(pe, low=10.0, high=40.0),
         "growth": _normalize(revenue_growth, low=-0.1, high=0.3),
         "quality": round((0.6 * _normalize(roe, low=0.05, high=0.25)) + (0.4 * _normalize(profit_margin, low=0.05, high=0.3)), 2),
-        "risk": _normalize_inverse(debt_to_equity, low=0.0, high=float(SECTOR_RISK_SCALES.get((sector or "default").lower().strip(), SECTOR_RISK_SCALES["default"]))),
+        "risk": _normalize_inverse(debt_to_equity, low=0.0, high=float(sector_scale)),
     }
 
     reasons.append(f"Valuation factor: {factor_scores['valuation']:.2f} (P/E={pe if pe is not None else 'N/A'}).")
@@ -151,7 +163,7 @@ def score_fundamental_factors(
         f"Quality factor: {factor_scores['quality']:.2f} (ROE={f'{roe:.2%}' if roe is not None else 'N/A'}, margin={f'{profit_margin:.2%}' if profit_margin is not None else 'N/A'})."
     )
     reasons.append(
-        f"Risk factor: {factor_scores['risk']:.2f} (debt/equity={f'{debt_to_equity:.2f}' if debt_to_equity is not None else 'N/A'}, scale={SECTOR_RISK_SCALES.get((sector or 'default').lower().strip(), SECTOR_RISK_SCALES['default'])})."
+        f"Risk factor: {factor_scores['risk']:.2f} (debt/equity={f'{debt_to_equity:.2f}' if debt_to_equity is not None else 'N/A'}, scale={sector_scale})."
     )
 
     weighted_scores = {factor: factor_scores[factor] * weights[factor] for factor in factor_scores}

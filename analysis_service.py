@@ -23,7 +23,7 @@ DEFAULT_PERIOD = "1y"
 DEFAULT_SCORING_MODE = "balanced"
 SUPPORTED_SCORING_MODES = ("growth", "balanced", "defensive", "auto")
 RANK_LIMIT = 1.0
-RANK_DISTRIBUTION_EXPONENT = 1.5
+RANK_DISTRIBUTION_EXPONENT = 1.8
 CONFIDENCE_DISTRIBUTION_EXPONENT = 1.5
 TECHNICAL_MAX_SCORE = 6.0
 PENALIZE_MISSING_FUNDAMENTALS = False
@@ -180,6 +180,20 @@ def distribute_confidence(base_confidence: float) -> float:
     return round(min(RANK_LIMIT, distributed), 2)
 
 
+def classify_investment_type(technical_rank: float | None, fundamental_score: float | None) -> str:
+    """Classify the setup into a readable investment type."""
+
+    tech = float(technical_rank or 0)
+    fund = float(fundamental_score or 0)
+    if tech > 0.7 and fund < 0.4:
+        return "short_term_trade"
+    if tech > 0.6 and fund > 0.6:
+        return "high_conviction"
+    if fund > 0.6:
+        return "long_term_candidate"
+    return "mixed"
+
+
 def apply_completeness_penalty(value: float, completeness: float | None) -> float:
     """Apply optional penalty when fundamentals completeness is low."""
 
@@ -249,6 +263,7 @@ def analyze_symbol_data(
             technical_score = signal_data.get("technical_score", signal_data.get("score"))
             base_technical_confidence = float(signal_data.get("confidence", 0) or 0)
             technical_confidence = distribute_confidence(float(technical_score or 0))
+            technical_confidence = min(RANK_LIMIT, round(technical_confidence + (0.05 * technical_rank), 2))
             conviction_confidence = adjusted_confidence(
                 confidence=technical_confidence,
                 fundamental_score=fundamental_score,
@@ -298,6 +313,7 @@ def analyze_symbol_data(
                 "bias_adjusted_rank": bias_adjusted_rank,
                 "stretched_rank": stretched_rank,
                 "rank": rank,
+                "investment_type": classify_investment_type(technical_rank, fundamental_score),
                 "confidence_interpretation": confidence_interpretation(signal_data.get("confidence_label")),
                 "opportunity_type": classify_opportunity({**signal_data, "rank": rank}),
                 "signal": signal_data.get("signal"),
