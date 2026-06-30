@@ -13,6 +13,7 @@ from fastapi import FastAPI, HTTPException, Query
 from analysis_service import analyze_symbol_data, analyze_symbols_data, get_analysis_metrics
 from cache_utils import TTLCache
 from data_fetcher import get_fetcher_metrics
+from fundamentals import get_fundamentals_metrics
 from market_context import get_market_context_metrics
 from metrics_store import load_metrics_section, metrics_store_path, persist_metrics_section
 from opportunity_service import analyze_and_rank_opportunities, rank_analysis_results
@@ -148,6 +149,7 @@ def _build_opportunity_results(
     top_n: int,
     period: str,
     symbols: str | None,
+    min_fundamental_score: float | None,
 ) -> dict[str, object]:
     try:
         symbol_list = get_universe(
@@ -160,11 +162,16 @@ def _build_opportunity_results(
     normalized_period = period.strip()
     return _cached_response(
         "opportunities",
-        (market, top_n, normalized_symbols, normalized_period),
+        (market, top_n, normalized_symbols, normalized_period, min_fundamental_score),
         lambda: {
             "market": market,
             "top": top_n,
-            "results": analyze_and_rank_opportunities(normalized_symbols, normalized_period, top_n=top_n),
+            "results": analyze_and_rank_opportunities(
+                normalized_symbols,
+                normalized_period,
+                top_n=top_n,
+                min_fundamental_score=min_fundamental_score,
+            ),
         },
     )
 
@@ -175,13 +182,21 @@ async def opportunities(
     limit: int = Query(5, ge=1, le=50),
     symbols: str | None = Query(default=None),
     period: str = Query("1y", min_length=1),
+    min_fundamental_score: float | None = Query(default=None, ge=0.0, le=1.0),
 ) -> dict[str, object]:
     """Return the top buy opportunities for a market or custom symbol list."""
 
     started_at = perf_counter()
     successful = False
     try:
-        response = await asyncio.to_thread(_build_opportunity_results, market, limit, period, symbols)
+        response = await asyncio.to_thread(
+            _build_opportunity_results,
+            market,
+            limit,
+            period,
+            symbols,
+            min_fundamental_score,
+        )
         successful = True
         return response
     finally:
@@ -194,13 +209,21 @@ async def top(
     limit: int = Query(5, ge=1, le=50),
     symbols: str | None = Query(default=None),
     period: str = Query("1y", min_length=1),
+    min_fundamental_score: float | None = Query(default=None, ge=0.0, le=1.0),
 ) -> dict[str, object]:
     """Alias for the opportunities endpoint."""
 
     started_at = perf_counter()
     successful = False
     try:
-        response = await asyncio.to_thread(_build_opportunity_results, market, limit, period, symbols)
+        response = await asyncio.to_thread(
+            _build_opportunity_results,
+            market,
+            limit,
+            period,
+            symbols,
+            min_fundamental_score,
+        )
         successful = True
         return response
     finally:
@@ -248,5 +271,6 @@ async def metrics() -> dict[str, object]:
         "api": _api_metrics_snapshot(),
         "analysis": get_analysis_metrics(),
         "data_fetcher": get_fetcher_metrics(),
+        "fundamentals": get_fundamentals_metrics(),
         "market_context": get_market_context_metrics(),
     }
