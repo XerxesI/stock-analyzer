@@ -34,6 +34,11 @@ KEEP_RANK_THRESHOLD = 0.45
 LOSS_CUT_PCT = 0.08
 KEEP_WEIGHT_FLOOR_RATIO = 0.80
 MAX_REPLACEMENTS = 2
+REPLACEMENT_RATIO = 0.40
+WEAK_HOLD_DAYS = 14
+WEAK_MIN_GAIN = 1.02
+BORDERLINE_MAX_HOLD_DAYS = 21
+BETTER_RANK_GAP = 0.10
 
 
 def _normalize_download_frame(data: pd.DataFrame) -> pd.DataFrame:
@@ -107,11 +112,11 @@ def _cash_only_portfolio(capital: float) -> list[dict[str, Any]]:
 def should_keep_position(old_position: dict[str, Any], new_position: dict[str, Any]) -> bool:
     """Keep an existing holding only if refreshed signal quality is still acceptable."""
 
-    _ = old_position
+    old_holding_days = int(old_position.get("holding_days", 0) or 0)
     new_rank = float(new_position.get("rank", 0) or 0)
-    if new_rank >= 0.50:
+    if new_rank >= 0.55:
         return True
-    if new_rank >= KEEP_RANK_THRESHOLD:
+    if new_rank >= 0.50 and old_holding_days < BORDERLINE_MAX_HOLD_DAYS:
         return True
     return False
 
@@ -149,6 +154,15 @@ def should_cut_loss(entry_price: float | None, current_price: float | None) -> b
     )
 
 
+def should_exit_weak(position: dict[str, Any], current_data: dict[str, float | None]) -> bool:
+    holding_days = int(position.get("holding_days", 0) or 0)
+    if holding_days <= WEAK_HOLD_DAYS:
+        return False
+    entry_price = float(position.get("entry_price", 0) or 0)
+    current_price = current_data.get("price")
+    return entry_price > 0 and current_price is not None and current_price < (entry_price * WEAK_MIN_GAIN)
+
+
 def should_exit(position: dict[str, Any], current_data: dict[str, float | None]) -> bool:
     entry_price = float(position.get("entry_price", 0) or 0) or None
     current_price = current_data.get("price")
@@ -157,7 +171,15 @@ def should_exit(position: dict[str, Any], current_data: dict[str, float | None])
         return True
     if should_exit_on_trend_break(current_price, sma50):
         return True
+    if should_exit_weak(position, current_data):
+        return True
     return False
+
+
+def is_much_better(new_position: dict[str, Any], old_position: dict[str, Any]) -> bool:
+    new_rank = float(new_position.get("rank", 0) or 0)
+    old_rank = float(old_position.get("rank", 0) or 0)
+    return new_rank > (old_rank + BETTER_RANK_GAP)
 
 
 def merge_rebalanced_portfolio(
@@ -166,13 +188,16 @@ def merge_rebalanced_portfolio(
     frames: dict[str, pd.DataFrame],
     current_date: pd.Timestamp,
     max_positions: int,
-    max_replacements: int = MAX_REPLACEMENTS,
+    max_replacements: int | None = None,
 ) -> list[dict[str, Any]]:
     """Merge old and new portfolios to reduce turnover while preserving quality."""
 
     new_active = [dict(item) for item in new_portfolio if str(item.get("symbol", "")).upper() != "CASH"]
     if not new_active:
         return [dict(item) for item in new_portfolio]
+    if max_replacements is None:
+        active_old = len([item for item in old_portfolio if str(item.get("symbol", "")).upper() != "CASH"])
+        max_replacements = max(MAX_REPLACEMENTS, int(active_old * REPLACEMENT_RATIO))
 
     new_by_symbol = {str(item.get("symbol", "")).upper(): item for item in new_active}
     updated: list[dict[str, Any]] = []
@@ -200,18 +225,28 @@ def merge_rebalanced_portfolio(
     existing_symbols = {str(item.get("symbol", "")).upper() for item in updated}
     replacements_added = 0
     for new_position in new_active:
-        if replacements_added >= max_replacements:
-            break
-        if len(updated) >= max_positions:
-            break
         symbol = str(new_position.get("symbol", "")).upper()
         if symbol in existing_symbols:
             continue
-        added = dict(new_position)
-        added["holding_days"] = 0
-        updated.append(added)
-        existing_symbols.add(symbol)
-        replacements_added += 1
+        can_add_normally = replacements_added < max_replacements and len(updated) < max_positions
+        if can_add_normally:
+            added = dict(new_position)
+            added["holding_days"] = 0
+            updated.append(added)
+            existing_symbols.add(symbol)
+            replacements_added += 1
+            continue
+        if not updated:
+            continue
+        weakest = min(updated, key=lambda item: float(item.get("rank", 0) or 0))
+        weakest_symbol = str(weakest.get("symbol", "")).upper()
+        if weakest_symbol and weakest_symbol != "CASH" and is_much_better(new_position, weakest):
+            updated = [item for item in updated if str(item.get("symbol", "")).upper() != weakest_symbol]
+            existing_symbols.discard(weakest_symbol)
+            added = dict(new_position)
+            added["holding_days"] = 0
+            updated.append(added)
+            existing_symbols.add(symbol)
 
     if not updated:
         return [dict(item) for item in new_portfolio]
