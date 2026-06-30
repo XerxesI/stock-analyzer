@@ -130,7 +130,7 @@ def rank_analysis_results(results: Sequence[dict[str, Any]]) -> list[dict[str, A
         valid_rows,
         key=lambda item: (
             float(item.get("rank", 0) or 0),
-            float(item.get("confidence", 0) or 0),
+            float(item.get("adjusted_confidence", item.get("confidence", 0)) or 0),
         ),
         reverse=True,
     )

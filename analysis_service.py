@@ -23,7 +23,9 @@ DEFAULT_PERIOD = "1y"
 RANK_LIMIT = 1.0
 PENALIZE_MISSING_FUNDAMENTALS = False
 MISSING_FUNDAMENTALS_PENALTY_WEIGHT = 0.15
-BIAS_RANK_ADJUSTMENT = 0.05
+BIAS_RANK_ADJUSTMENT_MAX = 0.10
+APPLY_COMPLETENESS_PENALTY = False
+COMPLETENESS_PENALTY_WEIGHT = 0.15
 MAX_WORKERS = ANALYSIS_BATCH_WORKERS
 _ANALYSIS_SEMAPHORE = BoundedSemaphore(GLOBAL_ANALYSIS_CONCURRENCY)
 _METRICS_LOCK = Lock()
@@ -117,15 +119,34 @@ def combine_hybrid_rank(technical_rank: float, fundamental_score: float | None) 
     return round(min(RANK_LIMIT, max(0.0, hybrid_rank)), 2)
 
 
-def apply_fundamental_bias_adjustment(rank: float, fundamental_bias: str) -> float:
-    """Apply small bias-based rank adjustment without dominating technical logic."""
+def apply_fundamental_bias_adjustment(rank: float, fundamental_score: float | None) -> float:
+    """Apply smooth fundamentals-based rank adjustment."""
 
-    adjusted_rank = rank
-    if fundamental_bias == "bullish":
-        adjusted_rank = rank * (1.0 + BIAS_RANK_ADJUSTMENT)
-    elif fundamental_bias == "bearish":
-        adjusted_rank = rank * (1.0 - BIAS_RANK_ADJUSTMENT)
+    if fundamental_score is None:
+        return round(min(RANK_LIMIT, max(0.0, rank)), 2)
+    bias_adjustment = (fundamental_score - 0.5) * BIAS_RANK_ADJUSTMENT_MAX
+    adjusted_rank = rank * (1.0 + bias_adjustment)
     return round(min(RANK_LIMIT, max(0.0, adjusted_rank)), 2)
+
+
+def apply_completeness_penalty(value: float, completeness: float | None) -> float:
+    """Apply optional penalty when fundamentals completeness is low."""
+
+    if not APPLY_COMPLETENESS_PENALTY or completeness is None:
+        return round(min(RANK_LIMIT, max(0.0, value)), 2)
+    penalty = (1.0 - completeness) * COMPLETENESS_PENALTY_WEIGHT
+    adjusted = value * max(0.0, 1.0 - penalty)
+    return round(min(RANK_LIMIT, max(0.0, adjusted)), 2)
+
+
+def adjusted_confidence(confidence: float, fundamental_score: float | None, completeness: float | None) -> float:
+    """Build conviction-aware confidence from technical confidence plus fundamentals."""
+
+    if fundamental_score is None:
+        base = confidence
+    else:
+        base = confidence * (0.7 + (0.3 * fundamental_score))
+    return apply_completeness_penalty(base, completeness)
 
 
 def analyze_symbol_data(
@@ -154,12 +175,25 @@ def analyze_symbol_data(
             raw_fundamental_score = fundamental_details.get("fundamental_score")
             fundamental_score = float(raw_fundamental_score) if isinstance(raw_fundamental_score, (int, float)) else None
             fundamental_bias = classify_fundamental_bias(fundamental_score)
+            fundamental_completeness_raw = fundamental_details.get("fundamental_completeness")
+            fundamental_completeness = (
+                float(fundamental_completeness_raw)
+                if isinstance(fundamental_completeness_raw, (int, float))
+                else None
+            )
             base_hybrid_rank = combine_hybrid_rank(
                 technical_rank=technical_rank,
                 fundamental_score=fundamental_score,
             )
-            rank = apply_fundamental_bias_adjustment(base_hybrid_rank, fundamental_bias)
+            bias_adjusted_rank = apply_fundamental_bias_adjustment(base_hybrid_rank, fundamental_score)
+            rank = apply_completeness_penalty(bias_adjusted_rank, fundamental_completeness)
             technical_score = signal_data.get("technical_score", signal_data.get("score"))
+            technical_confidence = float(signal_data.get("confidence", 0) or 0)
+            conviction_confidence = adjusted_confidence(
+                confidence=technical_confidence,
+                fundamental_score=fundamental_score,
+                completeness=fundamental_completeness,
+            )
             result = {
                 "symbol": symbol.upper(),
                 "period": period,
@@ -176,7 +210,8 @@ def analyze_symbol_data(
                 "volume_sma20": signal_data.get("volume_sma20"),
                 "score": technical_score,
                 "technical_score": technical_score,
-                "confidence": signal_data.get("confidence"),
+                "confidence": technical_confidence,
+                "adjusted_confidence": conviction_confidence,
                 "confidence_label": signal_data.get("confidence_label"),
                 "trend_strength": signal_data.get("trend_strength"),
                 "market_bias": signal_data.get("market_bias"),
@@ -186,10 +221,12 @@ def analyze_symbol_data(
                 "fundamental_bias": fundamental_bias,
                 "fundamental_raw_score": fundamental_details.get("raw_score"),
                 "fundamental_factor_scores": fundamental_details.get("factor_scores", {}),
+                "fundamental_completeness": fundamental_completeness,
                 "missing_fundamentals_ratio": fundamental_details.get("missing_fundamentals_ratio"),
                 "missing_fundamentals_fields": fundamental_details.get("missing_fundamentals_fields", []),
                 "fundamental_reasons": fundamental_details.get("reasons", []),
                 "base_hybrid_rank": base_hybrid_rank,
+                "bias_adjusted_rank": bias_adjusted_rank,
                 "rank": rank,
                 "confidence_interpretation": confidence_interpretation(signal_data.get("confidence_label")),
                 "opportunity_type": classify_opportunity({**signal_data, "rank": rank}),

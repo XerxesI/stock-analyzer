@@ -145,6 +145,7 @@ def score_fundamentals(
         "raw_score": round(raw_score, 2),
         "factor_scores": factor_scores,
         "missing_fundamentals_ratio": round(missing_ratio, 2),
+        "fundamental_completeness": round(1.0 - missing_ratio, 2),
         "missing_fundamentals_fields": missing_fields,
         "reasons": reasons,
     }

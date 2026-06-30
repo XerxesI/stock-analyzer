@@ -39,7 +39,7 @@ def is_buy_opportunity(
     """Return True when a result is worth surfacing as a buy opportunity."""
 
     signal = str(item.get("signal", "HOLD"))
-    confidence = float(item.get("confidence", 0) or 0)
+    confidence = float(item.get("adjusted_confidence", item.get("confidence", 0)) or 0)
     rank = float(item.get("rank", 0) or 0)
     if signal not in BUY_SIGNALS or confidence < min_confidence or rank < min_rank:
         return False
@@ -56,7 +56,7 @@ def rank_opportunities(items: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
         items,
         key=lambda item: (
             float(item.get("rank", 0) or 0),
-            float(item.get("confidence", 0) or 0),
+            float(item.get("adjusted_confidence", item.get("confidence", 0)) or 0),
         ),
         reverse=True,
     )
