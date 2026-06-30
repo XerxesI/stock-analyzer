@@ -6,7 +6,7 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Sequence
 
-from analysis_service import analyze_symbols_data
+from analysis_service import DEFAULT_SCORING_MODE, SUPPORTED_SCORING_MODES, analyze_symbols_data
 from opportunity_service import rank_buy_opportunities, select_buy_opportunities
 from runtime_limits import UNIVERSE_SCAN_WORKERS
 from universes import UNIVERSES, get_meta
@@ -23,19 +23,29 @@ def _scan_single_universe(
     symbols: Sequence[str],
     period: str,
     min_confidence: float,
+    mode: str,
+    debug: bool,
 ) -> dict[str, object]:
     """Analyze one universe and return filtered opportunities plus errors."""
 
-    results = analyze_symbols_data(symbols, period)
-    failed = [item for item in results if "error" in item]
     meta = get_meta(market_name)
     category = str(meta.get("category", "sector"))
+    results = analyze_symbols_data(
+        symbols,
+        period,
+        mode=mode,
+        market=market_name,
+        universe_category=category,
+        debug=debug,
+    )
+    failed = [item for item in results if "error" in item]
     filtered = select_buy_opportunities(
         results,
         min_confidence=min_confidence,
         market=market_name,
         universe_category=category,
         weight_by_universe=True,
+        debug=debug,
     )
     return {
         "market": market_name,
@@ -49,6 +59,8 @@ def run(
     min_confidence: float = DEFAULT_CONFIDENCE,
     top_n: int = DEFAULT_TOP,
     period: str = DEFAULT_PERIOD,
+    mode: str = DEFAULT_SCORING_MODE,
+    debug: bool = False,
 ) -> int:
     """Scan all indices and find buy opportunities with confidence filter."""
 
@@ -59,7 +71,7 @@ def run(
     workers = min(MAX_UNIVERSE_WORKERS, len(UNIVERSES))
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {
-            executor.submit(_scan_single_universe, market_name, symbols, period, min_confidence): market_name
+            executor.submit(_scan_single_universe, market_name, symbols, period, min_confidence, mode, debug): market_name
             for market_name, symbols in UNIVERSES.items()
         }
         for future in as_completed(futures):
@@ -129,6 +141,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=DEFAULT_PERIOD,
         help=f"Yahoo Finance history period (default: {DEFAULT_PERIOD}).",
     )
+    parser.add_argument(
+        "--mode",
+        default=DEFAULT_SCORING_MODE,
+        choices=list(SUPPORTED_SCORING_MODES),
+        help="Fundamentals scoring mode (growth, balanced, defensive, auto).",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Print per-symbol scoring debug lines.",
+    )
     args = parser.parse_args(argv)
 
     if not (0.0 <= args.confidence <= 1.0):
@@ -136,7 +159,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     try:
-        return run(args.confidence, args.top, args.period)
+        return run(args.confidence, args.top, args.period, args.mode, args.debug)
     except (ValueError, RuntimeError) as exc:
         print(f"Error: {exc}")
         return 1

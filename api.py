@@ -10,14 +10,19 @@ from typing import Callable
 
 from fastapi import FastAPI, HTTPException, Query
 
-from analysis_service import analyze_symbol_data, analyze_symbols_data, get_analysis_metrics
+from analysis_service import (
+    DEFAULT_SCORING_MODE,
+    analyze_symbol_data,
+    analyze_symbols_data,
+    get_analysis_metrics,
+)
 from cache_utils import TTLCache
 from data_fetcher import get_fetcher_metrics
 from fundamentals import get_fundamentals_metrics
 from market_context import get_market_context_metrics
 from metrics_store import load_metrics_section, metrics_store_path, persist_metrics_section
 from opportunity_service import analyze_and_rank_opportunities, rank_analysis_results
-from universes import get_universe
+from universes import get_meta, get_universe
 
 
 app = FastAPI(title="Stock Analysis API", version="1.0.0")
@@ -87,34 +92,41 @@ def _cached_response(
     return deepcopy(cached_value)
 
 
-def _build_analyze_response(symbol: str, period: str) -> dict[str, object]:
+def _build_analyze_response(symbol: str, period: str, mode: str, debug: bool) -> dict[str, object]:
     normalized_symbol = symbol.strip().upper()
     normalized_period = period.strip()
+    normalized_mode = mode.strip().lower()
     return _cached_response(
         "analyze",
-        (normalized_symbol, normalized_period),
-        lambda: analyze_symbol_data(normalized_symbol, normalized_period),
+        (normalized_symbol, normalized_period, normalized_mode),
+        lambda: analyze_symbol_data(normalized_symbol, normalized_period, mode=normalized_mode, debug=debug),
     )
 
 
-def _build_batch_response(symbol_list: list[str], period: str) -> dict[str, object]:
+def _build_batch_response(symbol_list: list[str], period: str, mode: str, debug: bool) -> dict[str, object]:
     normalized_symbols = tuple(symbol.upper() for symbol in symbol_list)
     normalized_period = period.strip()
+    normalized_mode = mode.strip().lower()
     return _cached_response(
         "batch",
-        (normalized_symbols, normalized_period),
-        lambda: {"results": analyze_symbols_data(normalized_symbols, normalized_period)},
+        (normalized_symbols, normalized_period, normalized_mode),
+        lambda: {"results": analyze_symbols_data(normalized_symbols, normalized_period, mode=normalized_mode, debug=debug)},
     )
 
 
 @app.get("/analyze")
-async def analyze(symbol: str = Query(..., min_length=1), period: str = Query("1y", min_length=1)) -> dict[str, object]:
+async def analyze(
+    symbol: str = Query(..., min_length=1),
+    period: str = Query("1y", min_length=1),
+    mode: str = Query(DEFAULT_SCORING_MODE, pattern="^(growth|balanced|defensive|auto)$"),
+    debug: bool = Query(False),
+) -> dict[str, object]:
     """Analyze a ticker symbol and return structured JSON."""
 
     started_at = perf_counter()
     successful = False
     try:
-        response = await asyncio.to_thread(_build_analyze_response, symbol, period)
+        response = await asyncio.to_thread(_build_analyze_response, symbol, period, mode, debug)
         successful = True
         return response
     except ValueError as exc:
@@ -126,7 +138,12 @@ async def analyze(symbol: str = Query(..., min_length=1), period: str = Query("1
 
 
 @app.get("/batch")
-async def batch(symbols: str = Query(..., min_length=1), period: str = Query("1y", min_length=1)) -> dict[str, object]:
+async def batch(
+    symbols: str = Query(..., min_length=1),
+    period: str = Query("1y", min_length=1),
+    mode: str = Query(DEFAULT_SCORING_MODE, pattern="^(growth|balanced|defensive|auto)$"),
+    debug: bool = Query(False),
+) -> dict[str, object]:
     """Analyze multiple comma-separated ticker symbols and return structured JSON."""
 
     started_at = perf_counter()
@@ -137,7 +154,7 @@ async def batch(symbols: str = Query(..., min_length=1), period: str = Query("1y
         raise HTTPException(status_code=400, detail="At least one symbol is required.")
 
     try:
-        response = await asyncio.to_thread(_build_batch_response, symbol_list, period)
+        response = await asyncio.to_thread(_build_batch_response, symbol_list, period, mode, debug)
         successful = True
         return response
     finally:
@@ -150,6 +167,8 @@ def _build_opportunity_results(
     period: str,
     symbols: str | None,
     min_fundamental_score: float | None,
+    mode: str,
+    debug: bool,
 ) -> dict[str, object]:
     try:
         symbol_list = get_universe(
@@ -160,9 +179,14 @@ def _build_opportunity_results(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     normalized_symbols = tuple(str(symbol).upper() for symbol in symbol_list)
     normalized_period = period.strip()
+    normalized_mode = mode.strip().lower()
+    try:
+        universe_category = str(get_meta(market).get("category", "sector"))
+    except ValueError:
+        universe_category = None
     return _cached_response(
         "opportunities",
-        (market, top_n, normalized_symbols, normalized_period, min_fundamental_score),
+        (market, top_n, normalized_symbols, normalized_period, min_fundamental_score, normalized_mode),
         lambda: {
             "market": market,
             "top": top_n,
@@ -170,7 +194,11 @@ def _build_opportunity_results(
                 normalized_symbols,
                 normalized_period,
                 top_n=top_n,
+                mode=normalized_mode,
                 min_fundamental_score=min_fundamental_score,
+                market=market,
+                universe_category=universe_category,
+                debug=debug,
             ),
         },
     )
@@ -183,6 +211,8 @@ async def opportunities(
     symbols: str | None = Query(default=None),
     period: str = Query("1y", min_length=1),
     min_fundamental_score: float | None = Query(default=None, ge=0.0, le=1.0),
+    mode: str = Query(DEFAULT_SCORING_MODE, pattern="^(growth|balanced|defensive|auto)$"),
+    debug: bool = Query(False),
 ) -> dict[str, object]:
     """Return the top buy opportunities for a market or custom symbol list."""
 
@@ -196,6 +226,8 @@ async def opportunities(
             period,
             symbols,
             min_fundamental_score,
+            mode,
+            debug,
         )
         successful = True
         return response
@@ -210,6 +242,8 @@ async def top(
     symbols: str | None = Query(default=None),
     period: str = Query("1y", min_length=1),
     min_fundamental_score: float | None = Query(default=None, ge=0.0, le=1.0),
+    mode: str = Query(DEFAULT_SCORING_MODE, pattern="^(growth|balanced|defensive|auto)$"),
+    debug: bool = Query(False),
 ) -> dict[str, object]:
     """Alias for the opportunities endpoint."""
 
@@ -223,6 +257,8 @@ async def top(
             period,
             symbols,
             min_fundamental_score,
+            mode,
+            debug,
         )
         successful = True
         return response
@@ -231,7 +267,12 @@ async def top(
 
 
 @app.get("/compare")
-async def compare(symbols: str = Query(..., min_length=1), period: str = Query("1y", min_length=1)) -> dict[str, object]:
+async def compare(
+    symbols: str = Query(..., min_length=1),
+    period: str = Query("1y", min_length=1),
+    mode: str = Query(DEFAULT_SCORING_MODE, pattern="^(growth|balanced|defensive|auto)$"),
+    debug: bool = Query(False),
+) -> dict[str, object]:
     """Compare multiple symbols and return the best-ranked result."""
 
     started_at = perf_counter()
@@ -243,13 +284,16 @@ async def compare(symbols: str = Query(..., min_length=1), period: str = Query("
 
     normalized_symbols = tuple(symbol.upper() for symbol in symbol_list)
     normalized_period = period.strip()
+    normalized_mode = mode.strip().lower()
     try:
         response = await asyncio.to_thread(
             _cached_response,
             "compare",
-            (normalized_symbols, normalized_period),
+            (normalized_symbols, normalized_period, normalized_mode),
             lambda: {
-                "results": rank_analysis_results(analyze_symbols_data(normalized_symbols, normalized_period)),
+                "results": rank_analysis_results(
+                    analyze_symbols_data(normalized_symbols, normalized_period, mode=normalized_mode, debug=debug)
+                ),
                 "winner": None,
             },
         )

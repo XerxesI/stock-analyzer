@@ -39,6 +39,7 @@ def build_explanation(signal_data: dict[str, Any]) -> str:
     missing_fundamentals_fields = signal_data.get("missing_fundamentals_fields") or []
     fundamental_reasons = signal_data.get("fundamental_reasons") or []
     fundamentals = signal_data.get("fundamentals") or {}
+    market = str(signal_data.get("market", "")).lower()
 
     lines = []
 
@@ -175,5 +176,7 @@ def build_explanation(signal_data: dict[str, Any]) -> str:
         lines.append("Fundamentals support the current setup.")
     elif fundamental_bias == "bearish":
         lines.append("Fundamentals weaken the current setup.")
+    elif fundamental_bias == "neutral" and market == "energy":
+        lines.append("This is a stable/defensive stock where growth metrics are less relevant.")
 
     return "\n".join(lines) if lines else "No clear signal was generated."

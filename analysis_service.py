@@ -20,6 +20,8 @@ from strategy import generate_signal
 
 
 DEFAULT_PERIOD = "1y"
+DEFAULT_SCORING_MODE = "balanced"
+SUPPORTED_SCORING_MODES = ("growth", "balanced", "defensive", "auto")
 RANK_LIMIT = 1.0
 PENALIZE_MISSING_FUNDAMENTALS = False
 MISSING_FUNDAMENTALS_PENALTY_WEIGHT = 0.15
@@ -39,6 +41,13 @@ _METRICS: dict[str, float | int] = {
 _METRICS.update(load_metrics_section("analysis", _METRICS))
 _METRICS_UPDATES = 0
 _METRICS_PERSIST_EVERY = 20
+SECTOR_MODE_MAP: dict[str, str] = {
+    "energy": "defensive",
+    "sp500": "balanced",
+    "nasdaq": "growth",
+    "ai": "growth",
+    "biotech_genomics": "growth",
+}
 
 
 def _persist_analysis_metrics() -> None:
@@ -51,6 +60,30 @@ def _persist_analysis_metrics() -> None:
             "batch_requests": int(_METRICS["batch_requests"]),
         }
     persist_metrics_section("analysis", snapshot)
+
+
+def resolve_scoring_mode(
+    requested_mode: str,
+    market: str | None = None,
+    universe_category: str | None = None,
+) -> str:
+    """Resolve scoring mode, supporting optional auto-mode mapping."""
+
+    cleaned_mode = requested_mode.lower().strip()
+    if cleaned_mode not in SUPPORTED_SCORING_MODES:
+        raise ValueError(
+            f"Unsupported mode '{requested_mode}'. Choose one of: {', '.join(SUPPORTED_SCORING_MODES)}."
+        )
+    if cleaned_mode != "auto":
+        return cleaned_mode
+
+    category_key = (universe_category or "").lower().strip()
+    market_key = (market or "").lower().strip()
+    if market_key in SECTOR_MODE_MAP:
+        return SECTOR_MODE_MAP[market_key]
+    if category_key in SECTOR_MODE_MAP:
+        return SECTOR_MODE_MAP[category_key]
+    return DEFAULT_SCORING_MODE
 
 
 def _trend_weight(trend_strength: str | None) -> float:
@@ -115,7 +148,8 @@ def combine_hybrid_rank(technical_rank: float, fundamental_score: float | None) 
     if fundamental_score is None:
         hybrid_rank = technical_rank
     else:
-        hybrid_rank = technical_rank * (0.5 + (0.5 * fundamental_score))
+        multiplier = max(0.7, 0.5 + (0.5 * fundamental_score))
+        hybrid_rank = technical_rank * multiplier
     return round(min(RANK_LIMIT, max(0.0, hybrid_rank)), 2)
 
 
@@ -152,6 +186,10 @@ def adjusted_confidence(confidence: float, fundamental_score: float | None, comp
 def analyze_symbol_data(
     symbol: str,
     period: str = DEFAULT_PERIOD,
+    mode: str = DEFAULT_SCORING_MODE,
+    market: str | None = None,
+    universe_category: str | None = None,
+    debug: bool = False,
     market_context: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Run the full analysis pipeline for a single symbol and return structured data."""
@@ -166,8 +204,10 @@ def analyze_symbol_data(
             enriched_data = calculate_indicators(raw_data)
             signal_data = generate_signal(enriched_data, market_context=market_context)
             fundamentals = get_fundamentals(symbol)
+            effective_mode = resolve_scoring_mode(mode, market=market, universe_category=universe_category)
             fundamental_details = score_fundamentals(
                 fundamentals,
+                mode=effective_mode,
                 penalize_missing=PENALIZE_MISSING_FUNDAMENTALS,
                 missing_penalty_weight=MISSING_FUNDAMENTALS_PENALTY_WEIGHT,
             )
@@ -197,6 +237,8 @@ def analyze_symbol_data(
             result = {
                 "symbol": symbol.upper(),
                 "period": period,
+                "market": market,
+                "universe_category": universe_category,
                 "market_context": market_context,
                 "market_context_error": market_context.get("error"),
                 "price": signal_data.get("price"),
@@ -219,8 +261,10 @@ def analyze_symbol_data(
                 "fundamentals": fundamentals,
                 "fundamental_score": fundamental_score,
                 "fundamental_bias": fundamental_bias,
+                "fundamental_mode": effective_mode,
                 "fundamental_raw_score": fundamental_details.get("raw_score"),
                 "fundamental_factor_scores": fundamental_details.get("factor_scores", {}),
+                "fundamental_weighted_factor_scores": fundamental_details.get("weighted_factor_scores", {}),
                 "fundamental_completeness": fundamental_completeness,
                 "missing_fundamentals_ratio": fundamental_details.get("missing_fundamentals_ratio"),
                 "missing_fundamentals_fields": fundamental_details.get("missing_fundamentals_fields", []),
@@ -233,6 +277,14 @@ def analyze_symbol_data(
                 "signal": signal_data.get("signal"),
                 "reasons": signal_data.get("reasons", []),
             }
+            if debug:
+                print(
+                    result["symbol"],
+                    f"tech_conf={technical_confidence:.2f}",
+                    f"adj_conf={conviction_confidence:.2f}",
+                    f"fund={(fundamental_score if fundamental_score is not None else 0.0):.2f}",
+                    f"rank={float(result['rank'] or 0):.2f}",
+                )
             result["explanation"] = build_explanation(result)
             successful = True
             return result
@@ -255,17 +307,36 @@ def analyze_symbol_data(
 def _safe_analyze_symbol_data(
     symbol: str,
     period: str,
+    mode: str,
+    market: str | None,
+    universe_category: str | None,
+    debug: bool,
     market_context: dict[str, object],
 ) -> dict[str, object]:
     """Analyze one symbol and always return a result payload."""
 
     try:
-        return analyze_symbol_data(symbol, period, market_context)
+        return analyze_symbol_data(
+            symbol,
+            period,
+            mode=mode,
+            market=market,
+            universe_category=universe_category,
+            debug=debug,
+            market_context=market_context,
+        )
     except (ValueError, RuntimeError) as exc:
         return {"symbol": symbol.upper(), "period": period, "error": str(exc)}
 
 
-def analyze_symbols_data(symbols: Sequence[str], period: str = DEFAULT_PERIOD) -> list[dict[str, object]]:
+def analyze_symbols_data(
+    symbols: Sequence[str],
+    period: str = DEFAULT_PERIOD,
+    mode: str = DEFAULT_SCORING_MODE,
+    market: str | None = None,
+    universe_category: str | None = None,
+    debug: bool = False,
+) -> list[dict[str, object]]:
     """Analyze multiple symbols in parallel and return structured results."""
 
     symbol_list = [symbol for symbol in symbols if symbol and symbol.strip()]
@@ -278,7 +349,15 @@ def analyze_symbols_data(symbols: Sequence[str], period: str = DEFAULT_PERIOD) -
 
     market_context = resolve_market_context(period)
     workers = min(MAX_WORKERS, len(symbol_list))
-    analyzer = partial(_safe_analyze_symbol_data, period=period, market_context=market_context)
+    analyzer = partial(
+        _safe_analyze_symbol_data,
+        period=period,
+        mode=mode,
+        market=market,
+        universe_category=universe_category,
+        debug=debug,
+        market_context=market_context,
+    )
     with ThreadPoolExecutor(max_workers=workers) as executor:
         return list(executor.map(analyzer, symbol_list))
 

@@ -27,6 +27,12 @@ _FUNDAMENTAL_KEYS: dict[str, str] = {
     "revenue_growth": "revenueGrowth",
     "debt_to_equity": "debtToEquity",
 }
+SUPPORTED_SCORING_MODES = ("growth", "balanced", "defensive")
+_MODE_WEIGHTS: dict[str, dict[str, float]] = {
+    "growth": {"valuation": 0.5, "growth": 1.5, "quality": 1.0, "risk": 1.0},
+    "balanced": {"valuation": 1.0, "growth": 1.0, "quality": 1.0, "risk": 1.0},
+    "defensive": {"valuation": 1.2, "growth": 0.5, "quality": 1.0, "risk": 1.0},
+}
 
 
 def _safe_float(payload: dict[str, Any], key: str) -> float | None:
@@ -87,10 +93,18 @@ def classify_fundamental_bias(
 
 def score_fundamentals(
     fundamentals: dict[str, float | None],
+    mode: str = "balanced",
     penalize_missing: bool = False,
     missing_penalty_weight: float = 0.15,
 ) -> dict[str, object]:
     """Score fundamentals across valuation, growth, quality, and risk."""
+
+    effective_mode = mode.lower().strip()
+    if effective_mode not in SUPPORTED_SCORING_MODES:
+        raise ValueError(
+            f"Unsupported fundamentals scoring mode '{mode}'. Choose one of: {', '.join(SUPPORTED_SCORING_MODES)}."
+        )
+    weights = _MODE_WEIGHTS[effective_mode]
 
     factor_scores: dict[str, float] = {
         "valuation": 0.0,
@@ -128,7 +142,11 @@ def score_fundamentals(
         factor_scores["risk"] = _clamp((2.0 - debt_to_equity) / 2.0)
         reasons.append(f"Risk: debt-to-equity {debt_to_equity:.2f} scored {factor_scores['risk']:+.2f}.")
 
-    raw_score = sum(factor_scores.values())
+    weighted_scores = {
+        factor: factor_scores[factor] * weights[factor]
+        for factor in factor_scores
+    }
+    raw_score = sum(weighted_scores.values())
     missing_fields = [key for key, value in fundamentals.items() if value is None]
     missing_ratio = len(missing_fields) / len(_FUNDAMENTAL_KEYS)
     fundamental_score = _normalize_score(raw_score)
@@ -141,9 +159,12 @@ def score_fundamentals(
         reasons.append(f"Missing fundamentals: {len(missing_fields)}/{len(_FUNDAMENTAL_KEYS)} ({missing_ratio:.0%}).")
 
     return {
+        "mode": effective_mode,
         "fundamental_score": fundamental_score,
         "raw_score": round(raw_score, 2),
         "factor_scores": factor_scores,
+        "weighted_factor_scores": weighted_scores,
+        "weights": weights,
         "missing_fundamentals_ratio": round(missing_ratio, 2),
         "fundamental_completeness": round(1.0 - missing_ratio, 2),
         "missing_fundamentals_fields": missing_fields,
