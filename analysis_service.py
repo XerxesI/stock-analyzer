@@ -23,6 +23,8 @@ DEFAULT_PERIOD = "1y"
 DEFAULT_SCORING_MODE = "balanced"
 SUPPORTED_SCORING_MODES = ("growth", "balanced", "defensive", "auto")
 RANK_LIMIT = 1.0
+RANK_DISTRIBUTION_EXPONENT = 1.3
+CONFIDENCE_DISTRIBUTION_EXPONENT = 1.2
 PENALIZE_MISSING_FUNDAMENTALS = False
 MISSING_FUNDAMENTALS_PENALTY_WEIGHT = 0.15
 BIAS_RANK_ADJUSTMENT_MAX = 0.10
@@ -146,10 +148,9 @@ def combine_hybrid_rank(technical_rank: float, fundamental_score: float | None) 
     """Combine technical and fundamentals into one interpretable hybrid rank."""
 
     if fundamental_score is None:
-        hybrid_rank = technical_rank
-    else:
-        multiplier = max(0.7, 0.5 + (0.5 * fundamental_score))
-        hybrid_rank = technical_rank * multiplier
+        return round(min(RANK_LIMIT, max(0.0, technical_rank)), 2)
+    multiplier = max(0.7, 0.5 + (0.5 * fundamental_score))
+    hybrid_rank = technical_rank * multiplier
     return round(min(RANK_LIMIT, max(0.0, hybrid_rank)), 2)
 
 
@@ -161,6 +162,20 @@ def apply_fundamental_bias_adjustment(rank: float, fundamental_score: float | No
     bias_adjustment = (fundamental_score - 0.5) * BIAS_RANK_ADJUSTMENT_MAX
     adjusted_rank = rank * (1.0 + bias_adjustment)
     return round(min(RANK_LIMIT, max(0.0, adjusted_rank)), 2)
+
+
+def stretch_rank_distribution(rank: float) -> float:
+    """Apply non-linear expansion so high ranks separate better."""
+
+    stretched = max(0.0, rank) ** RANK_DISTRIBUTION_EXPONENT
+    return round(min(RANK_LIMIT, stretched), 2)
+
+
+def distribute_confidence(base_confidence: float) -> float:
+    """Apply non-linear confidence scaling to reduce clustering."""
+
+    distributed = max(0.0, min(RANK_LIMIT, base_confidence)) ** CONFIDENCE_DISTRIBUTION_EXPONENT
+    return round(min(RANK_LIMIT, distributed), 2)
 
 
 def apply_completeness_penalty(value: float, completeness: float | None) -> float:
@@ -226,14 +241,17 @@ def analyze_symbol_data(
                 fundamental_score=fundamental_score,
             )
             bias_adjusted_rank = apply_fundamental_bias_adjustment(base_hybrid_rank, fundamental_score)
-            rank = apply_completeness_penalty(bias_adjusted_rank, fundamental_completeness)
+            stretched_rank = stretch_rank_distribution(bias_adjusted_rank)
+            rank = apply_completeness_penalty(stretched_rank, fundamental_completeness)
             technical_score = signal_data.get("technical_score", signal_data.get("score"))
-            technical_confidence = float(signal_data.get("confidence", 0) or 0)
+            base_technical_confidence = float(signal_data.get("confidence", 0) or 0)
+            technical_confidence = distribute_confidence(base_technical_confidence)
             conviction_confidence = adjusted_confidence(
                 confidence=technical_confidence,
                 fundamental_score=fundamental_score,
                 completeness=fundamental_completeness,
             )
+            factors = fundamental_details.get("factors", {})
             result = {
                 "symbol": symbol.upper(),
                 "period": period,
@@ -252,6 +270,7 @@ def analyze_symbol_data(
                 "volume_sma20": signal_data.get("volume_sma20"),
                 "score": technical_score,
                 "technical_score": technical_score,
+                "base_confidence": base_technical_confidence,
                 "confidence": technical_confidence,
                 "adjusted_confidence": conviction_confidence,
                 "confidence_label": signal_data.get("confidence_label"),
@@ -263,14 +282,17 @@ def analyze_symbol_data(
                 "fundamental_bias": fundamental_bias,
                 "fundamental_mode": effective_mode,
                 "fundamental_raw_score": fundamental_details.get("raw_score"),
-                "fundamental_factor_scores": fundamental_details.get("factor_scores", {}),
+                "fundamental_factors": factors,
+                "fundamental_factor_scores": factors,
                 "fundamental_weighted_factor_scores": fundamental_details.get("weighted_factor_scores", {}),
+                "fundamental_weights": fundamental_details.get("weights", {}),
                 "fundamental_completeness": fundamental_completeness,
                 "missing_fundamentals_ratio": fundamental_details.get("missing_fundamentals_ratio"),
                 "missing_fundamentals_fields": fundamental_details.get("missing_fundamentals_fields", []),
                 "fundamental_reasons": fundamental_details.get("reasons", []),
                 "base_hybrid_rank": base_hybrid_rank,
                 "bias_adjusted_rank": bias_adjusted_rank,
+                "stretched_rank": stretched_rank,
                 "rank": rank,
                 "confidence_interpretation": confidence_interpretation(signal_data.get("confidence_label")),
                 "opportunity_type": classify_opportunity({**signal_data, "rank": rank}),
@@ -283,6 +305,8 @@ def analyze_symbol_data(
                     f"tech_conf={technical_confidence:.2f}",
                     f"adj_conf={conviction_confidence:.2f}",
                     f"fund={(fundamental_score if fundamental_score is not None else 0.0):.2f}",
+                    f"growth={float(factors.get('growth', 0) or 0):.2f}",
+                    f"val={float(factors.get('valuation', 0) or 0):.2f}",
                     f"rank={float(result['rank'] or 0):.2f}",
                 )
             result["explanation"] = build_explanation(result)

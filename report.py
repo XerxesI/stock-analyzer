@@ -33,7 +33,11 @@ def build_explanation(signal_data: dict[str, Any]) -> str:
     base_hybrid_rank = signal_data.get("base_hybrid_rank")
     bias_adjusted_rank = signal_data.get("bias_adjusted_rank")
     fundamental_raw_score = signal_data.get("fundamental_raw_score")
-    fundamental_factor_scores = signal_data.get("fundamental_factor_scores") or {}
+    fundamental_factor_scores = (
+        signal_data.get("fundamental_factors")
+        or signal_data.get("fundamental_factor_scores")
+        or {}
+    )
     fundamental_completeness = signal_data.get("fundamental_completeness")
     missing_fundamentals_ratio = signal_data.get("missing_fundamentals_ratio")
     missing_fundamentals_fields = signal_data.get("missing_fundamentals_fields") or []
@@ -150,11 +154,20 @@ def build_explanation(signal_data: dict[str, Any]) -> str:
     if fundamental_bias:
         lines.append(f"Fundamental bias: {fundamental_bias}.")
     if isinstance(fundamental_factor_scores, dict) and fundamental_factor_scores:
+        lines.append("Fundamental factor breakdown:")
+        for name, value in fundamental_factor_scores.items():
+            lines.append(f"- {str(name).capitalize()} score: {float(value):.2f}")
         lines.append(
             "Fundamental factor scores: "
             + ", ".join(f"{name}={float(value):+.2f}" for name, value in fundamental_factor_scores.items())
             + "."
         )
+        if float(fundamental_factor_scores.get("growth", 0) or 0) > 0.7:
+            lines.append("Strong growth profile.")
+        if float(fundamental_factor_scores.get("valuation", 1) or 1) < 0.4:
+            lines.append("Valuation appears elevated.")
+        if float(fundamental_factor_scores.get("risk", 1) or 1) < 0.4:
+            lines.append("Higher financial risk detected.")
     if isinstance(fundamental_completeness, (int, float)):
         lines.append(f"Fundamental completeness: {float(fundamental_completeness):.0%}.")
     if isinstance(missing_fundamentals_ratio, (int, float)):

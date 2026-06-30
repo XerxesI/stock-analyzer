@@ -29,9 +29,9 @@ _FUNDAMENTAL_KEYS: dict[str, str] = {
 }
 SUPPORTED_SCORING_MODES = ("growth", "balanced", "defensive")
 _MODE_WEIGHTS: dict[str, dict[str, float]] = {
-    "growth": {"valuation": 0.5, "growth": 1.5, "quality": 1.0, "risk": 1.0},
+    "growth": {"valuation": 0.5, "growth": 1.5, "quality": 1.0, "risk": 0.5},
     "balanced": {"valuation": 1.0, "growth": 1.0, "quality": 1.0, "risk": 1.0},
-    "defensive": {"valuation": 1.2, "growth": 0.5, "quality": 1.0, "risk": 1.0},
+    "defensive": {"valuation": 1.2, "growth": 0.5, "quality": 1.2, "risk": 1.5},
 }
 
 
@@ -75,6 +75,21 @@ def _clamp(value: float, low: float = -1.0, high: float = 1.0) -> float:
     return max(low, min(high, value))
 
 
+def _normalize(value: float | None, low: float, high: float) -> float:
+    if value is None:
+        return 0.5
+    if high <= low:
+        raise ValueError("high must be greater than low.")
+    scaled = (value - low) / (high - low)
+    return round(max(0.0, min(1.0, scaled)), 2)
+
+
+def _normalize_inverse(value: float | None, low: float, high: float) -> float:
+    if value is None:
+        return 0.5
+    return round(1.0 - _normalize(value, low, high), 2)
+
+
 def classify_fundamental_bias(
     score: float | None,
     bullish_threshold: float = 0.65,
@@ -91,13 +106,13 @@ def classify_fundamental_bias(
     return "neutral"
 
 
-def score_fundamentals(
+def score_fundamental_factors(
     fundamentals: dict[str, float | None],
     mode: str = "balanced",
     penalize_missing: bool = False,
     missing_penalty_weight: float = 0.15,
 ) -> dict[str, object]:
-    """Score fundamentals across valuation, growth, quality, and risk."""
+    """Score fundamentals as valuation/growth/quality/risk factors."""
 
     effective_mode = mode.lower().strip()
     if effective_mode not in SUPPORTED_SCORING_MODES:
@@ -106,50 +121,35 @@ def score_fundamentals(
         )
     weights = _MODE_WEIGHTS[effective_mode]
 
-    factor_scores: dict[str, float] = {
-        "valuation": 0.0,
-        "growth": 0.0,
-        "quality": 0.0,
-        "risk": 0.0,
-    }
     reasons: list[str] = []
 
     pe = fundamentals.get("pe")
-    if pe is None:
-        reasons.append("Valuation: P/E unavailable.")
-    else:
-        factor_scores["valuation"] = _clamp((20.0 - pe) / 20.0)
-        reasons.append(f"Valuation: P/E {pe:.2f} scored {factor_scores['valuation']:+.2f}.")
-
     revenue_growth = fundamentals.get("revenue_growth")
-    if revenue_growth is None:
-        reasons.append("Growth: revenue growth unavailable.")
-    else:
-        factor_scores["growth"] = _clamp(math.tanh(revenue_growth * 3.0))
-        reasons.append(f"Growth: revenue growth {revenue_growth:.2%} scored {factor_scores['growth']:+.2f}.")
-
     roe = fundamentals.get("roe")
-    if roe is None:
-        reasons.append("Quality: ROE unavailable.")
-    else:
-        factor_scores["quality"] = _clamp((roe - 0.15) / 0.15)
-        reasons.append(f"Quality: ROE {roe:.2%} scored {factor_scores['quality']:+.2f}.")
-
     debt_to_equity = fundamentals.get("debt_to_equity")
-    if debt_to_equity is None:
-        reasons.append("Risk: debt-to-equity unavailable.")
-    else:
-        factor_scores["risk"] = _clamp((2.0 - debt_to_equity) / 2.0)
-        reasons.append(f"Risk: debt-to-equity {debt_to_equity:.2f} scored {factor_scores['risk']:+.2f}.")
 
-    weighted_scores = {
-        factor: factor_scores[factor] * weights[factor]
-        for factor in factor_scores
+    factor_scores: dict[str, float] = {
+        "valuation": _normalize_inverse(pe, low=10.0, high=40.0),
+        "growth": _normalize(revenue_growth, low=-0.1, high=0.3),
+        "quality": _normalize(roe, low=0.05, high=0.25),
+        "risk": _normalize_inverse(debt_to_equity, low=0.0, high=2.0),
     }
-    raw_score = sum(weighted_scores.values())
+
+    reasons.append(f"Valuation factor: {factor_scores['valuation']:.2f} (P/E={pe if pe is not None else 'N/A'}).")
+    reasons.append(
+        f"Growth factor: {factor_scores['growth']:.2f} (rev growth={f'{revenue_growth:.2%}' if revenue_growth is not None else 'N/A'})."
+    )
+    reasons.append(f"Quality factor: {factor_scores['quality']:.2f} (ROE={f'{roe:.2%}' if roe is not None else 'N/A'}).")
+    reasons.append(
+        f"Risk factor: {factor_scores['risk']:.2f} (debt/equity={f'{debt_to_equity:.2f}' if debt_to_equity is not None else 'N/A'})."
+    )
+
+    weighted_scores = {factor: factor_scores[factor] * weights[factor] for factor in factor_scores}
+    total_weight = sum(weights.values())
+    weighted_score = sum(weighted_scores.values()) / total_weight if total_weight else 0.5
     missing_fields = [key for key, value in fundamentals.items() if value is None]
     missing_ratio = len(missing_fields) / len(_FUNDAMENTAL_KEYS)
-    fundamental_score = _normalize_score(raw_score)
+    fundamental_score = round(max(0.0, min(1.0, weighted_score)), 2)
     if penalize_missing and missing_ratio > 0:
         fundamental_score = round(max(0.0, fundamental_score - (missing_ratio * missing_penalty_weight)), 2)
         reasons.append(
@@ -161,8 +161,8 @@ def score_fundamentals(
     return {
         "mode": effective_mode,
         "fundamental_score": fundamental_score,
-        "raw_score": round(raw_score, 2),
-        "factor_scores": factor_scores,
+        "raw_score": round(weighted_score, 4),
+        "factors": factor_scores,
         "weighted_factor_scores": weighted_scores,
         "weights": weights,
         "missing_fundamentals_ratio": round(missing_ratio, 2),
@@ -170,6 +170,22 @@ def score_fundamentals(
         "missing_fundamentals_fields": missing_fields,
         "reasons": reasons,
     }
+
+
+def score_fundamentals(
+    fundamentals: dict[str, float | None],
+    mode: str = "balanced",
+    penalize_missing: bool = False,
+    missing_penalty_weight: float = 0.15,
+) -> dict[str, object]:
+    """Backward-compatible wrapper for factor scoring."""
+
+    return score_fundamental_factors(
+        fundamentals,
+        mode=mode,
+        penalize_missing=penalize_missing,
+        missing_penalty_weight=missing_penalty_weight,
+    )
 
 
 def get_fundamentals_metrics() -> dict[str, object]:

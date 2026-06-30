@@ -35,6 +35,8 @@ def is_buy_opportunity(
     min_confidence: float = 0.5,
     min_rank: float = 0.4,
     min_fundamental_score: float | None = None,
+    min_growth_score: float | None = None,
+    max_risk_score: float | None = None,
     debug: bool = False,
 ) -> bool:
     """Return True when a result is worth surfacing as a buy opportunity."""
@@ -44,19 +46,32 @@ def is_buy_opportunity(
     adjusted_confidence = float(item.get("adjusted_confidence", technical_confidence) or 0)
     rank = float(item.get("rank", 0) or 0)
     if debug:
+        factors = item.get("fundamental_factors", item.get("fundamental_factor_scores", {}))
         print(
             str(item.get("symbol", "UNKNOWN")),
             f"tech_conf={technical_confidence:.2f}",
             f"adj_conf={adjusted_confidence:.2f}",
             f"fund={float(item.get('fundamental_score', 0) or 0):.2f}",
+            f"growth={float((factors or {}).get('growth', 0) or 0):.2f}",
+            f"val={float((factors or {}).get('valuation', 0) or 0):.2f}",
             f"rank={rank:.2f}",
         )
     if signal not in BUY_SIGNALS or technical_confidence < min_confidence or rank < min_rank:
         return False
     if min_fundamental_score is None:
-        return True
+        pass
+    else:
+        fundamental_score = float(item.get("fundamental_score", 0) or 0)
+        if fundamental_score < min_fundamental_score:
+            return False
+    factors = item.get("fundamental_factors", item.get("fundamental_factor_scores", {}))
+    if isinstance(factors, dict):
+        if min_growth_score is not None and float(factors.get("growth", 0) or 0) < min_growth_score:
+            return False
+        if max_risk_score is not None and float(factors.get("risk", 1) or 1) > max_risk_score:
+            return False
     fundamental_score = float(item.get("fundamental_score", 0) or 0)
-    return fundamental_score >= min_fundamental_score
+    return min_fundamental_score is None or fundamental_score >= min_fundamental_score
 
 
 def rank_opportunities(items: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:

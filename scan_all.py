@@ -24,6 +24,8 @@ def _scan_single_universe(
     period: str,
     min_confidence: float,
     mode: str,
+    min_growth_score: float | None,
+    max_risk_score: float | None,
     debug: bool,
 ) -> dict[str, object]:
     """Analyze one universe and return filtered opportunities plus errors."""
@@ -42,6 +44,8 @@ def _scan_single_universe(
     filtered = select_buy_opportunities(
         results,
         min_confidence=min_confidence,
+        min_growth_score=min_growth_score,
+        max_risk_score=max_risk_score,
         market=market_name,
         universe_category=category,
         weight_by_universe=True,
@@ -60,6 +64,8 @@ def run(
     top_n: int = DEFAULT_TOP,
     period: str = DEFAULT_PERIOD,
     mode: str = DEFAULT_SCORING_MODE,
+    min_growth_score: float | None = None,
+    max_risk_score: float | None = None,
     debug: bool = False,
 ) -> int:
     """Scan all indices and find buy opportunities with confidence filter."""
@@ -71,7 +77,17 @@ def run(
     workers = min(MAX_UNIVERSE_WORKERS, len(UNIVERSES))
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {
-            executor.submit(_scan_single_universe, market_name, symbols, period, min_confidence, mode, debug): market_name
+            executor.submit(
+                _scan_single_universe,
+                market_name,
+                symbols,
+                period,
+                min_confidence,
+                mode,
+                min_growth_score,
+                max_risk_score,
+                debug,
+            ): market_name
             for market_name, symbols in UNIVERSES.items()
         }
         for future in as_completed(futures):
@@ -148,6 +164,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Fundamentals scoring mode (growth, balanced, defensive, auto).",
     )
     parser.add_argument(
+        "--min-growth-score",
+        type=float,
+        default=None,
+        help="Optional minimum growth factor score (0.0-1.0).",
+    )
+    parser.add_argument(
+        "--max-risk-score",
+        type=float,
+        default=None,
+        help="Optional maximum risk factor score (0.0-1.0).",
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Print per-symbol scoring debug lines.",
@@ -159,7 +187,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     try:
-        return run(args.confidence, args.top, args.period, args.mode, args.debug)
+        return run(
+            args.confidence,
+            args.top,
+            args.period,
+            args.mode,
+            args.min_growth_score,
+            args.max_risk_score,
+            args.debug,
+        )
     except (ValueError, RuntimeError) as exc:
         print(f"Error: {exc}")
         return 1
