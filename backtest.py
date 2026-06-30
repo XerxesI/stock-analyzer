@@ -545,28 +545,29 @@ def run_backtest(
 
     while current_date <= end:
         update_position_peaks(current_portfolio, current_date, frames)
-        if is_rebalance_day(current_date, start, rebalance_days):
-            capital = compute_portfolio_value(current_portfolio, current_date, frames)
-            opportunities = scan_market_at_date(
-                cleaned_symbols,
+        capital = compute_portfolio_value(current_portfolio, current_date, frames)
+
+        # 1) DAILY entry scan (mitte rebalance-gated)
+        opportunities = scan_market_at_date(
+            cleaned_symbols, frames, current_date, mode, spy_frame, debug=debug
+        )
+        candidate_portfolio = build_portfolio(opportunities, max_positions=max_positions, debug=debug)
+
+        active_positions = [p for p in current_portfolio if str(p.get("symbol", "")).upper() != "CASH"]
+        if not active_positions and candidate_portfolio:
+            # freeze/hold testis peab see avama positsioonid ka siis, kui rebalance_days on suur
+            current_portfolio = allocate_capital(candidate_portfolio, capital, current_date, frames)
+
+        # 2) REBALANCE ainult perioodiliselt
+        elif is_rebalance_day(current_date, start, rebalance_days) and candidate_portfolio:
+            rebalanced = merge_rebalanced_portfolio(
+                current_portfolio,
+                candidate_portfolio,
                 frames,
                 current_date,
-                mode,
-                spy_frame,
-                debug=debug,
+                max_positions=max_positions,
             )
-            rebuilt = build_portfolio(opportunities, max_positions=max_positions, debug=debug)
-            if rebuilt:
-                rebalanced = merge_rebalanced_portfolio(
-                    current_portfolio,
-                    rebuilt,
-                    frames,
-                    current_date,
-                    max_positions=max_positions,
-                )
-                current_portfolio = allocate_capital(rebalanced, capital, current_date, frames)
-            else:
-                current_portfolio = _cash_only_portfolio(capital)
+            current_portfolio = allocate_capital(rebalanced, capital, current_date, frames)
 
         portfolio_value = compute_portfolio_value(current_portfolio, current_date, frames)
         active_positions = len([pos for pos in current_portfolio if str(pos.get("symbol", "")).upper() != "CASH"])
