@@ -11,6 +11,7 @@ from strategy import apply_universe_weight
 
 DEFAULT_MIN_CONFIDENCE = 0.5
 DEFAULT_MIN_RANK = 0.4
+DEFAULT_MIN_FUNDAMENTAL_SCORE = 0.4
 
 
 def select_buy_opportunities(
@@ -83,6 +84,7 @@ def analyze_and_rank_opportunities(
     min_confidence: float = DEFAULT_MIN_CONFIDENCE,
     min_rank: float = DEFAULT_MIN_RANK,
     min_fundamental_score: float | None = None,
+    ensure_top_n_override: bool = True,
     market: str | None = None,
     universe_category: str | None = None,
     weight_by_universe: bool = False,
@@ -99,7 +101,25 @@ def analyze_and_rank_opportunities(
         universe_category=universe_category,
         weight_by_universe=weight_by_universe,
     )
-    return rank_buy_opportunities(selected, top_n=top_n)
+    if selected:
+        return rank_buy_opportunities(selected, top_n=top_n)
+
+    if not ensure_top_n_override:
+        return []
+
+    # Top-N override: prevent over-filtering from returning empty results.
+    fallback_buy = [dict(item) for item in results if "error" not in item and str(item.get("signal", "HOLD")) in {"BUY", "STRONG BUY"}]
+    if fallback_buy:
+        for item in fallback_buy:
+            item["selection_mode"] = "top_n_override_buy"
+            item["opportunity_type"] = classify_opportunity(item)
+        return rank_buy_opportunities(fallback_buy, top_n=top_n)
+
+    fallback_any = [dict(item) for item in results if "error" not in item]
+    for item in fallback_any:
+        item["selection_mode"] = "top_n_override_any"
+    ranked_any = rank_analysis_results(fallback_any)
+    return ranked_any[:top_n]
 
 
 def rank_analysis_results(results: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -105,7 +105,7 @@ python scan_all.py --confidence 0.5 --period 1y --top 25
 - 🔴 low (< 0.3) - nõrk
 
 **Rank:** 0.0–1.0 skoor, kõrgem = parem
-- Rank on nüüd **hybrid**: `0.7 * technical_rank + 0.3 * fundamental_score`
+- Rank on nüüd **hybrid modulaator**: `technical_rank * (0.5 + 0.5 * fundamental_score)`
 
 **Type:** trend_following | reversal | mixed_buy
 
@@ -138,7 +138,7 @@ curl "http://localhost:8000/metrics"
 ## 🛠️ RUNBOOK (production hardening)
 
 - **Parallelism:** globaalne concurrency cap + fetch throttle hoiavad nested parallelismi kontrolli all.
-- **Caching:** `data_fetcher`, `market_context` ja API vastused kasutavad TTL cache'i LRU evictioniga.
+- **Caching:** `data_fetcher`, `market_context`, `fundamentals` (24h TTL) ja API vastused kasutavad TTL cache'i LRU evictioniga.
 - **Metrics:** `/metrics` endpoint näitab request latency/error rate, cache hit-rate ja persistib loendurid faili `runtime_metrics.json` (või `STOCK_ANALYZER_METRICS_FILE`).
 
 ## ✅ SENIOR-LEVEL PARANDUSED (v2.1)
