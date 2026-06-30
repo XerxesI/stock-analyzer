@@ -8,6 +8,7 @@ from typing import Sequence
 
 from analysis_service import DEFAULT_SCORING_MODE, SUPPORTED_SCORING_MODES, analyze_symbols_data
 from opportunity_service import rank_buy_opportunities, select_buy_opportunities
+from portfolio import build_portfolio, summarize_portfolio
 from runtime_limits import UNIVERSE_SCAN_WORKERS
 from universes import UNIVERSES, get_meta
 
@@ -67,6 +68,7 @@ def run(
     min_growth_score: float | None = None,
     max_risk_score: float | None = None,
     debug: bool = False,
+    portfolio_mode: bool = False,
 ) -> int:
     """Scan all indices and find buy opportunities with confidence filter."""
 
@@ -131,6 +133,22 @@ def run(
     print(f"\n{'=' * 90}\n")
     print(f"Total opportunities: {len(ranked)} / {len(all_results)} found")
 
+    if portfolio_mode:
+        portfolio = build_portfolio(ranked, max_positions=min(10, len(ranked)), debug=debug)
+        summary = summarize_portfolio(portfolio)
+        print("\nPORTFOLIO:")
+        for index, pos in enumerate(portfolio, start=1):
+            print(
+                f"{index}. {pos['symbol']} "
+                f"(weight: {float(pos.get('weight', 0) or 0):.2%}, rank: {float(pos.get('rank', 0) or 0):.2f}, "
+                f"type: {pos.get('investment_type', 'mixed')}, sector: {pos.get('sector', 'unknown')})"
+            )
+        print(
+            f"\nPortfolio summary: positions={int(summary['positions'])}, "
+            f"avg_rank={summary['avg_rank']:.2f}, avg_confidence={summary['avg_confidence']:.2f}, "
+            f"avg_fundamental={summary['avg_fundamental']:.2f}"
+        )
+
     return 0
 
 
@@ -180,6 +198,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="Print per-symbol scoring debug lines.",
     )
+    parser.add_argument(
+        "--portfolio",
+        action="store_true",
+        help="Print a simple portfolio allocation after ranking opportunities.",
+    )
     args = parser.parse_args(argv)
 
     if not (0.0 <= args.confidence <= 1.0):
@@ -195,6 +218,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.min_growth_score,
             args.max_risk_score,
             args.debug,
+            args.portfolio,
         )
     except (ValueError, RuntimeError) as exc:
         print(f"Error: {exc}")
