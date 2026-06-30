@@ -109,15 +109,17 @@ python scan_all.py --confidence 0.5 --period 1y --top 25
 - 🔴 low (< 0.3) - nõrk
 - `adjusted_confidence` = confidence, mida fundamentals kiht modifitseerib.
 - Filtreerimine kasutab nüüd ainult **technical confidence** (`confidence`), mitte `adjusted_confidence`.
-- Confidence distribution kasutab venitamist: `confidence = base_confidence ** 1.2`
+- Confidence distribution kasutab venitamist: `confidence = base_confidence ** 1.5`
 
 **Rank:** 0.0–1.0 skoor, kõrgem = parem
 - Rank on nüüd **hybrid modulaator**: `technical_rank * (0.5 + 0.5 * fundamental_score)`
 - Bias mõju rankile on nüüd **sujuv**: `(fundamental_score - 0.5) * 0.1`
 - Hybrid multiplier on kaitstud alumise piiriga (`>= 0.7`), et fundamentals ei suruks ranki liiga agressiivselt alla.
-- Rank separation kasutab venitamist: `final_rank = final_rank ** 1.3`
+- Rank separation kasutab venitamist: `final_rank = final_rank ** 1.5`
 - `fundamental_bias`: bullish / neutral / bearish (sekundaarne conviction-kiht)
 - `fundamental_completeness`: kui palju fundamentals välju oli saadaval (0.0–1.0)
+- `fundamental_factors`: valuation / growth / quality / risk
+- `fundamental_interaction_penalty`: sektorite ja faktorite interaction adjustment
 - `--mode`: `growth | balanced | defensive | auto`
 - Optional factor filters: `--min-growth-score`, `--max-risk-score`
 

@@ -39,11 +39,13 @@ def build_explanation(signal_data: dict[str, Any]) -> str:
         or {}
     )
     fundamental_completeness = signal_data.get("fundamental_completeness")
+    fundamental_interaction_penalty = signal_data.get("fundamental_interaction_penalty")
     missing_fundamentals_ratio = signal_data.get("missing_fundamentals_ratio")
     missing_fundamentals_fields = signal_data.get("missing_fundamentals_fields") or []
     fundamental_reasons = signal_data.get("fundamental_reasons") or []
     fundamentals = signal_data.get("fundamentals") or {}
     market = str(signal_data.get("market", "")).lower()
+    sector = str(signal_data.get("universe_category", "")).lower()
 
     lines = []
 
@@ -168,8 +170,22 @@ def build_explanation(signal_data: dict[str, Any]) -> str:
             lines.append("Valuation appears elevated.")
         if float(fundamental_factor_scores.get("risk", 1) or 1) < 0.4:
             lines.append("Higher financial risk detected.")
+        if float(fundamental_factor_scores.get("growth", 0) or 0) > 0.7 and float(
+            fundamental_factor_scores.get("risk", 1) or 1
+        ) < 0.3:
+            lines.append("High growth is offset by elevated financial risk.")
+        if float(fundamental_factor_scores.get("valuation", 0) or 0) > 0.7 and float(
+            fundamental_factor_scores.get("quality", 1) or 1
+        ) < 0.3:
+            lines.append("Low valuation may indicate a potential value trap.")
+        if float(fundamental_factor_scores.get("growth", 0) or 0) > 0.7 and float(
+            fundamental_factor_scores.get("quality", 0) or 0
+        ) > 0.7:
+            lines.append("Strong growth combined with high quality fundamentals.")
     if isinstance(fundamental_completeness, (int, float)):
         lines.append(f"Fundamental completeness: {float(fundamental_completeness):.0%}.")
+    if isinstance(fundamental_interaction_penalty, (int, float)) and float(fundamental_interaction_penalty) != 0:
+        lines.append(f"Interaction adjustment: {float(fundamental_interaction_penalty):+.2f}.")
     if isinstance(missing_fundamentals_ratio, (int, float)):
         lines.append(f"Missing fundamentals ratio: {float(missing_fundamentals_ratio):.0%}.")
     if missing_fundamentals_fields:
@@ -189,7 +205,7 @@ def build_explanation(signal_data: dict[str, Any]) -> str:
         lines.append("Fundamentals support the current setup.")
     elif fundamental_bias == "bearish":
         lines.append("Fundamentals weaken the current setup.")
-    elif fundamental_bias == "neutral" and market == "energy":
+    elif fundamental_bias == "neutral" and (market == "energy" or sector == "energy"):
         lines.append("This is a stable/defensive stock where growth metrics are less relevant.")
 
     return "\n".join(lines) if lines else "No clear signal was generated."

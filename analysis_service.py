@@ -9,7 +9,7 @@ from time import perf_counter
 from typing import Any, Sequence
 
 from data_fetcher import get_stock_data
-from fundamentals import classify_fundamental_bias, get_fundamentals, score_fundamentals
+from fundamentals import classify_fundamental_bias, get_fundamentals, score_fundamental_factors
 from indicators import calculate_indicators
 from market_context import resolve_market_context
 from metrics_store import load_metrics_section, persist_metrics_section
@@ -23,8 +23,9 @@ DEFAULT_PERIOD = "1y"
 DEFAULT_SCORING_MODE = "balanced"
 SUPPORTED_SCORING_MODES = ("growth", "balanced", "defensive", "auto")
 RANK_LIMIT = 1.0
-RANK_DISTRIBUTION_EXPONENT = 1.3
-CONFIDENCE_DISTRIBUTION_EXPONENT = 1.2
+RANK_DISTRIBUTION_EXPONENT = 1.5
+CONFIDENCE_DISTRIBUTION_EXPONENT = 1.5
+TECHNICAL_MAX_SCORE = 6.0
 PENALIZE_MISSING_FUNDAMENTALS = False
 MISSING_FUNDAMENTALS_PENALTY_WEIGHT = 0.15
 BIAS_RANK_ADJUSTMENT_MAX = 0.10
@@ -174,7 +175,8 @@ def stretch_rank_distribution(rank: float) -> float:
 def distribute_confidence(base_confidence: float) -> float:
     """Apply non-linear confidence scaling to reduce clustering."""
 
-    distributed = max(0.0, min(RANK_LIMIT, base_confidence)) ** CONFIDENCE_DISTRIBUTION_EXPONENT
+    normalized = abs(base_confidence) / TECHNICAL_MAX_SCORE if TECHNICAL_MAX_SCORE else abs(base_confidence)
+    distributed = max(0.0, min(RANK_LIMIT, normalized)) ** CONFIDENCE_DISTRIBUTION_EXPONENT
     return round(min(RANK_LIMIT, distributed), 2)
 
 
@@ -220,9 +222,10 @@ def analyze_symbol_data(
             signal_data = generate_signal(enriched_data, market_context=market_context)
             fundamentals = get_fundamentals(symbol)
             effective_mode = resolve_scoring_mode(mode, market=market, universe_category=universe_category)
-            fundamental_details = score_fundamentals(
+            fundamental_details = score_fundamental_factors(
                 fundamentals,
                 mode=effective_mode,
+                sector=universe_category,
                 penalize_missing=PENALIZE_MISSING_FUNDAMENTALS,
                 missing_penalty_weight=MISSING_FUNDAMENTALS_PENALTY_WEIGHT,
             )
@@ -245,7 +248,7 @@ def analyze_symbol_data(
             rank = apply_completeness_penalty(stretched_rank, fundamental_completeness)
             technical_score = signal_data.get("technical_score", signal_data.get("score"))
             base_technical_confidence = float(signal_data.get("confidence", 0) or 0)
-            technical_confidence = distribute_confidence(base_technical_confidence)
+            technical_confidence = distribute_confidence(float(technical_score or 0))
             conviction_confidence = adjusted_confidence(
                 confidence=technical_confidence,
                 fundamental_score=fundamental_score,
@@ -286,6 +289,7 @@ def analyze_symbol_data(
                 "fundamental_factor_scores": factors,
                 "fundamental_weighted_factor_scores": fundamental_details.get("weighted_factor_scores", {}),
                 "fundamental_weights": fundamental_details.get("weights", {}),
+                "fundamental_interaction_penalty": fundamental_details.get("interaction_penalty"),
                 "fundamental_completeness": fundamental_completeness,
                 "missing_fundamentals_ratio": fundamental_details.get("missing_fundamentals_ratio"),
                 "missing_fundamentals_fields": fundamental_details.get("missing_fundamentals_fields", []),
@@ -302,10 +306,13 @@ def analyze_symbol_data(
             if debug:
                 print(
                     result["symbol"],
-                    f"tech_conf={technical_confidence:.2f}",
-                    f"adj_conf={conviction_confidence:.2f}",
+                    f"tech={technical_rank:.2f}",
                     f"fund={(fundamental_score if fundamental_score is not None else 0.0):.2f}",
                     f"growth={float(factors.get('growth', 0) or 0):.2f}",
+                    f"quality={float(factors.get('quality', 0) or 0):.2f}",
+                    f"risk={float(factors.get('risk', 0) or 0):.2f}",
+                    f"tech_conf={technical_confidence:.2f}",
+                    f"adj_conf={conviction_confidence:.2f}",
                     f"val={float(factors.get('valuation', 0) or 0):.2f}",
                     f"rank={float(result['rank'] or 0):.2f}",
                 )
