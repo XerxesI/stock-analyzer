@@ -120,13 +120,22 @@ uvicorn api:app --reload
 curl "http://localhost:8000/analyze?symbol=AAPL"
 
 # TOP signaalid
-curl "http://localhost:8000/opportunities?market=ai&top=10"
+curl "http://localhost:8000/opportunities?market=ai&limit=10"
 
 # Võrdlus
 curl "http://localhost:8000/compare?symbols=NVDA,AMD,INTC"
+
+# Runtime metrics
+curl "http://localhost:8000/metrics"
 ```
 
 ---
+
+## 🛠️ RUNBOOK (production hardening)
+
+- **Parallelism:** `analysis_service` analüüsib sümboleid thread pooliga ja `scan_all.py` skännib universumeid paralleelselt.
+- **Caching:** `data_fetcher`, `market_context` ja API vastused kasutavad TTL cache'i, et vähendada dubleerivaid Yahoo päringuid.
+- **Metrics:** `/metrics` endpoint näitab request latency/error rate ning cache hit-rate statistikat.
 
 ## ✅ SENIOR-LEVEL PARANDUSED (v2.1)
 

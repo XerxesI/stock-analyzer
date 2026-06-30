@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
 from typing import Any
 
+from cache_utils import TTLCache
 from data_fetcher import get_stock_data
 from indicators import calculate_indicators
 from strategy import generate_signal
 
 
 MARKET_BENCHMARK = "SPY"
+MARKET_CONTEXT_TTL_SECONDS = 180
+_market_context_cache: TTLCache[str, dict[str, Any]] = TTLCache(
+    maxsize=16,
+    default_ttl_seconds=MARKET_CONTEXT_TTL_SECONDS,
+    name="market_context",
+)
 
 
 def _market_bias(signal: str) -> str:
@@ -41,18 +47,16 @@ def get_market_context(period: str) -> dict[str, Any]:
     }
 
 
-@lru_cache(maxsize=10)
-def _cached_market_context(period: str) -> dict[str, Any]:
-    """Cache benchmark context per period to avoid repeated SPY fetches."""
-
-    return get_market_context(period)
-
-
 def resolve_market_context(period: str) -> dict[str, Any]:
     """Return market context, falling back to neutral if benchmark data is unavailable."""
 
+    cleaned_period = period.strip()
+    if not cleaned_period:
+        raise ValueError("Period must not be empty.")
+
     try:
-        return _cached_market_context(period).copy()
+        cached_context = _market_context_cache.get_or_set(cleaned_period, lambda: get_market_context(cleaned_period))
+        return cached_context.copy()
     except (ValueError, RuntimeError) as exc:
         return {
             "benchmark": MARKET_BENCHMARK,
@@ -65,3 +69,9 @@ def resolve_market_context(period: str) -> dict[str, Any]:
             "error": str(exc),
             "explanation": "Market context unavailable, so the benchmark bias is treated as neutral.",
         }
+
+
+def get_market_context_metrics() -> dict[str, object]:
+    """Expose market-context cache metrics for runtime monitoring."""
+
+    return {"cache": _market_context_cache.snapshot()}

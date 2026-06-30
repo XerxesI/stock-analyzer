@@ -5,8 +5,7 @@ from __future__ import annotations
 import argparse
 from typing import Sequence
 
-from analysis_service import analyze_symbols_data
-from opportunities import classify_opportunity, is_buy_opportunity, rank_opportunities
+from opportunity_service import analyze_and_rank_opportunities
 from universes import get_universe, get_universes_by_category, list_universes, UNIVERSES
 
 
@@ -39,17 +38,14 @@ def run(
         universe = get_universe(market, symbols)
         display_name = market.upper()
 
-    results = analyze_symbols_data(universe, period)
-    candidates = [item for item in results if "error" not in item and is_buy_opportunity(item)]
-    ranked = rank_opportunities(candidates)[:top_n]
+    ranked = analyze_and_rank_opportunities(universe, period, top_n=top_n)
 
     print(f"TOP BUY OPPORTUNITIES ({display_name}):")
     for index, item in enumerate(ranked, start=1):
-        signal_type = classify_opportunity(item)
         print(
             f"{index}. {item['symbol']} -> {item['signal']} "
             f"(rank {float(item.get('rank', 0) or 0):.2f}, confidence {float(item.get('confidence', 0) or 0):.2f}, "
-            f"type {signal_type})"
+            f"type {item.get('opportunity_type', 'mixed')})"
         )
 
     if not ranked:
