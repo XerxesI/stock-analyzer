@@ -21,6 +21,7 @@ python finder.py --market ai --mode growth --min-growth-score 0.55 --max-risk-sc
 python scan_all.py --confidence 0.5 --top 20
 python scan_all.py --mode auto --confidence 0.5 --top 20
 python scan_all.py --mode auto --confidence 0.5 --top 20 --portfolio
+python scan_all.py --mode auto --confidence 0.5 --top 20 --backtest --start-date 2025-01-01 --end-date 2025-12-31 --rebalance-days 7
 ```
 
 ---

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import date, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Sequence
 
@@ -69,6 +70,11 @@ def run(
     max_risk_score: float | None = None,
     debug: bool = False,
     portfolio_mode: bool = False,
+    backtest: bool = False,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    rebalance_days: int = 7,
+    initial_capital: float = 10_000.0,
 ) -> int:
     """Scan all indices and find buy opportunities with confidence filter."""
 
@@ -150,6 +156,31 @@ def run(
             f"diversification={summary['diversification']:.2f}"
         )
 
+    if backtest:
+        from backtest import run_backtest
+
+        all_symbols = sorted({symbol for universe in UNIVERSES.values() for symbol in universe})
+        resolved_end = end_date or date.today().isoformat()
+        resolved_start = start_date or (date.today() - timedelta(days=252)).isoformat()
+        print("\nBACKTEST:")
+        result = run_backtest(
+            all_symbols,
+            resolved_start,
+            resolved_end,
+            rebalance_days=rebalance_days,
+            initial_capital=initial_capital,
+            mode=mode,
+            max_positions=min(10, top_n),
+            debug=debug,
+        )
+        metrics = result["metrics"]
+        print(f"Total Return: {float(metrics['total_return']):.2%}")
+        print(f"Volatility: {float(metrics['volatility']):.4f}")
+        print(f"Sharpe Ratio: {float(metrics['sharpe']):.2f}")
+        print(f"Max Drawdown: {float(metrics['max_drawdown']):.2%}")
+        print(f"Benchmark Return (SPY): {float(metrics['benchmark_total_return']):.2%}")
+        print(f"Excess Return: {float(metrics['excess_return']):.2%}")
+
     return 0
 
 
@@ -204,6 +235,33 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="Print a simple portfolio allocation after ranking opportunities.",
     )
+    parser.add_argument(
+        "--backtest",
+        action="store_true",
+        help="Run a historical strategy backtest after the live ranking output.",
+    )
+    parser.add_argument(
+        "--start-date",
+        default=None,
+        help="Backtest start date in YYYY-MM-DD format (default: 252 days ago).",
+    )
+    parser.add_argument(
+        "--end-date",
+        default=None,
+        help="Backtest end date in YYYY-MM-DD format (default: today).",
+    )
+    parser.add_argument(
+        "--rebalance-days",
+        type=int,
+        default=7,
+        help="Backtest rebalance interval in days (default: 7).",
+    )
+    parser.add_argument(
+        "--initial-capital",
+        type=float,
+        default=10_000.0,
+        help="Backtest initial capital (default: 10000).",
+    )
     args = parser.parse_args(argv)
 
     if not (0.0 <= args.confidence <= 1.0):
@@ -220,6 +278,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.max_risk_score,
             args.debug,
             args.portfolio,
+            args.backtest,
+            args.start_date,
+            args.end_date,
+            args.rebalance_days,
+            args.initial_capital,
         )
     except (ValueError, RuntimeError) as exc:
         print(f"Error: {exc}")
