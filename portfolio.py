@@ -6,6 +6,10 @@ from typing import Any, Sequence
 
 
 MAX_PER_SECTOR = 2
+MAX_POSITION_WEIGHT = 0.20
+MAX_SECTOR_WEIGHT = 0.25
+MIN_RANK = 0.45
+CASH_BUFFER = 0.10
 
 
 def _sector_key(item: dict[str, Any]) -> str:
@@ -38,6 +42,8 @@ def build_portfolio(opportunities: list[dict[str, Any]], max_positions: int = 10
     for item in sorted_items:
         if len(selected) >= max_positions:
             break
+        if float(item.get("rank", 0) or 0) < MIN_RANK:
+            continue
         sector = _sector_key(item)
         if sector_counts.get(sector, 0) >= MAX_PER_SECTOR:
             continue
@@ -54,6 +60,47 @@ def build_portfolio(opportunities: list[dict[str, Any]], max_positions: int = 10
         risk = float((item.get("fundamental_factors") or {}).get("risk", 0.5) or 0.5)
         item["sector"] = _sector_key(item)
         item["weight"] = base_weight * _risk_multiplier(risk) * _type_multiplier(str(item.get("investment_type") or ""))
+
+    for item in selected:
+        if item["weight"] > MAX_POSITION_WEIGHT:
+            item["weight"] = MAX_POSITION_WEIGHT
+
+    total_weight = sum(float(item.get("weight", 0) or 0) for item in selected)
+    for item in selected:
+        item["weight"] = float(item.get("weight", 0) or 0) / total_weight if total_weight > 0 else 0.0
+
+    sector_weights: dict[str, float] = {}
+    for item in selected:
+        sector = str(item.get("sector", "unknown"))
+        sector_weights[sector] = sector_weights.get(sector, 0.0) + float(item.get("weight", 0) or 0)
+
+    for item in selected:
+        sector = str(item.get("sector", "unknown"))
+        if sector_weights.get(sector, 0.0) > MAX_SECTOR_WEIGHT:
+            reduction = MAX_SECTOR_WEIGHT / sector_weights[sector]
+            item["weight"] *= reduction
+
+    total_weight = sum(float(item.get("weight", 0) or 0) for item in selected)
+    for item in selected:
+        item["weight"] = float(item.get("weight", 0) or 0) / total_weight if total_weight > 0 else 0.0
+
+    non_cash_total = sum(float(item.get("weight", 0) or 0) for item in selected)
+    if non_cash_total > 0:
+        scale = 1.0 - CASH_BUFFER
+        for item in selected:
+            item["weight"] = round(float(item.get("weight", 0) or 0) * scale, 4)
+        selected.append(
+            {
+                "symbol": "CASH",
+                "weight": round(CASH_BUFFER, 4),
+                "rank": 0.0,
+                "confidence": 0.0,
+                "fundamental_score": 0.0,
+                "investment_type": "cash",
+                "sector": "cash",
+                "fundamental_factors": {"risk": 0.0},
+            }
+        )
 
     total_weight = sum(float(item.get("weight", 0) or 0) for item in selected)
     for item in selected:
@@ -78,12 +125,28 @@ def build_portfolio(opportunities: list[dict[str, Any]], max_positions: int = 10
 
 def summarize_portfolio(portfolio: Sequence[dict[str, Any]]) -> dict[str, float | int]:
     if not portfolio:
-        return {"positions": 0, "avg_rank": 0.0, "avg_confidence": 0.0, "avg_fundamental": 0.0}
+        return {
+            "positions": 0,
+            "avg_rank": 0.0,
+            "avg_confidence": 0.0,
+            "avg_fundamental": 0.0,
+            "portfolio_risk": 0.0,
+            "diversification": 0.0,
+        }
 
-    positions = len(portfolio)
+    positions = len([item for item in portfolio if str(item.get("symbol", "")).upper() != "CASH"])
     return {
         "positions": positions,
-        "avg_rank": sum(float(x.get("rank", 0) or 0) for x in portfolio) / positions,
-        "avg_confidence": sum(float(x.get("confidence", 0) or 0) for x in portfolio) / positions,
-        "avg_fundamental": sum(float(x.get("fundamental_score", 0) or 0) for x in portfolio) / positions,
+        "avg_rank": sum(float(x.get("rank", 0) or 0) for x in portfolio) / len(portfolio),
+        "avg_confidence": sum(float(x.get("confidence", 0) or 0) for x in portfolio) / len(portfolio),
+        "avg_fundamental": sum(float(x.get("fundamental_score", 0) or 0) for x in portfolio) / len(portfolio),
+        "portfolio_risk": sum(
+            float(pos.get("weight", 0) or 0) * (1.0 - float((pos.get("fundamental_factors") or {}).get("risk", 0.5) or 0.5))
+            for pos in portfolio
+        ),
+        "diversification": (
+            len({pos.get("sector") for pos in portfolio if str(pos.get("symbol", "")).upper() != "CASH"}) / positions
+            if positions > 0
+            else 0.0
+        ),
     }
