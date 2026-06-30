@@ -33,8 +33,10 @@ DEFAULT_MAX_POSITIONS = 10
 KEEP_RANK_THRESHOLD = 0.45
 KEEP_CONFIDENCE_THRESHOLD = 0.50
 LOSS_CUT_PCT = 0.08
-PROFIT_TAKE_PCT = 0.25
-TRAILING_STOP_PCT = 0.10
+TRAILING_STOP_PCT = 0.20
+HOLD_BONUS_DAYS = 14
+HOLD_BONUS_MULTIPLIER = 1.10
+KEEP_WEIGHT_FLOOR_RATIO = 0.80
 
 
 def _normalize_download_frame(data: pd.DataFrame) -> pd.DataFrame:
@@ -147,15 +149,6 @@ def should_cut_loss(entry_price: float | None, current_price: float | None) -> b
     )
 
 
-def should_take_profit(entry_price: float | None, current_price: float | None) -> bool:
-    return (
-        entry_price is not None
-        and entry_price > 0
-        and current_price is not None
-        and current_price > (entry_price * (1.0 + PROFIT_TAKE_PCT))
-    )
-
-
 def should_trigger_trailing_stop(peak_price: float | None, current_price: float | None) -> bool:
     return (
         peak_price is not None
@@ -170,12 +163,13 @@ def should_exit(position: dict[str, Any], current_data: dict[str, float | None])
     peak_price = float(position.get("peak_price", 0) or 0) or entry_price
     current_price = current_data.get("price")
     sma50 = current_data.get("sma50")
-    return (
-        should_cut_loss(entry_price, current_price)
-        or should_take_profit(entry_price, current_price)
-        or should_trigger_trailing_stop(peak_price, current_price)
-        or should_exit_on_trend_break(current_price, sma50)
-    )
+    if should_cut_loss(entry_price, current_price):
+        return True
+    if should_exit_on_trend_break(current_price, sma50):
+        return True
+    if should_trigger_trailing_stop(peak_price, current_price):
+        return True
+    return False
 
 
 def merge_rebalanced_portfolio(
@@ -209,6 +203,11 @@ def merge_rebalanced_portfolio(
             previous_peak = float(old_position.get("peak_price", 0) or 0) or kept["entry_price"]
             current_price = current_data.get("price")
             kept["peak_price"] = max(previous_peak, float(current_price or previous_peak))
+            kept["holding_days"] = int(old_position.get("holding_days", 0) or 0)
+            old_weight = float(old_position.get("weight", 0) or 0)
+            kept["weight"] = max(float(kept.get("weight", 0) or 0), old_weight * KEEP_WEIGHT_FLOOR_RATIO)
+            if kept["holding_days"] > HOLD_BONUS_DAYS:
+                kept["weight"] = float(kept.get("weight", 0) or 0) * HOLD_BONUS_MULTIPLIER
             updated.append(kept)
 
     existing_symbols = {str(item.get("symbol", "")).upper() for item in updated}
@@ -216,7 +215,9 @@ def merge_rebalanced_portfolio(
         symbol = str(new_position.get("symbol", "")).upper()
         if symbol in existing_symbols:
             continue
-        updated.append(dict(new_position))
+        added = dict(new_position)
+        added["holding_days"] = 0
+        updated.append(added)
         existing_symbols.add(symbol)
         if len(updated) >= max_positions:
             break
@@ -363,6 +364,7 @@ def allocate_capital(
             item["shares"] = 0.0
             item["entry_price"] = 0.0
             item["peak_price"] = 0.0
+            item["holding_days"] = 0
         else:
             frame = frames.get(symbol)
             if frame is None:
@@ -371,6 +373,7 @@ def allocate_capital(
             item["entry_price"] = round(entry_price, 4)
             item["peak_price"] = round(max(float(item.get("peak_price", 0) or 0), entry_price), 4)
             item["shares"] = value / entry_price if entry_price > 0 else 0.0
+            item["holding_days"] = int(item.get("holding_days", 0) or 0)
         allocated.append(item)
     return allocated
 
@@ -390,6 +393,7 @@ def update_position_peaks(
         current_price = _latest_close(frame, current_date)
         old_peak = float(position.get("peak_price", 0) or 0)
         position["peak_price"] = round(max(old_peak, current_price), 4)
+        position["holding_days"] = int(position.get("holding_days", 0) or 0) + 1
 
 
 def compute_portfolio_value(
