@@ -32,6 +32,9 @@ DEFAULT_INITIAL_CAPITAL = 10_000.0
 DEFAULT_MAX_POSITIONS = 10
 KEEP_RANK_THRESHOLD = 0.45
 KEEP_CONFIDENCE_THRESHOLD = 0.50
+LOSS_CUT_PCT = 0.08
+PROFIT_TAKE_PCT = 0.25
+TRAILING_STOP_PCT = 0.10
 
 
 def _normalize_download_frame(data: pd.DataFrame) -> pd.DataFrame:
@@ -121,9 +124,65 @@ def _normalize_weights(positions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return weighted
 
 
+def _price_snapshot(frame: pd.DataFrame, current_date: pd.Timestamp) -> dict[str, float | None]:
+    available = frame.loc[:current_date]
+    if available.empty:
+        return {"price": None, "sma50": None}
+    row = available.iloc[-1]
+    price = float(row["Close"]) if pd.notna(row.get("Close")) else None
+    sma50 = float(row["SMA50"]) if pd.notna(row.get("SMA50")) else None
+    return {"price": price, "sma50": sma50}
+
+
+def should_exit_on_trend_break(price: float | None, sma50: float | None) -> bool:
+    return price is not None and sma50 is not None and price < sma50
+
+
+def should_cut_loss(entry_price: float | None, current_price: float | None) -> bool:
+    return (
+        entry_price is not None
+        and entry_price > 0
+        and current_price is not None
+        and current_price < (entry_price * (1.0 - LOSS_CUT_PCT))
+    )
+
+
+def should_take_profit(entry_price: float | None, current_price: float | None) -> bool:
+    return (
+        entry_price is not None
+        and entry_price > 0
+        and current_price is not None
+        and current_price > (entry_price * (1.0 + PROFIT_TAKE_PCT))
+    )
+
+
+def should_trigger_trailing_stop(peak_price: float | None, current_price: float | None) -> bool:
+    return (
+        peak_price is not None
+        and peak_price > 0
+        and current_price is not None
+        and current_price < (peak_price * (1.0 - TRAILING_STOP_PCT))
+    )
+
+
+def should_exit(position: dict[str, Any], current_data: dict[str, float | None]) -> bool:
+    entry_price = float(position.get("entry_price", 0) or 0) or None
+    peak_price = float(position.get("peak_price", 0) or 0) or entry_price
+    current_price = current_data.get("price")
+    sma50 = current_data.get("sma50")
+    return (
+        should_cut_loss(entry_price, current_price)
+        or should_take_profit(entry_price, current_price)
+        or should_trigger_trailing_stop(peak_price, current_price)
+        or should_exit_on_trend_break(current_price, sma50)
+    )
+
+
 def merge_rebalanced_portfolio(
     old_portfolio: list[dict[str, Any]],
     new_portfolio: list[dict[str, Any]],
+    frames: dict[str, pd.DataFrame],
+    current_date: pd.Timestamp,
     max_positions: int,
 ) -> list[dict[str, Any]]:
     """Merge old and new portfolios to reduce turnover while preserving quality."""
@@ -139,9 +198,18 @@ def merge_rebalanced_portfolio(
         symbol = str(old_position.get("symbol", "")).upper()
         if not symbol or symbol == "CASH":
             continue
+        frame = frames.get(symbol)
+        if frame is None:
+            continue
         new_position = new_by_symbol.get(symbol)
-        if new_position and should_keep_position(old_position, new_position):
-            updated.append(dict(new_position))
+        current_data = _price_snapshot(frame, current_date)
+        if new_position and should_keep_position(old_position, new_position) and not should_exit(old_position, current_data):
+            kept = dict(new_position)
+            kept["entry_price"] = float(old_position.get("entry_price", 0) or 0)
+            previous_peak = float(old_position.get("peak_price", 0) or 0) or kept["entry_price"]
+            current_price = current_data.get("price")
+            kept["peak_price"] = max(previous_peak, float(current_price or previous_peak))
+            updated.append(kept)
 
     existing_symbols = {str(item.get("symbol", "")).upper() for item in updated}
     for new_position in new_active:
@@ -294,15 +362,34 @@ def allocate_capital(
         if symbol == "CASH":
             item["shares"] = 0.0
             item["entry_price"] = 0.0
+            item["peak_price"] = 0.0
         else:
             frame = frames.get(symbol)
             if frame is None:
                 raise ValueError(f"Missing price frame for {symbol}.")
             entry_price = _latest_close(frame, current_date)
             item["entry_price"] = round(entry_price, 4)
+            item["peak_price"] = round(max(float(item.get("peak_price", 0) or 0), entry_price), 4)
             item["shares"] = value / entry_price if entry_price > 0 else 0.0
         allocated.append(item)
     return allocated
+
+
+def update_position_peaks(
+    portfolio: list[dict[str, Any]],
+    current_date: pd.Timestamp,
+    frames: dict[str, pd.DataFrame],
+) -> None:
+    for position in portfolio:
+        symbol = str(position.get("symbol", "")).upper()
+        if symbol == "CASH":
+            continue
+        frame = frames.get(symbol)
+        if frame is None:
+            continue
+        current_price = _latest_close(frame, current_date)
+        old_peak = float(position.get("peak_price", 0) or 0)
+        position["peak_price"] = round(max(old_peak, current_price), 4)
 
 
 def compute_portfolio_value(
@@ -432,6 +519,7 @@ def run_backtest(
     current_date = start
 
     while current_date <= end:
+        update_position_peaks(current_portfolio, current_date, frames)
         if is_rebalance_day(current_date, start, rebalance_days):
             capital = compute_portfolio_value(current_portfolio, current_date, frames)
             opportunities = scan_market_at_date(
@@ -444,7 +532,13 @@ def run_backtest(
             )
             rebuilt = build_portfolio(opportunities, max_positions=max_positions, debug=debug)
             if rebuilt:
-                rebalanced = merge_rebalanced_portfolio(current_portfolio, rebuilt, max_positions=max_positions)
+                rebalanced = merge_rebalanced_portfolio(
+                    current_portfolio,
+                    rebuilt,
+                    frames,
+                    current_date,
+                    max_positions=max_positions,
+                )
                 current_portfolio = allocate_capital(rebalanced, capital, current_date, frames)
             else:
                 current_portfolio = _cash_only_portfolio(capital)
