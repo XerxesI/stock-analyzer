@@ -69,6 +69,22 @@ def _clamp(value: float, low: float = -1.0, high: float = 1.0) -> float:
     return max(low, min(high, value))
 
 
+def classify_fundamental_bias(
+    score: float | None,
+    bullish_threshold: float = 0.65,
+    bearish_threshold: float = 0.35,
+) -> str:
+    """Classify fundamental bias from normalized fundamental score."""
+
+    if score is None:
+        return "neutral"
+    if score >= bullish_threshold:
+        return "bullish"
+    if score <= bearish_threshold:
+        return "bearish"
+    return "neutral"
+
+
 def score_fundamentals(
     fundamentals: dict[str, float | None],
     penalize_missing: bool = False,
