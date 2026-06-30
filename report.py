@@ -41,6 +41,8 @@ def build_explanation(signal_data: dict[str, Any]) -> str:
     )
     fundamental_completeness = signal_data.get("fundamental_completeness")
     fundamental_interaction_penalty = signal_data.get("fundamental_interaction_penalty")
+    fundamental_sector = signal_data.get("fundamental_sector")
+    fundamental_risk_scale = signal_data.get("fundamental_risk_scale")
     missing_fundamentals_ratio = signal_data.get("missing_fundamentals_ratio")
     missing_fundamentals_fields = signal_data.get("missing_fundamentals_fields") or []
     fundamental_reasons = signal_data.get("fundamental_reasons") or []
@@ -155,6 +157,10 @@ def build_explanation(signal_data: dict[str, Any]) -> str:
                 else ""
             )
             + "."
+        )
+    if fundamental_sector or fundamental_risk_scale is not None:
+        lines.append(
+            f"Risk model scaling applied for sector: {fundamental_sector or 'n/a'} (scale={fundamental_risk_scale})."
         )
     if fundamental_bias:
         lines.append(f"Fundamental bias: {fundamental_bias}.")

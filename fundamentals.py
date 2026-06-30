@@ -83,11 +83,11 @@ def _clamp(value: float, low: float = -1.0, high: float = 1.0) -> float:
 
 def _sector_risk_scale(sector: str | None) -> int:
     sector_name = (sector or "").lower().strip()
-    if "energy" in sector_name or "oil" in sector_name or "gas" in sector_name:
+    if any(keyword in sector_name for keyword in ("energy", "oil", "gas")):
         return SECTOR_RISK_SCALES["energy"]
-    if "utility" in sector_name:
+    if any(keyword in sector_name for keyword in ("utility", "utilities")):
         return SECTOR_RISK_SCALES["utilities"]
-    if "financial" in sector_name or "bank" in sector_name or "insurance" in sector_name:
+    if any(keyword in sector_name for keyword in ("financial", "bank", "insurance")):
         return SECTOR_RISK_SCALES["financial"]
     return SECTOR_RISK_SCALES["default"]
 
@@ -193,6 +193,8 @@ def score_fundamental_factors(
 
     return {
         "mode": effective_mode,
+        "sector": (sector or "").lower().strip() or None,
+        "risk_scale": sector_scale,
         "fundamental_score": fundamental_score,
         "raw_score": round(weighted_score, 4),
         "factors": factor_scores,
