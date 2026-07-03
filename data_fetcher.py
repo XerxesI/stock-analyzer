@@ -65,7 +65,7 @@ def _fetch_with_retry(cleaned_symbol: str, cleaned_period: str) -> pd.DataFrame:
                     cleaned_symbol,
                     period=cleaned_period,
                     interval="1d",
-                    auto_adjust=False,
+                    auto_adjust=True,
                     progress=False,
                     threads=False,
                     timeout=REQUEST_TIMEOUT_SECONDS,

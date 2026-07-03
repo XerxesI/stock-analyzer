@@ -74,7 +74,7 @@ def _fetch_history(symbol: str, start_date: pd.Timestamp, end_date: pd.Timestamp
         start=start_date.to_pydatetime(),
         end=(end_date + pd.Timedelta(days=1)).to_pydatetime(),
         interval="1d",
-        auto_adjust=False,
+        auto_adjust=True,
         progress=False,
         threads=False,
         timeout=15,

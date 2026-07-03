@@ -101,6 +101,48 @@ python scan_all.py --confidence 0.5 --period 1y --top 25
 
 ---
 
+## 🧪 HYBRID STRATEEGIA (core-satellite + momentum)
+
+Uus, eraldiseisev strateegia-moodul (`run_hybrid.py`) — **ei kasuta vana signaali/ranki**
+(mille ennustusvõime osutus mürarikkaks, IC≈0.02). Struktuur:
+**CORE (SPY 70%) + SATELLITE (top-10 ristlõikeline 12-1 momentum, 30%)**,
+kuine tasakaalustus, tehingukulud arvestatud, range no-lookahead.
+
+```bash
+# Walk-forward test 5 aknas + ablatsioon (core-only / +satelliit / +overlay) + SPY võrdlus
+python run_hybrid.py
+
+# Lisaks tehingukulude tundlikkus (0.00 / 0.10 / 0.25% per side)
+python run_hybrid.py --costs
+
+# No-lookahead kontroll (kiire sanity-check)
+python run_hybrid.py --selftest
+
+# Parameetrid (tunable)
+python run_hybrid.py --core QQQ --core-weight 0.7 --sat-n 10
+python run_hybrid.py --core SPY,QQQ --core-weight 0.6
+```
+
+**Moodulid:** `factors.py` (12-1 momentum + ristlõikeline rank), `hybrid_portfolio.py`
+(core-satellite kaalud), `hybrid_backtest.py` (walk-forward mootor). Universum:
+`LIQUID_LARGECAP` (~200 likviidset large/mid-cap nime) failis `universes.py`.
+
+⚠️ **Ausalt (backtesti tulemus):** momentum-satelliit lõi SPY-d tootluselt kõigis
+5 aknas, kuid SMA200-overlay kahjustas (whipsaw). **Suurim hoiatus:** `LIQUID_LARGECAP`
+on tänaste nimede snapshot → **survivorship bias** võimendab momentumit. Eelis pole
+tõestatud, kuni pole testitud survivorship-vaba universumiga. Vt ka ⚠️ DISCLAIMER.
+
+---
+
+## ⚙️ ANDMED (oluline parandus)
+
+`auto_adjust=True` on nüüd nii `backtest.py`-s kui `data_fetcher.py`-s → hinnad
+arvestavad **dividende** ja indikaatorid (SMA/RSI/MACD) arvutatakse korrektsel,
+katkematul hinnareal. Live-skaneerimine ja backtest kasutavad nüüd **samu** hindu.
+(Varem `auto_adjust=False`, mis jättis dividendid arvestamata ja moonutas indikaatoreid.)
+
+---
+
 ## 🔍 VÄLJUNDI SELGITUS
 
 **Signal:** STRONG BUY > BUY > HOLD > SELL > STRONG SELL

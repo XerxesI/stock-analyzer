@@ -124,6 +124,25 @@ Kogu indeksite ja valdkondade nimistust. Kasutaja kontrolli ja paranduste jaoks.
 
 ---
 
+## 🧪 LIQUID_LARGECAP (hybrid momentum-universum)
+
+Lisatud hübriid-strateegia jaoks (`run_hybrid.py` / `factors.py`) — **mitte** tavaline
+skaneerimise indeks, vaid lai **~200 likviidse USA large/mid-cap nime** nimekiri
+ristlõikelise 12-1 momentum-faktori jaoks (laius = faktori mootor). Hajutatud sektorite
+lõikes: mega-cap tech, tervishoid, finants, tööstus, tarbija, energia, materjalid,
+utilities, kinnisvara.
+
+- Defineeritud: `universes.py` → `LIQUID_LARGECAP`
+- ⚠️ **Survivorship bias:** tänaste konstituentide snapshot mineviku andmetel —
+  kukkunud/delisteeritud nimed puuduvad. Backtestis teadvustatud piirang.
+
+> ℹ️ Märkus: see kataloog kirjeldab ka mitmeid indekseid (tech_growth, dax, ftse, asx,
+> korea, china, japan, advanced_reactors, energy_infrastructure), mida tegelikus
+> `universes.py`-s enam ei ole — kataloog on koodist ees. Reaalne universumite loend
+> on `universes.py`-s (`UNIVERSES`). See ebakõla on varasem, mitte hübriidi-muudatuse tulem.
+
+---
+
 ## 🔍 ERIKUJUD JA ÜLESANDED
 
 ### Ühe käsuga kõik indeksid skannida:

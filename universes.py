@@ -363,3 +363,51 @@ def get_universes_by_risk(risk_level: str) -> list[str]:
         raise ValueError(f"No universes with risk level '{risk_level}'.")
     return matching
 
+
+# ============================================================
+# Broad liquid US large/mid-cap list for the cross-sectional
+# momentum factor (hybrid core-satellite strategy). Breadth is
+# the engine of a cross-sectional factor, so this is intentionally
+# wide and diversified across sectors. NOTE: this is a CURRENT
+# constituent snapshot applied to past dates -> survivorship bias
+# is present; acceptable for a learning/backtest tool but callers
+# should disclose it in output.
+# ============================================================
+LIQUID_LARGECAP: list[str] = sorted(set([
+    # Mega-cap tech / communication
+    "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "GOOG", "TSLA", "AVGO", "ORCL",
+    "ADBE", "CRM", "AMD", "INTC", "CSCO", "QCOM", "TXN", "AMAT", "MU", "ADI",
+    "LRCX", "KLAC", "SNPS", "CDNS", "NXPI", "MRVL", "MCHP", "ON", "INTU", "NOW",
+    "PANW", "CRWD", "FTNT", "ZS", "DDOG", "SNOW", "NET", "PLTR", "SHOP", "UBER",
+    "ABNB", "PYPL", "WDAY", "TEAM", "MDB", "OKTA", "DOCU", "ZM", "TWLO", "ANET",
+    # Communication / media
+    "NFLX", "DIS", "CMCSA", "T", "VZ", "TMUS", "CHTR", "WBD", "EA", "TTWO",
+    # Consumer discretionary
+    "HD", "LOW", "NKE", "MCD", "SBUX", "BKNG", "TJX", "ROST", "LULU", "GM",
+    "F", "APTV", "YUM", "CMG", "MAR", "ORLY", "AZO",
+    # Consumer staples
+    "PG", "KO", "PEP", "COST", "WMT", "PM", "MO", "MDLZ", "CL", "KMB",
+    "GIS", "KHC", "STZ", "KDP",
+    # Health care
+    "UNH", "JNJ", "LLY", "ABBV", "MRK", "PFE", "TMO", "ABT", "DHR", "BMY",
+    "AMGN", "GILD", "ISRG", "VRTX", "REGN", "CVS", "CI", "HUM", "MDT", "SYK",
+    "BSX", "ZTS", "BDX", "HCA",
+    # Financials
+    "BRK-B", "JPM", "BAC", "WFC", "MS", "GS", "C", "SCHW", "AXP", "BLK",
+    "SPGI", "CB", "PGR", "MMC", "ICE", "CME", "PNC", "USB", "TFC", "COF",
+    "AIG", "MET", "PRU", "V", "MA",
+    # Industrials
+    "CAT", "DE", "HON", "GE", "LMT", "RTX", "NOC", "GD", "MMM", "EMR",
+    "ETN", "ITW", "CSX", "NSC", "FDX", "UPS", "BA", "WM", "PH", "ROP",
+    "CARR", "OTIS", "PCAR",
+    # Energy
+    "XOM", "CVX", "COP", "SLB", "EOG", "MPC", "PSX", "VLO", "OXY", "WMB",
+    "KMI", "HES", "DVN", "HAL",
+    # Materials
+    "LIN", "APD", "SHW", "FCX", "NEM", "ECL", "DOW", "NUE",
+    # Utilities
+    "NEE", "DUK", "SO", "D", "AEP", "XEL", "EXC", "SRE", "ED", "PEG",
+    # Real estate
+    "PLD", "AMT", "EQIX", "CCI", "PSA", "O", "SPG", "DLR", "WELL",
+]))
+
