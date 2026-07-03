@@ -49,3 +49,7 @@ Thumbs.db
 
 # Runtime metrics snapshot
 runtime_metrics.json
+
+# Backups and archives (not source)
+*.bak
+*.zip
