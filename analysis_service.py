@@ -16,7 +16,7 @@ from metrics_store import load_metrics_section, persist_metrics_section
 from opportunities import classify_opportunity
 from report import build_explanation
 from runtime_limits import ANALYSIS_BATCH_WORKERS, GLOBAL_ANALYSIS_CONCURRENCY
-from strategy import generate_signal
+from strategy import confidence_label_for, generate_signal
 
 
 DEFAULT_PERIOD = "1y"
@@ -26,6 +26,10 @@ RANK_LIMIT = 1.0
 RANK_DISTRIBUTION_EXPONENT = 1.8
 CONFIDENCE_DISTRIBUTION_EXPONENT = 1.5
 TECHNICAL_MAX_SCORE = 6.0
+# Upper bounds of the trend/market alignment multipliers, used to normalize the
+# technical rank so it does not saturate to 1.0 before the top of the confidence range.
+MAX_TREND_WEIGHT = 1.2
+MAX_MARKET_WEIGHT = 1.1
 PENALIZE_MISSING_FUNDAMENTALS = False
 MISSING_FUNDAMENTALS_PENALTY_WEIGHT = 0.15
 BIAS_RANK_ADJUSTMENT_MAX = 0.10
@@ -141,7 +145,8 @@ def normalize_rank(signal_data: dict[str, object]) -> float:
         str(signal_data.get("signal", "HOLD")),
         str(signal_data.get("market_bias", "neutral")),
     )
-    rank = confidence * trend_weight * market_weight
+    max_possible = MAX_TREND_WEIGHT * MAX_MARKET_WEIGHT
+    rank = (confidence * trend_weight * market_weight) / max_possible
     return round(min(RANK_LIMIT, rank), 2)
 
 
@@ -278,6 +283,9 @@ def analyze_symbol_data(
             base_technical_confidence = float(signal_data.get("confidence", 0) or 0)
             technical_confidence = distribute_confidence(float(technical_score or 0))
             technical_confidence = min(RANK_LIMIT, round(technical_confidence + (0.05 * technical_rank), 2))
+            # Derive the label from the value we actually display, so the number and its
+            # low/medium/high label can never disagree at the threshold boundaries.
+            display_confidence_label = confidence_label_for(technical_confidence)
             conviction_confidence = adjusted_confidence(
                 confidence=technical_confidence,
                 fundamental_score=fundamental_score,
@@ -306,7 +314,7 @@ def analyze_symbol_data(
                 "base_confidence": base_technical_confidence,
                 "confidence": technical_confidence,
                 "adjusted_confidence": conviction_confidence,
-                "confidence_label": signal_data.get("confidence_label"),
+                "confidence_label": display_confidence_label,
                 "trend_strength": signal_data.get("trend_strength"),
                 "market_bias": signal_data.get("market_bias"),
                 "technical_rank": technical_rank,
@@ -330,7 +338,7 @@ def analyze_symbol_data(
                 "stretched_rank": stretched_rank,
                 "rank": rank,
                 "investment_type": classify_investment_type(technical_rank, fundamental_score),
-                "confidence_interpretation": confidence_interpretation(signal_data.get("confidence_label")),
+                "confidence_interpretation": confidence_interpretation(display_confidence_label),
                 "opportunity_type": classify_opportunity({**signal_data, "rank": rank}),
                 "signal": signal_data.get("signal"),
                 "reasons": signal_data.get("reasons", []),

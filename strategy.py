@@ -7,6 +7,22 @@ from typing import Any
 import pandas as pd
 
 MAX_SCORE = 6.0
+CONFIDENCE_LOW_THRESHOLD = 0.3
+CONFIDENCE_HIGH_THRESHOLD = 0.7
+
+
+def confidence_label_for(confidence: float) -> str:
+    """Map a normalized confidence value to a low/medium/high label.
+
+    Kept as a shared helper so the displayed confidence value and its label are
+    always derived from the same number (see analysis_service.distribute_confidence).
+    """
+
+    if confidence < CONFIDENCE_LOW_THRESHOLD:
+        return "low"
+    if confidence < CONFIDENCE_HIGH_THRESHOLD:
+        return "medium"
+    return "high"
 
 
 def _as_float(value: Any) -> float | None:
@@ -132,12 +148,7 @@ def generate_signal(df: pd.DataFrame, market_context: dict[str, Any] | None = No
             reasons.append("Bullish market context from SPY tempers downside conviction.")
 
     confidence = min(1.0, (abs(technical_score) / MAX_SCORE) ** 1.3)
-    if confidence < 0.3:
-        confidence_label = "low"
-    elif confidence < 0.7:
-        confidence_label = "medium"
-    else:
-        confidence_label = "high"
+    confidence_label = confidence_label_for(confidence)
 
     if technical_score >= 4 and confidence_label == "high":
         signal = "STRONG BUY"
