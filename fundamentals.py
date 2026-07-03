@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import Any
 
@@ -9,6 +10,8 @@ import yfinance as yf
 
 from cache_utils import TTLCache
 
+
+LOGGER = logging.getLogger(__name__)
 
 FUNDAMENTALS_TTL_SECONDS = 86400
 _fundamentals_cache: TTLCache[str, dict[str, Any]] = TTLCache(
@@ -88,12 +91,18 @@ def extract_real_sector(info: dict[str, Any] | None) -> str:
 def _fetch_fundamentals(symbol: str) -> dict[str, Any]:
     try:
         info = yf.Ticker(symbol).info
-    except (ConnectionError, TimeoutError, OSError, RuntimeError, ValueError, KeyError, TypeError):
+    except (ConnectionError, TimeoutError, OSError, RuntimeError, ValueError, KeyError, TypeError) as exc:
+        # Previously swallowed silently, which let a transient failure masquerade
+        # downstream as "no sector" (and then as a universe-category pseudo-sector).
+        LOGGER.warning("Fundamentals fetch failed for %s: %s: %s", symbol, type(exc).__name__, exc)
         return {field: None for field in _FUNDAMENTAL_KEYS} | {"sector": ""}
     if not isinstance(info, dict):
+        LOGGER.warning("Fundamentals fetch for %s returned no usable info payload.", symbol)
         return {field: None for field in _FUNDAMENTAL_KEYS} | {"sector": ""}
     fundamentals = {field: _safe_float(info, source_key) for field, source_key in _FUNDAMENTAL_KEYS.items()}
     fundamentals["sector"] = extract_real_sector(info)
+    if not fundamentals["sector"]:
+        LOGGER.warning("No sector reported for %s; downstream sector grouping will fall back to 'unknown'.", symbol)
     return fundamentals
 
 
