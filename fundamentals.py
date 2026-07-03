@@ -17,23 +17,48 @@ _fundamentals_cache: TTLCache[str, dict[str, Any]] = TTLCache(
     name="fundamentals",
 )
 
+# Only fields actually consumed by ``score_fundamental_factors`` are fetched, so
+# the missing-data ratio reflects fields we truly rely on rather than fetched-but-ignored ones.
 _FUNDAMENTAL_KEYS: dict[str, str] = {
     "pe": "trailingPE",
-    "forward_pe": "forwardPE",
-    "peg": "pegRatio",
-    "pb": "priceToBook",
     "roe": "returnOnEquity",
     "profit_margin": "profitMargins",
     "revenue_growth": "revenueGrowth",
     "debt_to_equity": "debtToEquity",
 }
 SUPPORTED_SCORING_MODES = ("growth", "balanced", "defensive")
+# Debt-to-equity from Yahoo is expressed as a percentage (e.g. MSFT ~30, NBIS ~132),
+# so each scale is the upper bound above which the risk factor saturates to 0.
+# Higher scale => more leverage tolerated before the risk factor bottoms out.
 SECTOR_RISK_SCALES = {
     "energy": 300,
     "utilities": 300,
+    "real_estate": 300,
     "financial": 200,
-    "default": 2,
+    "technology": 150,
+    "communication": 150,
+    "consumer_discretionary": 150,
+    "industrials": 150,
+    "materials": 150,
+    "healthcare": 100,
+    "consumer_staples": 100,
+    "default": 150,
 }
+# Ordered keyword matches against the lowercased Yahoo sector label. First hit wins,
+# so more specific groups (real estate, consumer defensive/cyclical) precede broader ones.
+_SECTOR_RISK_KEYWORDS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("energy", "oil", "gas"), "energy"),
+    (("utility", "utilities"), "utilities"),
+    (("real estate", "reit"), "real_estate"),
+    (("financial", "bank", "insurance"), "financial"),
+    (("consumer defensive", "consumer staples", "staples"), "consumer_staples"),
+    (("consumer cyclical", "consumer discretionary", "discretionary", "retail"), "consumer_discretionary"),
+    (("healthcare", "health", "pharma", "biotech", "medical"), "healthcare"),
+    (("technology", "software", "semiconductor", "tech"), "technology"),
+    (("communication", "telecom", "media"), "communication"),
+    (("industrial",), "industrials"),
+    (("materials", "material", "mining", "chemical"), "materials"),
+)
 _MODE_WEIGHTS: dict[str, dict[str, float]] = {
     "growth": {"valuation": 0.5, "growth": 1.5, "quality": 1.0, "risk": 0.5},
     "balanced": {"valuation": 1.0, "growth": 1.0, "quality": 1.0, "risk": 1.0},
@@ -93,12 +118,11 @@ def _clamp(value: float, low: float = -1.0, high: float = 1.0) -> float:
 
 def _sector_risk_scale(sector: str | None) -> int:
     sector_name = (sector or "").lower().strip()
-    if any(keyword in sector_name for keyword in ("energy", "oil", "gas")):
-        return SECTOR_RISK_SCALES["energy"]
-    if any(keyword in sector_name for keyword in ("utility", "utilities")):
-        return SECTOR_RISK_SCALES["utilities"]
-    if any(keyword in sector_name for keyword in ("financial", "bank", "insurance")):
-        return SECTOR_RISK_SCALES["financial"]
+    if not sector_name:
+        return SECTOR_RISK_SCALES["default"]
+    for keywords, scale_key in _SECTOR_RISK_KEYWORDS:
+        if any(keyword in sector_name for keyword in keywords):
+            return SECTOR_RISK_SCALES[scale_key]
     return SECTOR_RISK_SCALES["default"]
 
 
