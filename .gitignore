@@ -40,6 +40,10 @@ htmlcov/
 .idea/
 .vscode/
 
+# Claude Code local (per-machine) settings — personal permission allowlist,
+# not shareable. The shared .claude/settings.json stays tracked.
+.claude/settings.local.json
+
 # OS files
 .DS_Store
 Thumbs.db
