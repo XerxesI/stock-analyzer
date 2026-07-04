@@ -30,7 +30,12 @@ REQUIRED_COLUMNS = ("Open", "High", "Low", "Close", "Volume")
 LOOKBACK_BUFFER_DAYS = 260
 DEFAULT_INITIAL_CAPITAL = 10_000.0
 DEFAULT_MAX_POSITIONS = 10
-KEEP_RANK_THRESHOLD = 0.45
+# Rank a held position must still clear to be kept at rebalance. Intentionally
+# lower than MIN_ENTRY_RANK (0.60) — hysteresis to reduce churn: once we own a
+# position we don't sell it the moment its rank dips briefly below the (stricter)
+# entry bar, only when it falls meaningfully. This is the single source of truth
+# for the keep threshold; should_keep_position() reads it directly.
+KEEP_RANK_THRESHOLD = 0.50
 LOSS_CUT_PCT = 0.08
 KEEP_WEIGHT_FLOOR_RATIO = 0.80
 MAX_REPLACEMENTS = 2
@@ -119,7 +124,7 @@ def should_keep_position(old_position: dict[str, Any], new_position: dict[str, A
 
     _ = old_position
     new_rank = float(new_position.get("rank", 0) or 0)
-    return new_rank >= 0.50
+    return new_rank >= KEEP_RANK_THRESHOLD
 
 
 def _normalize_weights(positions: list[dict[str, Any]]) -> list[dict[str, Any]]:
