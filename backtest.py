@@ -615,14 +615,15 @@ def run_backtest(
         effective_max_positions = 8 if spy_ok else 4
 
         # 1) DAILY entry scan (mitte rebalance-gated)
+        # scan_market_at_date() returns only rank >= MIN_ENTRY_RANK candidates:
+        # _build_opportunity() already drops anything below that via
+        # is_buy_opportunity(min_rank=MIN_ENTRY_RANK). A second rank filter here
+        # would be a no-op, so we feed the scan output straight to build_portfolio.
         opportunities = scan_market_at_date(
             cleaned_symbols, frames, current_date, mode, spy_frame, debug=debug
         )
-        gated_opportunities = [
-            item for item in opportunities if float(item.get("rank", 0) or 0) >= MIN_ENTRY_RANK
-        ]
         candidate_portfolio: list[dict[str, Any]] = build_portfolio(
-            gated_opportunities, max_positions=effective_max_positions, debug=debug
+            opportunities, max_positions=effective_max_positions, debug=debug
         )
 
         active_positions = [p for p in current_portfolio if str(p.get("symbol", "")).upper() != "CASH"]
