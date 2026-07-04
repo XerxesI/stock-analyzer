@@ -9,7 +9,16 @@ BUY_SIGNALS = {"BUY", "STRONG BUY"}
 
 
 def classify_opportunity(item: dict[str, Any]) -> str:
-    """Classify a signal as trend-following, reversal, or mixed."""
+    """Classify a signal as trend-following, reversal, or mixed.
+
+    Note: the returned ``opportunity_type`` is descriptive metadata for
+    reporting/display only. It does NOT currently affect any buy/sell,
+    portfolio-weighting, or backtest entry/exit decision — is_buy_opportunity(),
+    build_portfolio(), and the backtest rules all ignore it. (Portfolio weighting
+    uses the separate ``investment_type`` from classify_investment_type(), which
+    is a distinct concept.) Do not assume this label gates anything without
+    wiring it in explicitly.
+    """
 
     signal = str(item.get("signal", "HOLD"))
     trend = str(item.get("trend_strength", "unknown"))

@@ -339,6 +339,7 @@ def analyze_symbol_data(
                 "rank": rank,
                 "investment_type": classify_investment_type(technical_rank, fundamental_score),
                 "confidence_interpretation": confidence_interpretation(display_confidence_label),
+                # Descriptive/reporting metadata only — does not affect any decision.
                 "opportunity_type": classify_opportunity({**signal_data, "rank": rank}),
                 "signal": signal_data.get("signal"),
                 "reasons": signal_data.get("reasons", []),

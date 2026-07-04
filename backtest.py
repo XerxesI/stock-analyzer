@@ -354,6 +354,7 @@ def _build_opportunity(
         "fundamental_reasons": fundamental_details.get("reasons", []),
         "fundamental_interaction_penalty": fundamental_details.get("interaction_penalty"),
         "investment_type": classify_investment_type(technical_rank, fundamental_score),
+        # Descriptive/reporting metadata only — does not affect entry/exit here.
         "opportunity_type": classify_opportunity({**signal_data, "rank": final_rank}),
         "trend_strength": signal_data.get("trend_strength"),
         "market_bias": signal_data.get("market_bias"),
