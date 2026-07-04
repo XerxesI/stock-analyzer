@@ -281,8 +281,11 @@ def analyze_symbol_data(
             rank = round(min(RANK_LIMIT, max(0.0, rank)), 2)
             technical_score = signal_data.get("technical_score", signal_data.get("score"))
             base_technical_confidence = float(signal_data.get("confidence", 0) or 0)
+            # Displayed confidence is a pure function of the technical score. We do NOT
+            # add a technical_rank bonus here: technical_rank is itself derived from the
+            # base confidence (via normalize_rank), so mixing it back in would let the
+            # same signal count toward confidence twice (non-orthogonal factor mixing).
             technical_confidence = distribute_confidence(float(technical_score or 0))
-            technical_confidence = min(RANK_LIMIT, round(technical_confidence + (0.05 * technical_rank), 2))
             # Derive the label from the value we actually display, so the number and its
             # low/medium/high label can never disagree at the threshold boundaries.
             display_confidence_label = confidence_label_for(technical_confidence)

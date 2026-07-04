@@ -329,8 +329,9 @@ def _build_opportunity(
     final_rank = round(min(1.0, max(0.0, final_rank)), 2)
 
     technical_score = signal_data.get("technical_score", signal_data.get("score"))
+    # Keep confidence orthogonal to rank (same reasoning as analysis_service): no
+    # +0.05*technical_rank bonus, since technical_rank already derives from confidence.
     technical_confidence = distribute_confidence(float(technical_score or 0))
-    technical_confidence = min(1.0, round(technical_confidence + (0.05 * technical_rank), 2))
     conviction_confidence = adjusted_confidence(technical_confidence, fundamental_score, completeness)
     factors = fundamental_details.get("factors", {})
 
