@@ -148,12 +148,12 @@ for i, t in enumerate(dates):
         if ok:
             rows.append(rec)
     if (i + 1) % 10 == 0:
+        print(f"  processed {i + 1}/{len(dates)} dates", flush=True)
+
 _ARTIFACTS_REPORTS.mkdir(parents=True, exist_ok=True)
+df = pd.DataFrame(rows)
 df.to_csv(_OBS_PATH, index=False)
 print(f"\ntotal observations: {len(df)} (saved to {_OBS_PATH})", flush=True)
-df = pd.DataFrame(rows)
-df.to_csv("rank_ic_obs.csv", index=False)
-print(f"\ntotal observations: {len(df)} (saved to rank_ic_obs.csv)", flush=True)
 
 
 def spearman(a: pd.Series, b: pd.Series) -> float:
