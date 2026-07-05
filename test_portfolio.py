@@ -140,3 +140,97 @@ def test_sector_key_does_not_use_universe_category():
     # Real sector wins when present.
     item2 = {"symbol": "DUK", "fundamental_sector": "utilities", "universe_category": "thematic"}
     assert _sector_key(item2) == "utilities"
+
+
+def test_scenario_d_sector_cap_hole_plus_single_position_capping():
+    """Combined scenario: sector cap creates a hole (non_cash_total < 1.0), and then
+    one high-rank position needs capping based on equity basis.
+
+    This tests the case where:
+    - Two tech positions (both high rank) → sector capped to 0.25 combined
+    - One utilities positon (DUK, high rank) → ALONE in utilities, can grow large after sector cap
+    - Three lower-rank positions → stay small, don't trigger position cap
+
+    Result: position-cap targets DUK (or other over-limit positions) while others
+    naturally stay under the cap due to lower ranks. Convergence is fast (1-2 iters).
+    """
+    opps = [
+        _opp("TECH1", "technology", rank=0.82),
+        _opp("TECH2", "technology", rank=0.81),
+        _opp("DUK", "utilities", rank=0.80),
+        _opp("HLTH1", "healthcare", rank=0.62),
+        _opp("ENRG1", "energy", rank=0.61),
+        _opp("MAT1", "materials", rank=0.60),
+    ]
+    result = build_portfolio(opps, max_positions=10)
+
+    # Extract cash weight (it's the CASH entry)
+    cash_weight = 0.0
+    for pos in result:
+        if str(pos.get("symbol", "")).upper() == "CASH":
+            cash_weight = float(pos.get("weight", 0) or 0)
+            break
+
+    equity_total = 1.0 - cash_weight
+    assert equity_total > 0, "No cash-only portfolio expected"
+
+    # Verify each equity position respects MAX_POSITION_WEIGHT on equity basis
+    for pos in result:
+        if str(pos.get("symbol", "")).upper() == "CASH":
+            continue
+        weight = float(pos.get("weight", 0) or 0)
+        equity_basis = weight / equity_total
+        assert equity_basis <= portfolio.MAX_POSITION_WEIGHT + EPS, (
+            f"{pos['symbol']} equity basis {equity_basis:.4f} exceeds "
+            f"MAX_POSITION_WEIGHT {portfolio.MAX_POSITION_WEIGHT}"
+        )
+
+    # Verify sector caps are still respected (post-cash-scaling)
+    totals = _sector_totals(result)
+    for sector, sector_weight in totals.items():
+        assert sector_weight <= FINAL_SECTOR_CEILING + EPS, (
+            f"Sector {sector} weight {sector_weight:.4f} exceeds cap {FINAL_SECTOR_CEILING:.4f}"
+        )
+
+    # Verify DUK (if present) is now controlled by position-cap
+    duk_pos = next((p for p in result if p.get("symbol") == "DUK"), None)
+    if duk_pos is not None:
+        duk_weight = float(duk_pos.get("weight", 0) or 0)
+        duk_equity_basis = duk_weight / equity_total if equity_total > 0 else duk_weight
+        assert duk_equity_basis <= portfolio.MAX_POSITION_WEIGHT + EPS, (
+            f"DUK equity basis {duk_equity_basis:.4f} should not exceed {portfolio.MAX_POSITION_WEIGHT}"
+        )
+
+
+def test_scenario_e_single_position_edge_case():
+    """Edge case: only one position passes all filters (rare but possible).
+
+    The _apply_position_cap should short-circuit this to avoid geometric convergence
+    to near-zero. The position should be capped to MAX_POSITION_WEIGHT (absolute),
+    and excess routes to cash.
+    """
+    opps = [
+        _opp("ONLY_ONE", "technology", rank=0.80),
+    ]
+    # Manually simulate the scenario where we get through selection but end up with just one
+    # by using a minimal set.
+    result = build_portfolio(opps, max_positions=10)
+
+    # Should have one equity position + cash, not crash or loop endlessly
+    assert len(result) >= 1
+
+    # The single position should be capped to MAX_POSITION_WEIGHT (absolute)
+    equity_positions = [p for p in result if str(p.get("symbol", "")).upper() != "CASH"]
+    if equity_positions:
+        # In the single-position case, the absolute weight should be at most MAX_POSITION_WEIGHT
+        # (it may be less if MIN_ACTIVE_POSITIONS fallback triggered)
+        pos_weight = float(equity_positions[0].get("weight", 0) or 0)
+        assert pos_weight <= portfolio.MAX_POSITION_WEIGHT + EPS, (
+            f"Single position weight {pos_weight:.4f} exceeds MAX_POSITION_WEIGHT {portfolio.MAX_POSITION_WEIGHT}"
+        )
+
+    # Sum must be ~1.0
+    total = sum(float(p.get("weight", 0) or 0) for p in result)
+    assert abs(total - 1.0) < 1e-3
+
+
