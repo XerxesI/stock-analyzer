@@ -51,8 +51,10 @@ Thumbs.db
 # Logs
 *.log
 
-# Runtime metrics snapshot
-runtime_metrics.json
+# Runtime artifacts
+artifacts/logs/*.log
+artifacts/reports/runtime_metrics.json
+artifacts/reports/rank_ic_obs.csv
 
 # Backups and archives (not source)
 *.bak

@@ -12,7 +12,9 @@ from typing import Any
 
 LOGGER = logging.getLogger(__name__)
 _STORE_LOCK = Lock()
-_STORE_PATH = Path(os.getenv("STOCK_ANALYZER_METRICS_FILE", "runtime_metrics.json"))
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_DEFAULT_STORE_PATH = _PROJECT_ROOT / "artifacts" / "reports" / "runtime_metrics.json"
+_STORE_PATH = Path(os.getenv("STOCK_ANALYZER_METRICS_FILE", str(_DEFAULT_STORE_PATH)))
 
 
 def metrics_store_path() -> str:

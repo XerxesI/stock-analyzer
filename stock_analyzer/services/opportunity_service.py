@@ -4,10 +4,9 @@ from __future__ import annotations
 
 from typing import Any, Sequence
 
-from analysis_service import DEFAULT_SCORING_MODE, analyze_symbols_data
-from opportunities import classify_opportunity, is_buy_opportunity, rank_opportunities
-from strategy import apply_universe_weight
-
+from stock_analyzer.services.analysis_service import DEFAULT_SCORING_MODE, analyze_symbols_data
+from stock_analyzer.core.opportunities import classify_opportunity, is_buy_opportunity, rank_opportunities
+from stock_analyzer.core.strategy import apply_universe_weight
 
 DEFAULT_MIN_CONFIDENCE = 0.5
 DEFAULT_MIN_RANK = 0.4

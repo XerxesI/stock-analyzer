@@ -10,20 +10,18 @@ from typing import Callable
 
 from fastapi import FastAPI, HTTPException, Query
 
-from analysis_service import (
-    DEFAULT_SCORING_MODE,
+from stock_analyzer.services.analysis_service import (    DEFAULT_SCORING_MODE,
     analyze_symbol_data,
     analyze_symbols_data,
     get_analysis_metrics,
 )
-from cache_utils import TTLCache
-from data_fetcher import get_fetcher_metrics
-from fundamentals import get_fundamentals_metrics
-from market_context import get_market_context_metrics
-from metrics_store import load_metrics_section, metrics_store_path, persist_metrics_section
-from opportunity_service import analyze_and_rank_opportunities, rank_analysis_results
-from universes import get_meta, get_universe
-
+from stock_analyzer.data.cache_utils import TTLCache
+from stock_analyzer.data.data_fetcher import get_fetcher_metrics
+from stock_analyzer.data.fundamentals import get_fundamentals_metrics
+from stock_analyzer.core.market_context import get_market_context_metrics
+from stock_analyzer.data.metrics_store import load_metrics_section, metrics_store_path, persist_metrics_section
+from stock_analyzer.services.opportunity_service import analyze_and_rank_opportunities, rank_analysis_results
+from stock_analyzer.data.universes import get_meta, get_universe
 
 app = FastAPI(title="Stock Analysis API", version="1.0.0")
 API_CACHE_TTL_SECONDS = 45

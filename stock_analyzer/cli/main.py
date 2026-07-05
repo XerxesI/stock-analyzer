@@ -5,8 +5,7 @@ from __future__ import annotations
 import argparse
 from typing import Sequence
 
-from analysis_service import (
-    DEFAULT_PERIOD,
+from stock_analyzer.services.analysis_service import (    DEFAULT_PERIOD,
     DEFAULT_SCORING_MODE,
     SUPPORTED_SCORING_MODES,
     analyze_symbol_data,

@@ -7,12 +7,11 @@ from datetime import date, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Sequence
 
-from analysis_service import DEFAULT_SCORING_MODE, SUPPORTED_SCORING_MODES, analyze_symbols_data
-from opportunity_service import rank_buy_opportunities, select_buy_opportunities
-from portfolio import build_portfolio, summarize_portfolio
-from runtime_limits import UNIVERSE_SCAN_WORKERS
-from universes import UNIVERSES, get_meta
-
+from stock_analyzer.services.analysis_service import DEFAULT_SCORING_MODE, SUPPORTED_SCORING_MODES, analyze_symbols_data
+from stock_analyzer.services.opportunity_service import rank_buy_opportunities, select_buy_opportunities
+from stock_analyzer.portfolio.portfolio import build_portfolio, summarize_portfolio
+from stock_analyzer.core.runtime_limits import UNIVERSE_SCAN_WORKERS
+from stock_analyzer.data.universes import UNIVERSES, get_meta
 
 DEFAULT_PERIOD = "1y"
 DEFAULT_TOP = 20
@@ -157,7 +156,7 @@ def run(
         )
 
     if backtest:
-        from backtest import run_backtest
+        from stock_analyzer.backtesting.backtest import run_backtest
 
         all_symbols = sorted({symbol for universe in UNIVERSES.values() for symbol in universe})
         resolved_end = end_date or date.today().isoformat()

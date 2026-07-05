@@ -8,16 +8,15 @@ from threading import BoundedSemaphore, Lock
 from time import perf_counter
 from typing import Any, Sequence
 
-from data_fetcher import get_stock_data
-from fundamentals import classify_fundamental_bias, get_fundamentals, score_fundamental_factors
-from indicators import calculate_indicators
-from market_context import resolve_market_context
-from metrics_store import load_metrics_section, persist_metrics_section
-from opportunities import classify_opportunity
-from report import build_explanation
-from runtime_limits import ANALYSIS_BATCH_WORKERS, GLOBAL_ANALYSIS_CONCURRENCY
-from strategy import confidence_label_for, generate_signal
-
+from stock_analyzer.data.data_fetcher import get_stock_data
+from stock_analyzer.data.fundamentals import classify_fundamental_bias, get_fundamentals, score_fundamental_factors
+from stock_analyzer.core.indicators import calculate_indicators
+from stock_analyzer.core.market_context import resolve_market_context
+from stock_analyzer.data.metrics_store import load_metrics_section, persist_metrics_section
+from stock_analyzer.core.opportunities import classify_opportunity
+from stock_analyzer.services.report import build_explanation
+from stock_analyzer.core.runtime_limits import ANALYSIS_BATCH_WORKERS, GLOBAL_ANALYSIS_CONCURRENCY
+from stock_analyzer.core.strategy import confidence_label_for, generate_signal
 
 DEFAULT_PERIOD = "1y"
 DEFAULT_SCORING_MODE = "balanced"

@@ -19,11 +19,10 @@ from typing import Any, Mapping, Sequence
 
 import pandas as pd
 
-from backtest import _fetch_history, _is_spy_above_sma200
-from factors import price_asof, top_n_by_momentum
-from hybrid_portfolio import CASH, build_core_satellite
-from indicators import calculate_indicators
-
+from stock_analyzer.backtesting.backtest import _fetch_history, _is_spy_above_sma200
+from stock_analyzer.core.factors import price_asof, top_n_by_momentum
+from stock_analyzer.portfolio.hybrid_portfolio import CASH, build_core_satellite
+from stock_analyzer.core.indicators import calculate_indicators
 TRADING_DAYS_PER_YEAR = 252
 DEFAULT_REBALANCE_DAYS = 21
 DEFAULT_COST_RATE = 0.0010  # 0.10% per side, applied to turnover

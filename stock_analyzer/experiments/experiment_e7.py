@@ -5,9 +5,8 @@ Isolates SELECTION: same engine, same window, only the candidate universe change
 
 from __future__ import annotations
 
-from backtest import run_backtest
-from universes import UNIVERSES
-
+from stock_analyzer.backtesting.backtest import run_backtest
+from stock_analyzer.data.universes import UNIVERSES
 START, END = "2025-06-30", "2026-06-30"
 
 FULL = sorted({s for u in UNIVERSES.values() for s in u})

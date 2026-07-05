@@ -5,9 +5,8 @@ from __future__ import annotations
 import argparse
 from typing import Sequence
 
-from analysis_service import analyze_symbols_data
-from opportunity_service import rank_analysis_results
-
+from stock_analyzer.services.analysis_service import analyze_symbols_data
+from stock_analyzer.services.opportunity_service import rank_analysis_results
 
 DEFAULT_PERIOD = "1y"
 DEFAULT_SYMBOLS = ["AAPL", "MSFT", "TSLA", "NVDA", "AMZN"]

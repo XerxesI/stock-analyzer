@@ -7,8 +7,7 @@ from typing import Any
 import pandas as pd
 import yfinance as yf
 
-from analysis_service import (
-    DEFAULT_SCORING_MODE,
+from stock_analyzer.services.analysis_service import (    DEFAULT_SCORING_MODE,
     adjusted_confidence,
     apply_completeness_penalty,
     apply_fundamental_bias_adjustment,
@@ -19,12 +18,11 @@ from analysis_service import (
     resolve_scoring_mode,
     stretch_rank_distribution,
 )
-from indicators import calculate_indicators
-from opportunities import BUY_SIGNALS, classify_opportunity, is_buy_opportunity
-from portfolio import build_portfolio, summarize_portfolio
-from strategy import generate_signal
-from fundamentals import classify_fundamental_bias, get_fundamentals, score_fundamental_factors
-
+from stock_analyzer.core.indicators import calculate_indicators
+from stock_analyzer.core.opportunities import BUY_SIGNALS, classify_opportunity, is_buy_opportunity
+from stock_analyzer.portfolio.portfolio import build_portfolio, summarize_portfolio
+from stock_analyzer.core.strategy import generate_signal
+from stock_analyzer.data.fundamentals import classify_fundamental_bias, get_fundamentals, score_fundamental_factors
 
 REQUIRED_COLUMNS = ("Open", "High", "Low", "Close", "Volume")
 LOOKBACK_BUFFER_DAYS = 260

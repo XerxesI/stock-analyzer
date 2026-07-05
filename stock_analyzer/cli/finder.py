@@ -5,10 +5,9 @@ from __future__ import annotations
 import argparse
 from typing import Sequence
 
-from analysis_service import DEFAULT_SCORING_MODE, SUPPORTED_SCORING_MODES
-from opportunity_service import analyze_and_rank_opportunities
-from universes import get_meta, get_universe, get_universes_by_category, list_universes, UNIVERSES
-
+from stock_analyzer.services.analysis_service import DEFAULT_SCORING_MODE, SUPPORTED_SCORING_MODES
+from stock_analyzer.services.opportunity_service import analyze_and_rank_opportunities
+from stock_analyzer.data.universes import get_meta, get_universe, get_universes_by_category, list_universes, UNIVERSES
 
 DEFAULT_PERIOD = "1y"
 DEFAULT_TOP = 10

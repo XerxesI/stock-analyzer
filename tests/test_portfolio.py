@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import portfolio
-from portfolio import (
+import stock_analyzer.portfolio.portfolio as portfolio
+from stock_analyzer.portfolio.portfolio import (
     CASH_BUFFER,
     MAX_SECTOR_WEIGHT,
     _apply_sector_cap,

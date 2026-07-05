@@ -13,12 +13,12 @@ is a robust negative; a strong IC would need a point-in-time recheck.
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 import pandas as pd
 import yfinance as yf
 
-from analysis_service import (
-    DEFAULT_SCORING_MODE,
+from stock_analyzer.services.analysis_service import (    DEFAULT_SCORING_MODE,
     apply_completeness_penalty,
     apply_fundamental_bias_adjustment,
     combine_hybrid_rank,
@@ -26,15 +26,19 @@ from analysis_service import (
     resolve_scoring_mode,
     stretch_rank_distribution,
 )
-from fundamentals import get_fundamentals, score_fundamental_factors
-from indicators import calculate_indicators
-from strategy import generate_signal
-from universes import UNIVERSES
-
+from stock_analyzer.data.fundamentals import get_fundamentals, score_fundamental_factors
+from stock_analyzer.core.indicators import calculate_indicators
+from stock_analyzer.core.strategy import generate_signal
+from stock_analyzer.data.universes import UNIVERSES
+from stock_analyzer.core.indicators import calculate_indicators
+from stock_analyzer.core.strategy import generate_signal
+from stock_analyzer.data.universes import UNIVERSES
 SYMBOLS = sorted({s for u in UNIVERSES.values() for s in u})
 FETCH_START = pd.Timestamp("2020-01-01")
 FETCH_END = pd.Timestamp("2026-06-30")
 TEST_START = pd.Timestamp("2021-06-30")
+_ARTIFACTS_REPORTS = Path(__file__).resolve().parents[2] / "artifacts" / "reports"
+_OBS_PATH = _ARTIFACTS_REPORTS / "rank_ic_obs.csv"
 TEST_END = pd.Timestamp("2026-03-31")
 STEP_DAYS = 21
 HORIZONS = {"1mo": 21, "3mo": 63}  # forward trading days
@@ -144,8 +148,9 @@ for i, t in enumerate(dates):
         if ok:
             rows.append(rec)
     if (i + 1) % 10 == 0:
-        print(f"  {i+1}/{len(dates)} dates done ({len(rows)} obs)", flush=True)
-
+_ARTIFACTS_REPORTS.mkdir(parents=True, exist_ok=True)
+df.to_csv(_OBS_PATH, index=False)
+print(f"\ntotal observations: {len(df)} (saved to {_OBS_PATH})", flush=True)
 df = pd.DataFrame(rows)
 df.to_csv("rank_ic_obs.csv", index=False)
 print(f"\ntotal observations: {len(df)} (saved to rank_ic_obs.csv)", flush=True)

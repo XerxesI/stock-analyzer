@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from cache_utils import TTLCache
-from data_fetcher import get_stock_data
-from indicators import calculate_indicators
-from strategy import generate_signal
-
+from stock_analyzer.data.cache_utils import TTLCache
+from stock_analyzer.data.data_fetcher import get_stock_data
+from stock_analyzer.core.indicators import calculate_indicators
+from stock_analyzer.core.strategy import generate_signal
 
 MARKET_BENCHMARK = "SPY"
 MARKET_CONTEXT_TTL_SECONDS = 180

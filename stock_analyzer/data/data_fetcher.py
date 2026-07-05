@@ -9,9 +9,8 @@ from time import sleep
 import pandas as pd
 import yfinance as yf
 
-from cache_utils import TTLCache
-from runtime_limits import FETCH_CONCURRENCY
-
+from stock_analyzer.data.cache_utils import TTLCache
+from stock_analyzer.core.runtime_limits import FETCH_CONCURRENCY
 
 REQUIRED_COLUMNS = ("Open", "High", "Low", "Close", "Volume")
 MAX_RETRIES = 3

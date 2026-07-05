@@ -12,9 +12,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 import yfinance as yf
 
-import backtest as bt
-from universes import UNIVERSES
-
+import stock_analyzer.backtesting.backtest as bt
+from stock_analyzer.data.universes import UNIVERSES
 START = "2025-06-30"
 END = "2026-06-30"
 REBALANCE = 7

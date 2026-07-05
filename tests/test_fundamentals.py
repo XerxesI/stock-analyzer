@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import fundamentals
-from fundamentals import _sector_risk_scale, score_fundamental_factors
-
+import stock_analyzer.data.fundamentals as fundamentals
+from stock_analyzer.data.fundamentals import _sector_risk_scale, score_fundamental_factors
 
 def _factors(debt_to_equity: float, sector: str) -> dict[str, float]:
     payload = {

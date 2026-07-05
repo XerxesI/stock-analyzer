@@ -9,8 +9,7 @@ from typing import Any
 
 import yfinance as yf
 
-from cache_utils import TTLCache
-
+from stock_analyzer.data.cache_utils import TTLCache
 
 LOGGER = logging.getLogger(__name__)
 

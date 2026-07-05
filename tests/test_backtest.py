@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from backtest import MIN_ENTRY_RANK
-from opportunities import is_buy_opportunity
-
+from stock_analyzer.backtesting.backtest import MIN_ENTRY_RANK
+from stock_analyzer.core.opportunities import is_buy_opportunity
 
 def _candidate(rank: float, confidence: float = 0.8, signal: str = "STRONG BUY") -> dict:
     """A minimal opportunity shaped like _build_opportunity's output."""

@@ -6,22 +6,24 @@ Seniorlevel refaktooritud indeksite kataloog. **18 indeksit, 0 dubleeringud.**
 
 ## 🚀 Kiire start
 
-```bash
+> Käivita need käsud alati repo juurkaustast.
+
+```powershell
 # Üksikut aktsiat analüüsida
-python main.py AAPL --period 6mo
-python main.py DUK --mode defensive
+python -m stock_analyzer.cli.main AAPL --period 6mo
+python -m stock_analyzer.cli.main DUK --mode defensive
 
 # Konkreetse indeksi scanneerimine
-python finder.py --market ai --top 15
-python finder.py --market biotech_genomics --top 10
-python finder.py --market energy --mode defensive --top 10
-python finder.py --market ai --mode growth --min-growth-score 0.55 --max-risk-score 0.70 --top 10
+python -m stock_analyzer.cli.finder --market ai --top 15
+python -m stock_analyzer.cli.finder --market biotech_genomics --top 10
+python -m stock_analyzer.cli.finder --market energy --mode defensive --top 10
+python -m stock_analyzer.cli.finder --market ai --mode growth --min-growth-score 0.55 --max-risk-score 0.70 --top 10
 
 # KÕIKI indekseid korraga (deduplicate!)
-python scan_all.py --confidence 0.5 --top 20
-python scan_all.py --mode auto --confidence 0.5 --top 20
-python scan_all.py --mode auto --confidence 0.5 --top 20 --portfolio
-python scan_all.py --mode auto --confidence 0.5 --top 20 --backtest --start-date 2025-01-01 --end-date 2025-12-31 --rebalance-days 7
+python -m stock_analyzer.cli.scan_all --confidence 0.5 --top 20
+python -m stock_analyzer.cli.scan_all --mode auto --confidence 0.5 --top 20
+python -m stock_analyzer.cli.scan_all --mode auto --confidence 0.5 --top 20 --portfolio
+python -m stock_analyzer.cli.scan_all --mode auto --confidence 0.5 --top 20 --backtest --start-date 2025-01-01 --end-date 2025-12-31 --rebalance-days 7
 ```
 
 ---

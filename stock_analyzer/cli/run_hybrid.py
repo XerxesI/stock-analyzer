@@ -17,17 +17,15 @@ import argparse
 
 import pandas as pd
 
-from factors import momentum_12_1, price_asof
-from hybrid_backtest import (
-    DEFAULT_COST_RATE,
+from stock_analyzer.core.factors import momentum_12_1, price_asof
+from stock_analyzer.backtesting.hybrid_backtest import (    DEFAULT_COST_RATE,
     fetch_frames,
     prepare_spy_indicators,
     run_hybrid_backtest,
     spy_buy_hold,
     _metrics,
 )
-from universes import LIQUID_LARGECAP
-
+from stock_analyzer.data.universes import LIQUID_LARGECAP
 FETCH_START = pd.Timestamp("2020-01-01")
 FETCH_END = pd.Timestamp("2026-06-30")
 INITIAL = 10_000.0
