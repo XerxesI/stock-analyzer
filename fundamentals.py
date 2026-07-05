@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from typing import Any
 
 import yfinance as yf
@@ -14,11 +15,33 @@ from cache_utils import TTLCache
 LOGGER = logging.getLogger(__name__)
 
 FUNDAMENTALS_TTL_SECONDS = 86400
+EMPTY_SECTOR_TTL_SECONDS = 3600  # 1 hour: shorter cache for empty/missing sectors
 _fundamentals_cache: TTLCache[str, dict[str, Any]] = TTLCache(
     maxsize=512,
     default_ttl_seconds=FUNDAMENTALS_TTL_SECONDS,
     name="fundamentals",
 )
+
+# Hardcoded sector fallback for well-known tickers (verified 2026-07).
+# Use sparingly for major index components when live fetch fails. Verify periodically
+# as companies' sector classification can change via M&A, spin-offs, etc.
+_SECTOR_FALLBACK: dict[str, str] = {
+    "JPM": "financial",
+    "UNH": "healthcare",
+    "AMD": "technology",
+    "INTC": "technology",
+    "CSCO": "technology",
+    "MU": "technology",
+    "DUK": "utilities",
+    "NEE": "utilities",
+    "EXC": "utilities",
+    "EIX": "utilities",
+    "LYB": "materials",
+    "DOW": "materials",
+    "GLD": "materials",
+}
+
+# ...existing code...
 
 # Only fields actually consumed by ``score_fundamental_factors`` are fetched, so
 # the missing-data ratio reflects fields we truly rely on rather than fetched-but-ignored ones.
@@ -101,19 +124,61 @@ def _fetch_fundamentals(symbol: str) -> dict[str, Any]:
         return {field: None for field in _FUNDAMENTAL_KEYS} | {"sector": ""}
     fundamentals = {field: _safe_float(info, source_key) for field, source_key in _FUNDAMENTAL_KEYS.items()}
     fundamentals["sector"] = extract_real_sector(info)
+
+    # If sector is empty on first fetch, retry once with a short backoff (rate-limit pattern).
+    # This targets transient misses where Yahoo returned data but sector is temporarily unavailable.
     if not fundamentals["sector"]:
-        LOGGER.warning("No sector reported for %s; downstream sector grouping will fall back to 'unknown'.", symbol)
+        LOGGER.debug("No sector on first fetch for %s; retrying after backoff...", symbol)
+        time.sleep(0.2)  # Brief backoff to avoid rate-limit cascades
+        try:
+            info_retry = yf.Ticker(symbol).info
+            if isinstance(info_retry, dict):
+                sector_retry = extract_real_sector(info_retry)
+                if sector_retry:
+                    fundamentals["sector"] = sector_retry
+                    LOGGER.debug("Retry successful; sector recovered for %s.", symbol)
+                else:
+                    LOGGER.debug("Retry did not recover sector for %s.", symbol)
+        except Exception as retry_exc:
+            LOGGER.debug("Retry failed for %s: %s", symbol, type(retry_exc).__name__)
+
+    if not fundamentals["sector"]:
+        # Try fallback table as last resort
+        fallback_sector = _SECTOR_FALLBACK.get(symbol.upper())
+        if fallback_sector:
+            fundamentals["sector"] = fallback_sector
+            LOGGER.debug("Using fallback sector '%s' for %s.", fallback_sector, symbol)
+        else:
+            LOGGER.warning("No sector reported for %s; downstream sector grouping will fall back to 'unknown'.", symbol)
+
     return fundamentals
 
 
 def get_fundamentals(symbol: str) -> dict[str, Any]:
-    """Fetch and normalize selected fundamental metrics for one symbol."""
+    """Fetch and normalize selected fundamental metrics for one symbol.
+
+    Uses a short TTL (1 hour) for cached results with empty/missing sectors, allowing
+    retries if upstream data becomes available. Normal results cache for 24 hours.
+    """
 
     cleaned_symbol = symbol.strip().upper()
     if not cleaned_symbol:
         raise ValueError("Symbol must not be empty.")
-    snapshot = _fundamentals_cache.get_or_set(cleaned_symbol, lambda: _fetch_fundamentals(cleaned_symbol))
-    return dict(snapshot)
+
+    # Try cache first
+    cached = _fundamentals_cache.get(cleaned_symbol)
+    if cached is not None:
+        return dict(cached)
+
+    # Fetch fresh data
+    fundamentals = _fetch_fundamentals(cleaned_symbol)
+
+    # Store with appropriate TTL: short TTL for empty sectors, full 24h otherwise
+    has_sector = bool(fundamentals.get("sector", "").strip())
+    ttl = FUNDAMENTALS_TTL_SECONDS if has_sector else EMPTY_SECTOR_TTL_SECONDS
+
+    _fundamentals_cache.set(cleaned_symbol, fundamentals, ttl_seconds=ttl)
+    return dict(fundamentals)
 
 
 def _normalize_score(raw_score: float, max_abs: int = 4) -> float:
