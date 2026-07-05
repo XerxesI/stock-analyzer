@@ -143,16 +143,15 @@ def test_sector_key_does_not_use_universe_category():
 
 
 def test_scenario_d_sector_cap_hole_plus_single_position_capping():
-    """Combined scenario: sector cap creates a hole (non_cash_total < 1.0), and then
-    one high-rank position needs capping based on equity basis.
+    """Combined scenario: sector cap creates a hole and position cap is AUM-based.
 
     This tests the case where:
     - Two tech positions (both high rank) → sector capped to 0.25 combined
     - One utilities positon (DUK, high rank) → ALONE in utilities, can grow large after sector cap
     - Three lower-rank positions → stay small, don't trigger position cap
 
-    Result: position-cap targets DUK (or other over-limit positions) while others
-    naturally stay under the cap due to lower ranks. Convergence is fast (1-2 iters).
+    Result: each final non-cash position stays under MAX_POSITION_WEIGHT as a share
+    of total portfolio value (AUM), including cash.
     """
     opps = [
         _opp("TECH1", "technology", rank=0.82),
@@ -171,17 +170,15 @@ def test_scenario_d_sector_cap_hole_plus_single_position_capping():
             cash_weight = float(pos.get("weight", 0) or 0)
             break
 
-    equity_total = 1.0 - cash_weight
-    assert equity_total > 0, "No cash-only portfolio expected"
+    assert (1.0 - cash_weight) > 0, "No cash-only portfolio expected"
 
-    # Verify each equity position respects MAX_POSITION_WEIGHT on equity basis
+    # Verify each equity position respects MAX_POSITION_WEIGHT on AUM basis
     for pos in result:
         if str(pos.get("symbol", "")).upper() == "CASH":
             continue
         weight = float(pos.get("weight", 0) or 0)
-        equity_basis = weight / equity_total
-        assert equity_basis <= portfolio.MAX_POSITION_WEIGHT + EPS, (
-            f"{pos['symbol']} equity basis {equity_basis:.4f} exceeds "
+        assert weight <= portfolio.MAX_POSITION_WEIGHT + EPS, (
+            f"{pos['symbol']} AUM weight {weight:.4f} exceeds "
             f"MAX_POSITION_WEIGHT {portfolio.MAX_POSITION_WEIGHT}"
         )
 
@@ -192,23 +189,17 @@ def test_scenario_d_sector_cap_hole_plus_single_position_capping():
             f"Sector {sector} weight {sector_weight:.4f} exceeds cap {FINAL_SECTOR_CEILING:.4f}"
         )
 
-    # Verify DUK (if present) is now controlled by position-cap
+    # Verify DUK (if present) is capped on AUM basis
     duk_pos = next((p for p in result if p.get("symbol") == "DUK"), None)
     if duk_pos is not None:
         duk_weight = float(duk_pos.get("weight", 0) or 0)
-        duk_equity_basis = duk_weight / equity_total if equity_total > 0 else duk_weight
-        assert duk_equity_basis <= portfolio.MAX_POSITION_WEIGHT + EPS, (
-            f"DUK equity basis {duk_equity_basis:.4f} should not exceed {portfolio.MAX_POSITION_WEIGHT}"
+        assert duk_weight <= portfolio.MAX_POSITION_WEIGHT + EPS, (
+            f"DUK AUM weight {duk_weight:.4f} should not exceed {portfolio.MAX_POSITION_WEIGHT}"
         )
 
 
 def test_scenario_e_single_position_edge_case():
-    """Edge case: only one position passes all filters (rare but possible).
-
-    The _apply_position_cap should short-circuit this to avoid geometric convergence
-    to near-zero. The position should be capped to MAX_POSITION_WEIGHT (absolute),
-    and excess routes to cash.
-    """
+    """Edge case: only one position candidate; output remains valid and normalized."""
     opps = [
         _opp("ONLY_ONE", "technology", rank=0.80),
     ]

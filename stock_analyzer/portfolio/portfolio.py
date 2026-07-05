@@ -9,6 +9,8 @@ from typing import Any, Sequence
 LOGGER = logging.getLogger(__name__)
 
 MAX_PER_SECTOR = 2
+# Maximum weight of a single position as a share of TOTAL portfolio value (AUM),
+# including cash. This is NOT an equity-only (% invested capital) constraint.
 MAX_POSITION_WEIGHT = 0.20
 MAX_SECTOR_WEIGHT = 0.25
 # Intentionally stricter than opportunity_service.DEFAULT_MIN_RANK (0.40): the
@@ -134,87 +136,33 @@ def _apply_sector_cap(
     return items
 
 
-def _apply_position_cap(
+def _apply_position_cap_absolute(
     items: list[dict[str, Any]],
     max_position_weight: float = MAX_POSITION_WEIGHT,
-    max_iterations: int = 10,
-    epsilon: float = 1e-9,
-) -> list[dict[str, Any]]:
-    """Iteratively enforce the per-position weight cap based on equity basis.
+) -> tuple[list[dict[str, Any]], float]:
+    """Clamp each position to an absolute AUM-based maximum.
 
-    Unlike the initial pre-normalization position cap (lines 202-204), this cap
-    respects the fact that after sector water-filling, non_cash_total may be < 1.0.
-    Each position's true equity-basis weight is weight_i / non_cash_total, so we cap
-    each position to max_position_weight * non_cash_total.
-
-    The freed weight is left unallocated (routes to cash) rather than redistributed,
-    following the same principle as sector water-filling.
-
-    Converges quickly (typically 2-3 iterations) because each capping only *reduces*
-    non_cash_total, which tightens the cap for subsequent iterations. Handles the
-    rare case of len(items) == 1 as a special case to avoid geometric convergence
-    to near-zero. Also detects when ALL items need capping (extreme constraint) and
-    exits early with a warning rather than iterating unnecessarily.
+    This cap is evaluated as a share of total portfolio value (including cash),
+    not as a share of invested equity. Any trimmed excess is left unallocated and
+    will naturally flow to cash later in ``build_portfolio``.
     """
 
-    # Special case: if only one position remains, let it take up to max_position_weight
-    # (absolute), and route the rest to cash. Iterative capping would converge
-    # geometrically to zero (useless), so short-circuit here.
-    if len(items) == 1:
-        item = items[0]
+    excess = 0.0
+    capped = 0
+    for item in items:
         weight = float(item.get("weight", 0) or 0)
         if weight > max_position_weight:
+            excess += weight - max_position_weight
             item["weight"] = max_position_weight
-            LOGGER.warning(
-                "Single-position portfolio: %s capped from %.4f to %.4f (excess → cash).",
-                item.get("symbol", "?"),
-                weight,
-                max_position_weight,
-            )
-        return items
-
-    for iteration in range(max_iterations):
-        non_cash_total = sum(float(item.get("weight", 0) or 0) for item in items)
-        if non_cash_total <= epsilon:
-            break
-
-        cap = max_position_weight * non_cash_total
-        excess = 0.0
-        capped_count = 0
-        for item in items:
-            weight = float(item.get("weight", 0) or 0)
-            if weight > cap + epsilon:
-                excess += weight - cap
-                item["weight"] = cap
-                capped_count += 1
-
-        if capped_count == 0:
-            # No position exceeds the cap; converged.
-            break
-
-        if iteration == 0 and capped_count > 0:
-            # Log on first iteration to indicate that position capping is active.
-            LOGGER.debug(
-                "Position cap enforced (equity basis): %d position(s) capped "
-                "(limit=%.4f per equity dollar), excess %.4f → cash.",
-                capped_count,
-                max_position_weight,
-                excess,
-            )
-
-        # Early exit: if all items are capped to the same value, further iterations
-        # will converge geometrically. Accept this state and let cash absorb excess.
-        if capped_count == len(items):
-            LOGGER.debug(
-                "All %d positions at equity-basis cap (%.2f%% each); "
-                "position-cap converged after %d iteration(s).",
-                len(items),
-                (cap / non_cash_total * 100) if non_cash_total > 0 else 0.0,
-                iteration + 1,
-            )
-            break
-
-    return items
+            capped += 1
+    if capped:
+        LOGGER.debug(
+            "Position cap enforced (AUM basis): %d position(s) capped at %.4f (excess %.4f → cash).",
+            capped,
+            max_position_weight,
+            excess,
+        )
+    return items, excess
 
 
 def build_portfolio(opportunities: list[dict[str, Any]], max_positions: int = 10, debug: bool = False) -> list[dict[str, Any]]:
@@ -282,9 +230,7 @@ def build_portfolio(opportunities: list[dict[str, Any]], max_positions: int = 10
             )
         item["weight"] = base_weight * _risk_multiplier(risk) * _type_multiplier(str(item.get("investment_type") or ""))
 
-    for item in selected:
-        if item["weight"] > MAX_POSITION_WEIGHT:
-            item["weight"] = MAX_POSITION_WEIGHT
+    _apply_position_cap_absolute(selected, MAX_POSITION_WEIGHT)
 
     total_weight = sum(float(item.get("weight", 0) or 0) for item in selected)
     for item in selected:
@@ -295,11 +241,9 @@ def build_portfolio(opportunities: list[dict[str, Any]], max_positions: int = 10
     # sectors we just trimmed straight back over the cap (the original bug).
     _apply_sector_cap(selected, MAX_SECTOR_WEIGHT)
 
-    # Enforce the position cap based on equity basis. After sector capping,
-    # non_cash_total may be < 1.0, so each position's equity-basis weight is
-    # weight_i / non_cash_total. We cap this to MAX_POSITION_WEIGHT, leaving freed
-    # weight unallocated (routes to cash). Must happen BEFORE cash scaling.
-    _apply_position_cap(selected, MAX_POSITION_WEIGHT)
+    # Re-apply absolute AUM-based position cap after sector water-filling.
+    # Sector redistribution can otherwise nudge a position above MAX_POSITION_WEIGHT.
+    _apply_position_cap_absolute(selected, MAX_POSITION_WEIGHT)
 
     # Reserve the cash buffer and let any weight left unallocated by the sector cap
     # (extreme case: every sector at the cap) fall through to cash as well. Scaling
