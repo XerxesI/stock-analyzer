@@ -1,15 +1,16 @@
-"""Out-of-sample check #2: v2 Trade Score on a broad, non-curated sample
-of NASDAQ + NYSE + NYSE American common stock (via universe_filter.py),
-instead of hand-picked "known good" lists.
+"""Out-of-sample check: does the v2 Trade Score (reweighted after IC testing
+on ai+nuclear_energy) still show a sane IC on a COMPLETELY DIFFERENT universe?
 
-This is a partial fix for the survivorship-bias concern raised by the
-LIQUID_LARGECAP and ai/nuclear_energy results (both of those are curated
-lists of TODAY's well-known names). A random sample from the full
-current listing includes plenty of small/mediocre/beaten-down names
-that never made it into a curated list, which should dilute (though
-not eliminate - see universe_filter.py's docstring) that bias.
+This is the critical guard against in-sample overfitting: the v2 weights
+(trend cut to 10, new RSI component, momentum/support adjusted) were
+chosen based on IC evidence from a 30-symbol thematic universe. If that
+was just noise in that specific sample, the effect should vanish or
+flip sign on LIQUID_LARGECAP (~190 symbols, broad/diversified,
+non-thematic). If the same rough direction (less negative / mildly
+positive IC) shows up here too, that's real out-of-sample support.
 
-Uses a fixed seed so the sample is reproducible across runs.
+Same walk-forward methodology as swing_rank_ic_test.py, just pointed at
+a different universe.
 """
 
 from __future__ import annotations
@@ -21,11 +22,10 @@ import pandas as pd
 import yfinance as yf
 
 from stock_analyzer.core.indicators import calculate_indicators
-from stock_analyzer.data.universe_filter import sample_universe
+from stock_analyzer.data.universes import LIQUID_LARGECAP
 from stock_analyzer.swing.trade_score import calculate_trade_score
 
-SAMPLE_SIZE = 300
-SAMPLE_SEED = 42
+SYMBOLS = LIQUID_LARGECAP
 
 FETCH_START = pd.Timestamp.today().normalize() - pd.Timedelta(days=3 * 365)
 FETCH_END = pd.Timestamp.today().normalize()
@@ -37,7 +37,7 @@ HORIZONS = {"2wk": 10, "6wk": 30}
 MIN_HISTORY_BARS = 210
 
 _ARTIFACTS_REPORTS = Path(__file__).resolve().parents[2] / "artifacts" / "reports"
-_OBS_PATH = _ARTIFACTS_REPORTS / "swing_v2_oos_broad_sample_obs.csv"
+_OBS_PATH = _ARTIFACTS_REPORTS / "swing_v2_oos_liquid_largecap_obs.csv"
 
 
 def _fetch(symbol: str) -> pd.DataFrame:
@@ -60,22 +60,17 @@ def _fetch(symbol: str) -> pd.DataFrame:
     return calculate_indicators(raw.sort_index())
 
 
-print(f"building full common-stock universe from NASDAQ Trader symbol directory...", flush=True)
-symbols = sample_universe(SAMPLE_SIZE, seed=SAMPLE_SEED)
-print(f"sampled {len(symbols)} symbols (seed={SAMPLE_SEED}): {symbols[:10]}...", flush=True)
-
-print(f"fetching {len(symbols)} symbols...", flush=True)
+print(f"fetching {len(SYMBOLS)} symbols (LIQUID_LARGECAP, out-of-sample)...", flush=True)
 frames: dict[str, pd.DataFrame] = {}
 with ThreadPoolExecutor(max_workers=8) as ex:
-    futs = {ex.submit(_fetch, s): s for s in symbols}
+    futs = {ex.submit(_fetch, s): s for s in SYMBOLS}
     for fut in as_completed(futs):
         s = futs[fut]
         try:
             frames[s] = fut.result()
         except Exception:  # noqa: BLE001
             pass
-print(f"  loaded {len(frames)}/{len(symbols)} price frames "
-      f"({len(symbols) - len(frames)} failed - delisted/illiquid/no data, this is expected and fine)", flush=True)
+print(f"  loaded {len(frames)}/{len(SYMBOLS)} price frames", flush=True)
 
 
 def score_at(frame: pd.DataFrame, t: pd.Timestamp) -> dict | None:
@@ -103,7 +98,7 @@ def fwd_return(frame: pd.DataFrame, t: pd.Timestamp, h: int) -> float | None:
 
 rows = []
 dates = pd.date_range(TEST_START, TEST_END, freq=f"{STEP_DAYS}D")
-print(f"scoring {len(dates)} dates x {len(frames)} symbols...", flush=True)
+print(f"scoring {len(dates)} dates x {len(frames)} symbols (this will take longer than the 30-symbol run)...", flush=True)
 for i, t in enumerate(dates):
     for s, frame in frames.items():
         scored = score_at(frame, t)
@@ -133,8 +128,8 @@ def spearman(a: pd.Series, b: pd.Series) -> float:
 
 
 print("\n" + "=" * 70)
-print("OUT-OF-SAMPLE CHECK #2: v2 Trade Score on a broad, non-curated sample")
-print(f"({SAMPLE_SIZE} random common stocks, seed={SAMPLE_SEED}, NASDAQ+NYSE+NYSE American)")
+print("OUT-OF-SAMPLE CHECK: v2 Trade Score on LIQUID_LARGECAP")
+print("Compare these IC values to the in-sample (ai+nuclear_energy) run.")
 print("=" * 70)
 for hname in HORIZONS:
     sub = df.dropna(subset=[hname])
