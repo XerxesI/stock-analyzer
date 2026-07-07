@@ -55,6 +55,7 @@ Thumbs.db
 artifacts/logs/*.log
 artifacts/reports/runtime_metrics.json
 artifacts/reports/rank_ic_obs.csv
+artifacts/reports/*.csv
 
 # Backups and archives (not source)
 *.bak
