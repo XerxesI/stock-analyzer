@@ -371,7 +371,70 @@ Kui Money Flow annab signaali, mis vajab sektori konteksti, ehitada sektori-infr
 siis laiemal põhjendusel (RS2 + sektori tugevus + sektori-rotatsioon + universumi
 filtreerimine korraga).
 
-## 11. Avatud küsimused järgmiseks etapiks
+## 11. Cycle #2 Step 3: Money Flow (RVOL/OBV_slope/AD_slope) — tulemus ja järeldus
+
+Testisime kolme Money Flow signaali dev-valimil (seed=42), sama metoodika ja
+distsipliiniga (causal walk-forward IC, 80/20 split, primary lookback/horisont=20
+päeva, secondary=10/40, Bull/Bear lõige algusest peale).
+
+**RVOL (tänane Volume / 20-päevane libisev keskmine Volume):**
+
+| Horisont | Train IC | Holdout IC |
+|---|---|---|
+| 10d | +0.0424 | +0.0407 |
+| 20d (PRIMARY) | +0.0315 | +0.0277 |
+| 40d | +0.0258 | +0.0228 |
+
+Režiim (20d): Train Bull +0.0448, Train Bear −0.0871; Holdout Bull +0.0374,
+Holdout Bear −0.0133 — sama märk mõlemas perioodis mõlemas režiimis.
+
+**obv_slope:** Train Bull −0.0193, Train Bear +0.0994; Holdout Bull +0.0744,
+Holdout Bear −0.0085 (märgi pöördumine mõlemas režiimis).
+
+**ad_slope:** järjekindlalt negatiivne, tugevam Bull'is (Train Bull −0.0253, Holdout
+Bull −0.0506; Bear nõrgem mõlemas perioodis).
+
+### Rolling window diagnostika (6-kuu aknad)
+
+**RVOL Bull** (5 järjestikust akent, n=1054-6734): **+0.048, +0.036, +0.049, +0.037,
++0.057** — kõik positiivsed, sarnase suurusjärguga, ilma ühegi märgi-pöördumiseta
+kogu ~2.5-aastase perioodi vältel. Esimene signaal terves projektis, mis läbib
+rolling window kontrolli täiesti puhtalt.
+
+**RVOL Bear** (4 akent, n=275-1600): +0.046, −0.144, −0.037, −0.033 — kolm
+järjestikust viimast akent negatiivsed, esimene (väikseim valim) erand. Mõõdukalt
+toetab "negatiivne Bear'is" mustrit, vähem puhtalt kui Bull.
+
+**obv_slope Bull:** −0.085, −0.049, −0.013, +0.015, +0.030 — **sujuv, järkjärguline
+triiv** negatiivsest positiivseks (erinevalt RS-i erratiliselt hüplevast mustrist).
+Ei ole müra, aga pole ka praegu stabiilne — sõltub, millist ajahetke vaadata.
+
+**ad_slope:** nõrk, aga suund suhteliselt püsiv (negatiivne enamikus akendest
+mõlemas režiimis).
+
+### Ettepanek: uus pre-registered hüpotees "MF1"
+
+```
+Hüpotees MF1: RVOL ennustab positiivset R-multiple'i Bull-režiimis, ja selle
+IC on kõrgem kui Bear-režiimis.
+Regime: Bull = SPY Close ≥ SMA200, Bear = SPY Close < SMA200 (sama split, mis M1)
+Signal: rvol (Volume / 20-päevane libisev keskmine Volume), muutmata kujul
+Primary horizon: 20 päeva
+Primary target: R-multiple
+Primary test: Spearman IC
+Expected result: IC_bull > 0 JA IC_bull > IC_bear
+```
+
+See on struktuurilt identne M1-ga (lihtsalt Bull/Bear vahetatud), ja esimene
+kandidaat, mis võiks anda projekti **esimese Bull-režiimi signaali**, kui see Locked
+Test'il kinnitub.
+
+**Avatud küsimus:** kas MF1 on ChatGPT hinnangul piisavalt täpselt sõnastatud ja
+rolling window'ga toetatud, et see Locked Test'ile saata (koos või ilma S1-taolise
+"RVOL replication" lisahüpoteesita), või tasub enne veel midagi kontrollida (nt
+ticker/sektori kontsentratsioon, nagu tegime C1 puhul)?
+
+## 12. Avatud küsimused järgmiseks etapiks
 
 1. Kas C1 "Candidate → Core" ülendamiseks tuleks oodata reaalset uut turutsüklit
    (ajaline sõltumatus), või on olemas mõistlik proxy (nt eraldi test spetsiifiliselt
