@@ -45,4 +45,9 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
         enriched["BBU"] = bands.iloc[:, 2]
         enriched["BBP"] = bands.iloc[:, 4]
 
+    if "High" in enriched.columns and "Low" in enriched.columns:
+        enriched["ATR14"] = ta.atr(
+            high=enriched["High"], low=enriched["Low"], close=close, length=14
+        )
+
     return enriched
