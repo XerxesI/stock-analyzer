@@ -434,7 +434,74 @@ rolling window'ga toetatud, et see Locked Test'ile saata (koos või ilma S1-taol
 "RVOL replication" lisahüpoteesita), või tasub enne veel midagi kontrollida (nt
 ticker/sektori kontsentratsioon, nagu tegime C1 puhul)?
 
-## 12. Avatud küsimused järgmiseks etapiks
+## 12. MF1 Locked Test + praktiline profiil
+
+Külmutatud hüpotees (ChatGPT täpsustusega): **MF1a (primary)** — RVOL omab
+positiivset ennustusvõimet Bull-režiimis (IC_bull > 0). **MF1b (secondary,
+informatiivne, mitte kohustuslik)** — IC_bull > IC_bear. Testitud samal Locked Test
+valimil (seed=123), mida kasutati M1/S1/C1 jaoks — legitiimne taaskasutus, kuna RVOL-i
+pole sellel valimil kunagi varem uuritud.
+
+### Locked Test tulemus
+
+```
+IC_bull = +0.0350 (n=24666)   IC_bear = -0.0399 (n=3073)
+
+MF1a (PRIMARY): IC_bull > 0                    → CONFIRMED
+MF1b (secondary): IC_bull > IC_bear            → CONFIRMED
+
+Info-decay: 10d IC_bull=+0.0491, 20d +0.0350, 40d +0.0268 (sujuv, mitte juhuslik)
+```
+
+**Eriti tugev kooskõla:** dev-valimi holdout Bull IC (+0.0374) ja Locked Test Bull
+IC (+0.0350) on peaaegu identsed — esimene kord projektis, kus eksploratiivne ja
+kinnitav tulemus nii lähestikku klapivad.
+
+### Praktiline profiil (monotoonsus + tickerite kontsentratsioon)
+
+| Lõige | n (raw) | n (dedup) | Success rate | Lift | Mediaan MFE | Mediaan MAE | Mediaan R |
+|---|---|---|---|---|---|---|---|
+| All Bull | 24666 | – | 33.9% | 1.000x | +0.039 | −0.037 | +1.094 |
+| Top 30% | 7400 | 3936 | 34.4% | 1.015x | +0.038 | −0.037 | +1.143 |
+| Top 20% | 4934 | 3143 | 34.1% | 1.007x | +0.041 | −0.039 | +1.137 |
+| Top 10% | 2467 | 1905 | 33.2% | 0.979x | +0.045 | −0.042 | +1.103 |
+| **Top 5%** | 1234 | 1054 | **32.7%** | **0.964x** | +0.049 | −0.049 | +1.053 |
+
+**Murettekitav muster:** lift **langeb** lõike kitsenedes (1.015x → 1.007x → 0.979x
+→ 0.964x) — Top 5% on tegelikult **halvem** kui baseline. See on vastupidine sellele,
+mida hea rank-signaal peaks näitama, ja vastupidine ka C1 mustrile (kus kõik neli
+lõiget olid statistiliselt eristamatud, ilma selge langusega).
+
+Kiire SE-kontroll: Top30% (n=7400) SE~0.55pp, Top5% (n=1234) SE~1.34pp; erinevus
+(1.7pp) vs kombineeritud SE (~1.45pp) ≈ 1.2 standardviga — suund on järjekindel
+nelja punkti lõikes, kuigi mitte tugevalt statistiliselt eristuv.
+
+**Tõlgendus:** RVOL ja R-multiple seos pole tõenäoliselt puhtalt monotoonne —
+võimalik "magus koht" (mõõdukalt kõrgenenud maht informatiivne, ekstreemsed
+mahu-hüpped — nt earnings/uudiste päevad — käituvad teisiti, "osta kuulujutt, müü
+uudis" dünaamika).
+
+**Tickerite kontsentratsioon (Top20% Bull, deduplitseeritud):** 3143 setup'it, **287
+unikaalset tickerit** 288-st, mediaan **11 setup't tickeri kohta**, top-10 osakaal
+ainult **5.0%** — isegi laiemalt jaotunud kui C1. Edge ei ole üksikute nimede
+artefakt.
+
+### Kokkuvõttev järeldus
+
+MF1 on **statistiliselt kinnitatud (IC replitseerus kolmel andmestikul: dev-train,
+dev-holdout, Locked Test), aga praktiliselt nõrgem kui C1 üksinda** — parim lift
+(~1.015x Top 30%) on väiksem kui C1 Bear'i 1.073x, ja monotoonsus puudub täielikult
+(pigem vastupidine trend). **Ettepanek:** MF1 sobib pigem tulevase kombinatsiooni
+komponendiks (nt koos registreeritud RSI-oversold hüpoteesiga) kui iseseisvaks
+valikureegliks.
+
+**Avatud küsimus:** kas ChatGPT hinnangul on see langev-lift muster piisav põhjus,
+et mitte kiirustada MF1-t iseseisva Bull-mooduli signaalina kasutusele võtma (nagu
+C1 on Bear-moodulina), või on siin midagi, mida tasuks täiendavalt diagnoosida (nt
+kas madal lift Top5%-l on seotud konkreetsete kõrge-RVOL päevade tüübiga, nagu
+earnings-reaktsioonid)?
+
+## 13. Avatud küsimused järgmiseks etapiks
 
 1. Kas C1 "Candidate → Core" ülendamiseks tuleks oodata reaalset uut turutsüklit
    (ajaline sõltumatus), või on olemas mõistlik proxy (nt eraldi test spetsiifiliselt
