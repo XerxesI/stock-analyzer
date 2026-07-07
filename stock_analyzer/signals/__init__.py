@@ -11,4 +11,7 @@ SIGNALS: dict[str, dict] = {
     "rs1_vs_spy": {"category": "relative_strength", "requires_volume": False, "output": "continuous"},
     "rs_slope": {"category": "relative_strength", "requires_volume": False, "output": "continuous"},
     "rs_accel": {"category": "relative_strength", "requires_volume": False, "output": "continuous"},
+    "rvol": {"category": "money_flow", "requires_volume": True, "output": "continuous"},
+    "obv_slope": {"category": "money_flow", "requires_volume": True, "output": "continuous"},
+    "ad_slope": {"category": "money_flow", "requires_volume": True, "output": "continuous"},
 }

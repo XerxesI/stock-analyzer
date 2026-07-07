@@ -328,9 +328,32 @@ efekt.
 
 **Ei näita stabiilset signaali kummaski režiimis.** Bull-aknad (palju suuremad
 valimid, n=1056-6735) hõljuvad samuti nulli lähedal (-0.039 kuni +0.032) ilma selge
-suunata. Soovitatav Signal Lifecycle staatus: **Rejected / Inconclusive** praeguses
-vormis — ei minda Locked Test'ile, kuna puudub isegi stabiilne eksploratiivne
-hüpotees, millest kinni pidada.
+suunata. **Signal Lifecycle staatus (ChatGPT kinnitatud):**
+
+- **RS1 / RS_slope / RS_accel (vs SPY) = Rejected/Inconclusive** — praeguses kujul
+  ei minda Locked Test'ile.
+- **RS2 (vs sektor) = Deferred, mitte Rejected** — kontseptuaalselt eraldiseisev,
+  seni testimata hüpotees. Ei ehitata praegu sektori-andmete infrastruktuuri ainult
+  RS2 jaoks — kui Money Flow annab tulevikus signaali, mis vajab sektori konteksti
+  (sektori tugevus, sektori-rotatsioon, universumi filtreerimine), tasub sektori-infra
+  ehitada laiemal põhjendusel korraga, mitte RS2 jaoks eraldi.
+
+### Uus Hypothesis Backlog kirje: RSI oversold reversal (erinev olemasolevast rsi_signal'ist)
+
+ChatGPT tõi välja olulise eristuse: olemasolev `rsi_signal` (Trade Score v2
+komponent) annab **rohkem punkte kõrgema RSI eest** (lineaarne "tugevuse" loogika).
+`RSI < 30` on **vastupidine, klassikaline "oversold reversal" hüpotees** — kontseptuaalselt
+erinev signaal samast alusnäitajast, mitte sama asi teises vormis.
+
+```
+Hüpotees: RSI_oversold (RSI < 30) ennustab positiivset triple-barrier R-multiple'i
+Primary horizon: 10d või 20d (fikseeritakse enne testimist)
+Test: Bull/Bear eraldi
+Allikas: Theory-driven (klassikaline mean-reversion faktor kirjandusest)
+Staatus: Candidate (registreeritud, testimata)
+```
+
+Testitakse eraldi signaalina Signal Lab'i kaudu, mitte C1-ga segatuna.
 
 ### Oluline piirang, mis jäi testimata: RS2 (aktsia vs SEKTOR)
 
@@ -342,10 +365,11 @@ aktsia-spetsiifilise tugevusega, mis võib seletada, miks tulemus oli müra. RS2
 teostamata, kuna projektis on teadaolev sektori-andmete usaldusväärsuse probleem
 (yfinance sektoripäring rate-limiteerub sageli, langeb "unknown" peale).
 
-**Avatud küsimus:** kas väärt investeerida sektori-andmete infrastruktuuri (et
-korralikult testida RS2), või piisab RS1/slope/accel tagasilükkamisest ja liikumisest
-otse Money Flow nähtuste juurde (RVOL, OBV slope, A/D slope — need ei vaja sektori
-andmeid)?
+**ChatGPT otsus:** ära ehita sektori-infrastruktuuri praegu ainult RS2 jaoks. Liigu
+edasi Money Flow juurde (RVOL, OBV slope, A/D slope — ei vaja sektori andmeid).
+Kui Money Flow annab signaali, mis vajab sektori konteksti, ehitada sektori-infra
+siis laiemal põhjendusel (RS2 + sektori tugevus + sektori-rotatsioon + universumi
+filtreerimine korraga).
 
 ## 11. Avatud küsimused järgmiseks etapiks
 
