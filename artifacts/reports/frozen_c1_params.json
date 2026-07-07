@@ -1,0 +1,15 @@
+{
+  "mu_support": 4.000662177746364,
+  "sigma_support": 5.046595534746404,
+  "mu_momentum": 15.606785461850377,
+  "sigma_momentum": 10.55040412525845,
+  "bear_regimes": [
+    "Bear_High",
+    "Bear_Normal"
+  ],
+  "primary_horizon": 20,
+  "frozen_at": "2026-07-07T15:45:32.350833+00:00",
+  "source": "C:\\Users\\meelisk\\PycharmProjects\\stock-analyzer\\artifacts\\reports\\phase2_retest_obs.csv",
+  "n_observations_used_for_fitting": 26881,
+  "note": "These parameters are FROZEN. Do not recompute from Locked Test data. locked_test.py must load this file as-is."
+}
