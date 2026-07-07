@@ -203,7 +203,151 @@ universumi peale **3 aasta jooksul kokku** — haruldane, mitte igapäevane sign
 
 ---
 
-## 9. Avatud küsimused järgmiseks etapiks
+## 9. Cycle #2 Step 1: C1 diagnostiline profiil (monotoonsus + tickerite kontsentratsioon)
+
+Enne uute nähtuste (Relative Strength, Money Flow) juurde liikumist täitsime ChatGPT
+nõutud viimase diagnostilise sammu: kas C1 edge suureneb monotoonselt lõike
+kitsenedes, ja kas edge on koondunud vähestesse tickeritesse.
+
+**Monotoonsuse tabel (Bear'i sees, horisont=20d):**
+
+| Lõige | n (raw) | n (dedup) | Success rate | Lift | Mediaan MFE | Mediaan MAE | Mediaan R |
+|---|---|---|---|---|---|---|---|
+| All Bear | 3076 | – | 31.9% | 1.000x | +0.046 | −0.052 | +0.920 |
+| Top 30% | 1020 | 538 | 32.6% | 1.023x | +0.040 | −0.040 | +1.006 |
+| Top 20% | 642 | 396 | **34.3%** | **1.073x** | +0.039 | −0.036 | +1.066 |
+| Top 10% | 393 | 260 | 33.1% | 1.036x | +0.033 | −0.034 | +1.059 |
+| Top 5% | 154 | 120 | 32.5% | 1.017x | +0.032 | −0.032 | +0.895 |
+
+**Mitte rangelt monotoonne** — tipp on Top20% juures, Top10%/Top5% näitavad madalamat
+success rate'i.
+
+**Statistiline kontroll (binoomjaotuse standardviga, SE=√(p(1−p)/n)):**
+
+| Lõige | SE |
+|---|---|
+| Top 30% | ±1.5pp |
+| Top 20% | ±1.9pp |
+| Top 10% | ±2.4pp |
+| Top 5% | ±3.8pp |
+
+Top20% vs Top10% erinevus (1.2pp) < kombineeritud SE (~3.1pp). Top20% vs Top5%
+erinevus (1.8pp) < kombineeritud SE (~4.2pp). Erinevused jäävad väiksemaks kui
+ligikaudne binoomjaotuse standardviga ega anna tõendust sisulisest mittemonotoonsusest.
+
+**ChatGPT parandus:** binoomjaotuse SE valem eeldab sõltumatuid Bernoulli vaatlusi.
+Isegi pärast tickeripõhist deduplitseerimist võivad setup'id olla ajaliselt
+klasterdunud (nt kümned aktsiad reageerivad samale nädalasele makrosündmusele/
+turulangusele calendar-time clustering'u kaudu) — tegelik ebakindlus võib olla
+tabelis toodud SE-st suurem. Need standardvead on seetõttu **kirjeldavad, mitte
+lõplikud** ("descriptive rather than definitive"). Rangema kontrolli jaoks oleks
+vaja block bootstrap'i kuupäevaplokkide (mitte tickerite) kaupa — see pole praegu
+tehtud ja pole Cycle #2 jätkamise eeltingimus, aga on dokumenteeritud piirang.
+
+**Tickerite kontsentratsioon (Top20% Bear'i sees, deduplitseeritud):**
+
+- 396 deduplitseeritud setup'it, **241 unikaalset tickerit** (287-st, mis kunagi
+  Bear'i sattusid)
+- Mediaan **2 setup't tickeri kohta**, maksimaalne **3 setup't** ühelt tickerilt
+- **Top-10 tickerite osakaal: ainult 7.6%** kõigist setup'itest
+
+**Järeldus (parandatud sõnastus):** C1 edge ei ole kontsentreerunud üksikutesse
+tickeritesse. **See EI tõesta**, et edge poleks kontsentreerunud mõnda sektorisse,
+market-cap segmenti, kõrge-ATR/kõrge-beeta gruppi (nt AI/pooljuhid/krüpto-seotud) —
+sektori-, market-cap- ja volatiilsuskontsentratsioon jäävad **eraldi, veel avamata
+diagnostilisteks küsimusteks**. Need lisatakse hiljem kerge, riskidiagnostilise
+raportina (mitte hüpoteeside kaevandamiseks) — ei blokeeri Cycle #2 algust.
+
+C1 praktiline profiil loetakse nüüd **täielikuks ja külmutatuks**: (1) IC kinnitunud
+Locked Test'il, (2) reaalne, kuigi tagasihoidlik lift (Top 20-30% piirkonnas,
+kirjeldavalt stabiilne), (3) tickerite lõikes laialt hajutatud. **Edasisi C1
+eksperimente ega kaaluoptimeerimist ei tehta** — järgmisena liigutakse Relative
+Strength ja Money Flow nähtuste juurde.
+
+**ChatGPT kinnitus:** jah, C1 praktilise profiili võib lugeda piisavalt lõpetatuks.
+Staatus jääb **Validated Combination Candidate** (mitte Core, kuni ajaline
+replikatsioon puudub).
+
+## 10. Cycle #2 Step 2: Relative Strength (RS1/RS_slope/RS_accel) — tulemus ja järeldus
+
+Testisime kolme Relative Strength signaali (kõik "aktsia vs SPY" kujul, ilma sektori
+võrdluseta — vt allpool RS2 piirang) dev-valimil (seed=42, sama 300-tickeriline
+valim, mida Cycle #1 kasutas). Metoodika: causal walk-forward IC, 80/20 train/holdout,
+primary lookback/horisont=20 päeva, secondary=10/40 päeva (mitte 5 — pre-registered
+enne testimist, et vältida hilisemat horisondi valimist), Bull/Bear lõige sisse
+ehitatud algusest peale.
+
+**RS1 (aktsia return − SPY return, 20-päevane libisev aken):**
+
+| Horisont | Train IC | Holdout IC |
+|---|---|---|
+| 10d (secondary) | +0.0351 | +0.0025 |
+| 20d (PRIMARY) | +0.0185 | −0.0125 |
+| 40d (secondary) | +0.0108 | −0.0156 |
+
+Režiimi lõige (20d): Train Bull +0.0207, Train Bear +0.0152; Holdout Bull −0.0082,
+Holdout Bear −0.0323.
+
+**RS_slope (RS muutus 5-päevase akna vältel):**
+
+Train Bull +0.0044, Train Bear **+0.0674**; Holdout Bull −0.0100, Holdout Bear
+**−0.0952**.
+
+**RS_accel (RS_slope teine tuletis):**
+
+Train Bull +0.0049, Train Bear **+0.0598**; Holdout Bull +0.0044, Holdout Bear
+**−0.1523**.
+
+### Esialgne tähelepanek: sama-režiimi-sisene märgi pöördumine
+
+Erinevalt Momentum'i/RSI mustrist (train≈0, holdout tugevalt positiivne, seletatav
+režiimi-koostise nihkega), näitas RS_slope/RS_accel **täieliku märgi pöördumise SAMA
+Bear-kategooria sees** (nt rs_accel: +0.060 train → −0.152 holdout). Kuna mõlemad
+väärtused on individuaalselt piisavalt suured, et olla ~2-3 standardviga nullist
+eemal (ligikaudne SE train n=2401 juures ~0.020, holdout n=560 juures ~0.042), ei
+saanud seda kohe müraks pidada — vajas täiendavat kontrolli.
+
+### Rolling window diagnostika (6-kuu aknad, Bear-alamvalim eraldi)
+
+| Aken | RS1 | RS_slope | RS_accel |
+|---|---|---|---|
+| 2025-03-31 (n=801) | +0.0601 | −0.0542 | −0.0256 |
+| 2025-09-30 (n=1600) | −0.0091 | +0.1061 | +0.0818 |
+| 2026-03-31 (n=285) | +0.0224 | −0.0071 | −0.0596 |
+| 2026-09-30 (n=275) | −0.0738 | −0.1140 | −0.1909 |
+
+**Järeldus:** muster on **erratiline, mitte järkjärguline** — märk hüppab aken-akna
+kaupa ilma trendita (võrreldes Momentum'i sujuva -0.093→-0.031→+0.050→+0.007→+0.048
+progressiooniga). See, koos asjaoluga, et Bear-vaatlusi tekkis üldse alles alates
+2025. märtsist (varasem periood oli valdavalt Bull, muutes väikese Bear-valimi eriti
+müra-altiks), viitab tugevalt sellele, et **varasem "train vs holdout pöördumine" oli
+kahe erineva müra-hetke juhuslik kokkusattumus**, mitte reaalne, kuigi ebastabiilne
+efekt.
+
+### Lõplik järeldus RS1/RS_slope/RS_accel kohta
+
+**Ei näita stabiilset signaali kummaski režiimis.** Bull-aknad (palju suuremad
+valimid, n=1056-6735) hõljuvad samuti nulli lähedal (-0.039 kuni +0.032) ilma selge
+suunata. Soovitatav Signal Lifecycle staatus: **Rejected / Inconclusive** praeguses
+vormis — ei minda Locked Test'ile, kuna puudub isegi stabiilne eksploratiivne
+hüpotees, millest kinni pidada.
+
+### Oluline piirang, mis jäi testimata: RS2 (aktsia vs SEKTOR)
+
+Testisime ainult "aktsia vs SPY" kuju. ChatGPT algne hüpotees rõhutas spetsiifiliselt
+"aktsia vs oma sektor" versiooni ("aktsia püsib tugevana, kui *tema sektor* on nõrk")
+kui kontseptuaalselt kõige huvitavamat — see erineb põhimõtteliselt "aktsia vs kogu
+turg" (RS1) versioonist, kuna RS1 segab kokku turu-beeta/sektori-efektid
+aktsia-spetsiifilise tugevusega, mis võib seletada, miks tulemus oli müra. RS2 jäi
+teostamata, kuna projektis on teadaolev sektori-andmete usaldusväärsuse probleem
+(yfinance sektoripäring rate-limiteerub sageli, langeb "unknown" peale).
+
+**Avatud küsimus:** kas väärt investeerida sektori-andmete infrastruktuuri (et
+korralikult testida RS2), või piisab RS1/slope/accel tagasilükkamisest ja liikumisest
+otse Money Flow nähtuste juurde (RVOL, OBV slope, A/D slope — need ei vaja sektori
+andmeid)?
+
+## 11. Avatud küsimused järgmiseks etapiks
 
 1. Kas C1 "Candidate → Core" ülendamiseks tuleks oodata reaalset uut turutsüklit
    (ajaline sõltumatus), või on olemas mõistlik proxy (nt eraldi test spetsiifiliselt
