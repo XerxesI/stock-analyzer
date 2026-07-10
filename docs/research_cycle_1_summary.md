@@ -1013,7 +1013,100 @@ milline peaks olema järgmine samm — kas registreeritud RSI-oversold+RVOL
 kombinatsiooni test (mis jäi varem ootele), Bull-mooduli kokkupanemine
 olemasolevatest valideeritud tükkidest, või hoopis midagi muud?
 
-## 23. Avatud küsimused järgmiseks etapiks
+## 23. Cycle #3: Regime-Aware Model Assembly — baseline portfelli backtest
+
+ChatGPT soovitas liikuda signaali-avastamiselt süsteemi ehitamisele: külmutatud
+arhitektuur (Bear=C1 kõrge-tsoon, Bull=VC3-RVOL D-rakk, MF1/RVOL ainult
+tie-break'ina), täisulatuslik portfelli simulatsioon (positsioonipiirang,
+tehingukulud, kapatsiteedikonkurents), ilma ühegi tuunimiseta.
+
+### Baseline tulemus (dev-valim, seed=42, 3 aastat)
+
+```
+Initial capital:      $100,000
+Final equity:          $107,043
+CAGR:                   +3.19%
+Max drawdown:           -38.49%
+Sharpe:                 0.25
+Sortino:                0.59
+Trade count:            1759
+Trades per year:        812.2
+Profit factor:          1.06
+Expectancy/trade:       $8.22
+Regime exposure:        Bull 88.4%, Bear 11.6%
+Max same-day entries:   17
+```
+
+**Aus esmahinnang:** tagasihoidlik CAGR koos väga suure drawdown'iga — Sharpe 0.25
+ja profit factor 1.06 näitavad, et kolme valideeritud signaali kombinatsioon EI
+anna automaatselt tugevat portfelli-tasandi tulemust, kui rakendada realistlikke
+tehingukulusid, positsioonipiiranguid ja tegelikku kauplemismehaanikat.
+
+### Diagnostika: kolm konkreetset probleemi
+
+**1. Tehingukulud sõid 67.8% toorest kasumist**
+
+```
+Gross P&L (enne kulusid):  $21,860
+Kogu tehingukulu:           $14,816  (sisenemine + väljumine)
+Net P&L (pärast kulusid):   $7,043
+```
+
+Kauplemissagedus (812 tehingut/aastas) on edge'i suurusega võrreldes liiga kõrge
+— süsteem genereerib liiga palju väikese-edge'iga tehinguid, mille kulud
+järjekindlalt ära söövad.
+
+**2. C1 (Bear) on tehingu kohta ~7.6x kasumlikum kui VC3 (Bull)**
+
+| Režiim | Tehinguid | Kokku P&L | Keskmine/tehing | Win rate |
+|---|---|---|---|---|
+| Bear (C1) | 204 | $3,528 | **$17.30** | 35.8% |
+| Bull (VC3) | 1555 | $3,515 | **$2.26** | 35.9% |
+
+Peaaegu sama win rate mõlemal, aga C1 tehingu väärtus on palju kõrgem — Bull-poole
+suur tehingumaht lahjendab portfelli tervikuna, kuigi kummagi komponendi
+kogupanus on peaaegu võrdne. Kinnitab portfelli tasandil varasemat leidu (C1
+praktiline lift 1.073x oli tugevam kui VC3 tagasihoidlikum edge).
+
+**3. Drawdown on korreleeritud makrosündmuse, mitte hajutatud riski tulemus**
+
+```
+Peak:   2024-05-09  ($99,930)
+Trough: 2025-04-11  ($61,468)
+Kestus: 337 kalendripäeva
+Selle akna tehingud: 837, win rate 32.02% (halvem kui üldine 36%)
+Max samal päeval sisenemisi: 17
+Clustering-päevad (≥10 sisenemist): 2024-05-09 (14), 2024-11-06 (11),
+  2025-04-03 (14), 2025-04-04 (17), 2025-04-07 (14), 2025-04-10 (10)
+```
+
+**Otsing kinnitas:** 2025-04-03 kuni 2025-04-10 nädal langeb täpselt kokku
+2025. aasta aprilli "Liberation Day" tariifikriisiga. 2. aprillil 2025
+väljakuulutatud laiaulatuslikud tariifid vallandasid globaalse paanikamüügi —
+suurima turulanguse alates 2020. aasta COVID-kriisist — ning esimese kahe
+päevaga kadus üle 6.6 triljoni dollari turuväärtust (suurim kahepäevane kaotus
+finantsajaloos). VIX hüppas mitmel intensiivsel päeval tasemest ~30 keskele
+50ndatesse (kõrgeim tase alates 2020. aastast), S&P 500 langes ligi 10.5% kahe
+kauplemispäeva jooksul, enne kui 9. aprillil väljakuulutatud 90-päevane
+tariifide peatamine vallandas tugeva ralli (S&P +9.5% ühel päeval — ajaloo
+kümnes parim päev). (Allikad: Cboe Index Insights, St. Louis Fed, Wikipedia
+"2025 stock market crash", USI Consulting Group Market Volatility Update.)
+
+**Tõlgendus:** drawdown polnud juhuslik korrelatsiooniartefakt, vaid täpne
+reaktsioon ühele ajaloo erakordsemale (99. protsentiili) makrošokile —
+korduva/tavapärase nähtuse asemel. Samas paljastab see reaalse ja püsiva
+haavatavuse **mehhanismi**: compression+RVOL signaal käivitub just laiapõhjalise
+volatiilsuse plahvatuse hetkedel paljudes aktsiates korraga — signaali
+loomupärane omadus, mitte viga, mis vajab eksplitsiitset kaitset (nt päevane
+uute-positsioonide lagi), mitte ainult üldist positsioonide-arvu piirangut.
+
+**Avatud küsimus:** kuidas ChatGPT hinnangul edasi minna — kas (a) lisada päevane
+uute-positsioonide lagi ja tehingusageduse/positsiooni-suuruse kohandus enne
+järgmist testi, (b) testida sama arhitektuuri erineval ajaperioodil (nt
+väljaspool 2025 aprilli šokki) drawdown'i tavapärasuse hindamiseks, või (c)
+midagi muud?
+
+## 24. Avatud küsimused järgmiseks etapiks
 
 1. Kas C1 "Candidate → Core" ülendamiseks tuleks oodata reaalset uut turutsüklit
    (ajaline sõltumatus), või on olemas mõistlik proxy (nt eraldi test spetsiifiliselt
