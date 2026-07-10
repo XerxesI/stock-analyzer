@@ -798,7 +798,55 @@ Põhiküsimused:
 See eristab tõelist interaktsiooni geneerilisest breakout-efektist — mitte
 ainult "kas compression+breakout on parem kui kogu populatsioon".
 
-## 19. Avatud küsimused järgmiseks etapiks
+## 19. VC2-PB tulemus: REJECTED — breakout ei paranda, tõenäoliselt hilineb
+
+Testisime VC2-PB 2×2 disainiga dev-valimil, primary 20d, secondary 10d.
+
+### Bull-režiim (97% andmestikust): järjekindel tagasilükkamine
+
+| Horisont | D−C (breakout aitab compression'is?) | D−B (compression parandab breakout'i?) |
+|---|---|---|
+| 10d Bull | −0.066 | −0.042 |
+| 20d Bull | −0.075 | −0.036 |
+
+Mõlemad võtmeküsimused on **negatiivsed mõlemal horisondil** — puhas, konsistentne
+tagasilükkamine seal, kus valdav enamus andmetest asub.
+
+### Bear'i "positiivne" tulemus on müra (n=5)
+
+Bear'i compression/breakout rakk sisaldab 20d horisondil ainult **n=5**
+vaatlust — success rate 0.600 tähendab 3 võitu 5-st, statistiliselt
+mittetõlgendatav. Toon selle eraldi esile, et vältida ekslikku üldistust.
+
+### Kaks huvitavat lisaleidu
+
+1. **Breakout ise (isegi ilma compression'ita) on kehvem kui mitte-breakout**:
+   `no_compression` real 20d Bull — no_breakout success=0.331 vs
+   breakout=0.282 (median R 1.059 vs 0.870). See on laiem muster kui ainult
+   VC2-PB — sarnaneb varasemate leidudega (Trend, kõrge RSI, kõrge RVOL), kus
+   juba-laienenud/kõrgele-jõudnud seisundite "jälitamine" alaperformib selles
+   andmestikus.
+
+2. **MFE kahaneb dramaatiliselt pärast breakout'i kinnitust**: compression/
+   no_breakout MFE=0.162 (20d) vs compression/breakout MFE=**0.033** — 5x
+   väiksem. Viitab, et suur osa liikumisest toimub **enne** `Close > 20-päeva
+   High` kinnitust — see breakout definitsioon tabab tõenäoliselt liikumise
+   lõppu, mitte algust.
+
+### Signal Lifecycle uuendus
+
+**VC2-PB (Close > eelneva 20-päeva High) = Rejected** Bull-režiimis (valdav
+andmemaht). Ei liiguta kohe alternatiivse breakout-definitsiooni juurde
+(10-päeva high, ATR-põhine breakout jne) ilma täiendava suunata — see oleks
+täpselt see parameetriruumi kaevandamine, mida oleme järjekindlalt vältinud.
+
+**Avatud küsimus:** kas ChatGPT hinnangul väärib "breakout tabab liikumise
+lõppu, mitte algust" tähelepanek eraldi diagnostikat (nt varasem, mitte hilisem
+breakout-definitsioon, või hoopis loobumine price-breakout triggerist VC3
+(RVOL confirmation) kasuks), või tuleks VC-uurimisrada praegu sulgeda ja liikuda
+mujale?
+
+## 20. Avatud küsimused järgmiseks etapiks
 
 1. Kas C1 "Candidate → Core" ülendamiseks tuleks oodata reaalset uut turutsüklit
    (ajaline sõltumatus), või on olemas mõistlik proxy (nt eraldi test spetsiifiliselt
