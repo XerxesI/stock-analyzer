@@ -890,7 +890,65 @@ Stopping rule: see on VC uurimisraja viimane test praeguses tsüklis.
   Kui negatiivne → VC rada Deferred/Archived, liigume edasi.
 ```
 
-## 21. Avatud küsimused järgmiseks etapiks
+## 21. VC3-RVOL tulemus: PRIMARY PASS, aga rolling window näitab segast pilti
+
+### Stopping-rule test (20d, Bull, dev-valim)
+
+```
+PRIMARY (D>C):   success_delta=+0.022  median_R_delta=+0.154  -> PASS
+SECONDARY (D>B): success_delta=-0.001  median_R_delta=+0.048  -> FAIL (ei nõuta)
+```
+
+**D-rakk (compression+RVOL) näitas silmapaistvat profiili** kõigi nelja mõõdiku
+lõikes:
+
+| Rakk (20d Bull) | Success | Median R | MFE | \|MAE\| |
+|---|---|---|---|---|
+| A (ei compr., rvol≤1) | 0.321 | 1.026 | 0.076 | 0.059 |
+| B (ei compr., rvol>1) | 0.337 | 1.073 | 0.074 | 0.055 |
+| C (compr., rvol≤1) | 0.314 | 0.967 | 0.144 | 0.063 |
+| **D (compr., rvol>1)** | **0.336** | **1.121** | **0.230** | **0.053** |
+
+D-rakk on parim kolmes neljast mõõdikust, **madalaim** |MAE| kõigist — erinevalt
+kõigist varasematest "äärmuslik seisund" leidudest (D1, RSI oversold, compression
+üksi), kus suurem MFE käis alati käsikäes suurema MAE-ga.
+
+### Rolling window (6-kuu aknad) — segane, mitte puhas kinnitus
+
+| Aken | D−C success | D−C median R | n (C/D) |
+|---|---|---|---|
+| 2024-05 | +0.003 | +0.046 | 158/52 |
+| 2024-11 | −0.032 | −0.058 | 881/252 |
+| 2025-05 | +0.045 | −0.073 | 653/144 |
+| **2025-11** | +0.040 | **+0.405** | 1193/391 |
+| 2026-05 | +0.017 | −0.021 | 825/267 |
+| 2026-11 | +0.103 | −0.426 | 65/21 (liiga väike valim) |
+
+**Success rate:** 4/6 akent nõrgalt positiivsed, üks negatiivne — tagasihoidlik,
+kuid mitte täiesti vastuoluline muster.
+
+**Median R on murettekitavam:** ainult **üks** aken (2025-11) näitab suurt
+positiivset nihet (+0.405), kolm teist akent on negatiivsed. **Agregaat-tulemuse
+(+0.154) domineerib peaaegu täielikult see üks ajaaken.**
+
+**Tähelepanek:** 2025-11 aken kattub tõenäoliselt sama kõrgenenud-volatiilsuse
+perioodiga, mis Cycle #1 alguses tuvastati (dev-holdout'i režiimi-nihe,
+Bull_High ilmumine alles hilisemas perioodis) — võimalik, et VC3 "primary pass"
+kajastab osaliselt sama perioodi-spetsiifilist nähtust, mis aitas ka Momentum/RSI
+puhul, mitte täiesti sõltumatut efekti.
+
+### Ei ole puhas kummagi interpretatsioonijuhendi stsenaarium
+
+See pole Momentum'i sujuv, järkjärguline muster, aga pole ka RS_slope'i täiesti
+kaootiline märgi-hüplemine — vahepealne olukord: nõrk, ebajärjekindel
+success-rate paranemine + median R, mis on suuresti ühe ajaakna vedatud.
+
+**Avatud küsimus:** kas ChatGPT hinnangul väärib see täiendavat kontrolli (nt kas
+2025-11 aken kattub teadaoleva režiimi-nihkega, mis mõjutas ka Momentum/RSI
+tulemusi), või tuleks VC3 sellegipoolest ettevaatlikult Locked Test'ile saata,
+arvestades, et formaalne primary kriteerium agregaadi tasemel täideti?
+
+## 22. Avatud küsimused järgmiseks etapiks
 
 1. Kas C1 "Candidate → Core" ülendamiseks tuleks oodata reaalset uut turutsüklit
    (ajaline sõltumatus), või on olemas mõistlik proxy (nt eraldi test spetsiifiliselt
