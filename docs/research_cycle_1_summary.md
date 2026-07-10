@@ -829,24 +829,68 @@ mittetõlgendatav. Toon selle eraldi esile, et vältida ekslikku üldistust.
 
 2. **MFE kahaneb dramaatiliselt pärast breakout'i kinnitust**: compression/
    no_breakout MFE=0.162 (20d) vs compression/breakout MFE=**0.033** — 5x
-   väiksem. Viitab, et suur osa liikumisest toimub **enne** `Close > 20-päeva
-   High` kinnitust — see breakout definitsioon tabab tõenäoliselt liikumise
-   lõppu, mitte algust.
+   väiksem. **ChatGPT täpsustus:** "hiline entry" tõlgendus on usutav, aga
+   praegune ristlõikeline 2×2 disain **ei tõesta** seda otseselt — selleks
+   oleks vaja event-path analüüsi (T0 compression → T+n breakout → post-breakout
+   outcome samal aktsial), mida praegu ei tehta (huvitav diagnostika, aga ei
+   blokeeri järgmist signaalitesti).
 
-### Signal Lifecycle uuendus
+### Signal Lifecycle uuendus (ChatGPT täpsustatud)
 
-**VC2-PB (Close > eelneva 20-päeva High) = Rejected** Bull-režiimis (valdav
-andmemaht). Ei liiguta kohe alternatiivse breakout-definitsiooni juurde
-(10-päeva high, ATR-põhine breakout jne) ilma täiendava suunata — see oleks
-täpselt see parameetriruumi kaevandamine, mida oleme järjekindlalt vältinud.
+Oluline eristus kahe väite vahel: (1) "compression + activation" idee
+ebaõnnestus — **seda §19 ei näita**; (2) "compression + Close>eelneva 20d
+High" ebaõnnestus — **seda §19 näitab selgelt**. Seetõttu:
 
-**Avatud küsimus:** kas ChatGPT hinnangul väärib "breakout tabab liikumise
-lõppu, mitte algust" tähelepanek eraldi diagnostikat (nt varasem, mitte hilisem
-breakout-definitsioon, või hoopis loobumine price-breakout triggerist VC3
-(RVOL confirmation) kasuks), või tuleks VC-uurimisrada praegu sulgeda ja liikuda
-mujale?
+- **VC1 Compression State = Promising Amplitude/Instability State** (mitte
+  lihtsalt Observation — see on juba kaks korda kinnitatud amplituudi-nähtus)
+- **VC2-PB = Rejected Activation Mechanism** (konkreetne breakout-definitsioon,
+  mitte kogu VC uurimisrada)
+- **VC uurimisrada = Open**, üks viimane teooria-põhine aktiveerimis-test lubatud
 
-## 20. Avatud küsimused järgmiseks etapiks
+Ei liiguta alternatiivsete price-breakout definitsioonide juurde (10-päeva
+high, ATR-breakout, Bollinger-breakout) — see looks parameetriruumi
+kaevandamise riski ilma positiivse empiirilise põhjuseta.
+
+## 20. VC3-RVOL: Compression + RVOL Activation — pre-registered hüpotees
+
+Kuna price-breakout aktiveerimise mehhanism ebaõnnestus, aga RVOL-il on juba
+sõltumatu empiiriline alus (MF1 Locked Test kinnitatud, IC replitseerus
+dev-holdout ja Locked Test vahel), on majanduslikult huvitavam küsimus:
+
+> Kas compression state vajab lihtsalt aktiivsuse suurenemist, mitte juba
+> toimunud hinnamurde kinnitamist?
+
+```
+Hüpotees VC3-RVOL:
+Külmutatud aktiveerimisreegel: RVOL_activation = tänane RVOL > 1.0
+  (lihtne, majanduslikult selge — tänane maht ületab 20-päeva keskmist;
+  MITTE ekstreemne lävend, kuna varasem detsiili-analüüs näitas, et
+  kõrgeim RVOL pole monotoonselt parim)
+
+2×2 disain:
+                    RVOL ≤ 1        RVOL > 1
+No compression         A               B
+Compression            C               D
+
+Primary regime: Bull (VC1 kõige huvitavam asümmeetria oli seal, MF1 on
+  Bull-spetsiifiline)
+Primary horizon: 20 päeva
+Secondary horizon: 10 päeva
+Primary metrics: success-rate delta, median R delta
+
+ASÜMMEETRILINE pre-registreering (VC2 õppetund — kaks küsimust vastavad
+erinevatele majanduslikele hüpoteesidele, ei nõuta mõlema positiivsust):
+  PRIMARY CLAIM: D > C
+    "RVOL activation parandab compression state'i directional outcome'i"
+  SECONDARY (incremental) CLAIM: D > B
+    "Compression lisab väärtust RVOL activation'ile"
+
+Stopping rule: see on VC uurimisraja viimane test praeguses tsüklis.
+  Kui positiivne → praktiline profiil + võimalik Bull-moodul.
+  Kui negatiivne → VC rada Deferred/Archived, liigume edasi.
+```
+
+## 21. Avatud küsimused järgmiseks etapiks
 
 1. Kas C1 "Candidate → Core" ülendamiseks tuleks oodata reaalset uut turutsüklit
    (ajaline sõltumatus), või on olemas mõistlik proxy (nt eraldi test spetsiifiliselt
