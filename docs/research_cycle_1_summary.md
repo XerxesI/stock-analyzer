@@ -646,7 +646,65 @@ Oluline: testitakse SEISUNDIT (RSI<30 vs RSI>=30), mitte olemasolevat
   mean-reversion)
 ```
 
-## 16. Avatud küsimused järgmiseks etapiks
+## 16. RSI-O1 tulemus: klassikaline oversold reversal REJECTED
+
+Testisime RSI-O1 hüpoteesi (RSI(14)<30 vs ≥30) dev-valimil (seed=42), primary
+horizon=20d, secondary=10d/40d, Bull/Bear eraldi, primary metrikad success rate
+delta ja median R delta (mitte IC, kuna signaal on binaarne).
+
+### Tulemus: kõik kuus horisont×režiim kombinatsiooni negatiivsed
+
+| Horisont | Režiim | Success delta | Median R delta |
+|---|---|---|---|
+| 10d | Bull | −0.034 | −0.121 |
+| 10d | Bear | −0.023 | −0.080 |
+| **20d (PRIMARY)** | **Bull** | **−0.031** | **−0.076** |
+| **20d (PRIMARY)** | **Bear** | **−0.041** | **−0.161** |
+| 40d | Bull | −0.007 | −0.012 |
+| 40d | Bear | −0.055 | −0.165 |
+
+**Kõik kuus kombinatsiooni näitavad sama suunda** — RSI<30 ennustab **halvemat**,
+mitte paremat tulemust igal horisondil ja mõlemas režiimis. See on otsene
+klassikalise "oversold reversal" hüpoteesi ümberlükkamine.
+
+**Metodoloogiline täpsustus (ChatGPT):** need kuus rakku **ei ole kuus sõltumatut
+kinnitust** — 10d/20d/40d outcome-aknad kattuvad ajaliselt ja kasutavad samu
+aktsiaid/turusündmusi, ning Bull/Bear lõiked ei anna ajalist sõltumatust. Täpsem
+sõnastus: *primary hüpotees ebaõnnestus vastupidises suunas, ja kõik secondary
+horisont/režiimi tulemused on selle ebaõnnestumisega suunaliselt kooskõlas.*
+Rolling window diagnostikat pole vaja, mitte sellepärast, et oleks "kuus kinnitust",
+vaid kuna primary test juba ebaõnnestus selgelt vastupidises suunas.
+
+### Huvitav paralleel D1 (Low Relative Participation) nähtusega
+
+MFE on ülemüüdud grupis dramaatiliselt kõrgem (20d Bull: 0.446 vs 0.071 — ~6x),
+MAE samuti kõrgem (0.107 vs 0.056) — täpselt sama muster, mida nägime D1 juures
+(§14): äärmuslik seisund → suuremad liikumised mõlemas suunas, aga **halvem, mitte
+parem** tüüpiline (mediaan) tulemus.
+
+### Uus backlog-kirje
+
+```
+Nähtus "Extreme State Instability": äärmuslikud/haruldased seisundid (nii väga
+madal RVOL kui väga madal RSI) näitavad korduvalt sama mustrit — kõrgenenud
+MFE/MAE (suurem variatiivsus), aga halvem, mitte parem, mediaan-tulemus ja
+success rate. Võimalik üldisem turukäitumise nähtus, väärt meelespidamist
+tulevaste "äärmuslik väärtus = hea signaal" tüüpi hüpoteeside testimisel.
+Staatus: Observation (mustri märkus, mitte veel iseseisev testitav hüpotees)
+```
+
+### Signal Lifecycle uuendus
+
+**RSI-O1 (RSI<30 klassikaline oversold reversal) = Rejected.** Ei minda Locked
+Test'ile. Olemasolev `rsi_signal` (Trade Score v2, tugevuse-hüpotees) jääb
+puutumata — see on endiselt eraldi, juba varem osaliselt uuritud signaal.
+
+**Avatud küsimus:** kas ChatGPT nõustub, et see tulemus on piisavalt selge
+tagasilükkamiseks ilma rolling window kontrollita, ja mis peaks olema järgmine
+samm — kas Volatility Compression/Expansion nähtuse juurde liikumine (ChatGPT
+varem mainitud), või midagi muud?
+
+## 17. Avatud küsimused järgmiseks etapiks
 
 1. Kas C1 "Candidate → Core" ülendamiseks tuleks oodata reaalset uut turutsüklit
    (ajaline sõltumatus), või on olemas mõistlik proxy (nt eraldi test spetsiifiliselt

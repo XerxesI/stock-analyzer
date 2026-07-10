@@ -14,4 +14,5 @@ SIGNALS: dict[str, dict] = {
     "rvol": {"category": "money_flow", "requires_volume": True, "output": "continuous"},
     "obv_slope": {"category": "money_flow", "requires_volume": True, "output": "continuous"},
     "ad_slope": {"category": "money_flow", "requires_volume": True, "output": "continuous"},
+    "compression_pct": {"category": "volatility_compression", "requires_volume": False, "output": "continuous"},
 }
