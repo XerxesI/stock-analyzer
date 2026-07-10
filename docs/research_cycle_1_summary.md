@@ -501,7 +501,75 @@ C1 on Bear-moodulina), või on siin midagi, mida tasuks täiendavalt diagnoosida
 kas madal lift Top5%-l on seotud konkreetsete kõrge-RVOL päevade tüübiga, nagu
 earnings-reaktsioonid)?
 
-## 13. Avatud küsimused järgmiseks etapiks
+## 13. MF1 outcome diagnostika: suund vs amplituud, ja detsiili murdepunkt
+
+ChatGPT tõstatas §12 põhjal terava tähelepaneku: kuna nii mediaan MFE kui MAE
+**kasvasid** RVOL lõike kitsenedes (Top30%→Top5%), samal ajal kui success rate
+**langes**, võib RVOL ennustada pigem liikumise **amplituudi** ("midagi hakkab
+juhtuma"), mitte **suunda**. Soovitas kontrollida IC(rvol,mfe)/IC(rvol,\|mae\|) ja
+RVOL×ATR% interaktsiooni, enne RSI-oversold juurde liikumist.
+
+### Esimene diagnostika (täisvahemiku Spearman IC)
+
+```
+IC(rvol, mfe)          = -0.0537
+IC(rvol, |mae|)        = -0.1167
+IC(rvol, mfe+|mae|)    = -0.1214
+IC(rvol, r_multiple)   = +0.0350  (MF1 primary tulemus)
+IC(rvol, success)      = +0.0286
+```
+
+**Üllatav, hüpoteesile vastupidine tulemus:** täisvahemiku IC oli **negatiivne**
+MFE/MAE jaoks, mitte positiivne, nagu amplituudi-hüpotees ennustas. See viitas, et
+täisvahemiku Spearman IC ja tippkvantiilide (§12) sisemine muster mõõdavad erinevat
+asja — vajas täpsustavat detsiili-analüüsi.
+
+**ATR% interaktsioon:** IC(rvol, r_multiple) kasvas ATR% tertsiilide lõikes (Low
++0.020 → Medium +0.028 → **High +0.046**) — RVOL ei kao kõrge-volatiilsuse sees,
+mis kinnitab, et see kannab infot lisaks pelgale ATR tasemele.
+
+### Täpsustav detsiili-analüüs (10 detsiili, D1=madalaim RVOL, D10=kõrgeim)
+
+| Detsiil | RVOL vahemik | n | Mean MFE | Mean \|MAE\| | Mean R | Success rate |
+|---|---|---|---|---|---|---|
+| D1 | 0.00-0.40 | 2467 | **+0.174** | **0.101** | +1.617 | **0.272** |
+| D2 | 0.40-0.56 | 2467 | +0.107 | 0.063 | +1.455 | 0.334 |
+| D3 | 0.56-0.67 | 2466 | +0.072 | 0.054 | +1.359 | 0.326 |
+| D4 | 0.67-0.77 | 2467 | +0.065 | 0.045 | +1.409 | 0.362 |
+| D5 | 0.77-0.86 | 2466 | +0.065 | 0.046 | +1.353 | 0.350 |
+| D6 | 0.86-0.97 | 2467 | +0.058 | 0.043 | +1.426 | 0.352 |
+| D7 | 0.97-1.09 | 2466 | +0.058 | 0.043 | +1.396 | 0.360 |
+| D8 | 1.09-1.29 | 2467 | +0.062 | 0.045 | +1.421 | 0.349 |
+| D9 | 1.29-1.68 | 2466 | +0.077 | 0.050 | +1.465 | 0.350 |
+| D10 | 1.68-19.81 | 2467 | +0.117 | 0.067 | +1.581 | 0.332 |
+
+### Järeldus: U-kujuline MFE/MAE, aga erinev success rate muster
+
+**MFE ja MAE moodustavad selge U-kõvera** — kõrgeimad mõlemas äärmuses (D1 ja D10),
+madalaimad keskel (D6-D7). See seletab täielikult varasema "vastuolulise" täisvahemiku
+negatiivse IC — Spearman korrelatsioon võtab arvesse D1→D7 langevat trendi, mis
+domineerib arvutust ja varjab D8-D10 osalist taastumist.
+
+**Success rate käitub teisiti:** **D1 on selgelt halvim** (0.272, madalaim kõigist)
+— sobib kokku "õhukese kauplemise müra" hüpoteesiga (suured juhuslikud liikumised
+mõlemas suunas, kaotused domineerivad). D2-D9 moodustavad suhteliselt lameda platoo
+(~0.33-0.36). **D10 langeb kergelt platoo tipust tagasi** (0.332).
+
+### Täpsustatud hüpotees Hypothesis Backlog'i jaoks
+
+```
+Hüpotees "RVOL_filter": RVOL peamine praktiline väärtus on likviidsuse FILTRINA
+(väldi äärmiselt madalat RVOL-i, D1-tüüpi), mitte "chase kõrgeimat RVOL-i" reeglina.
+Success rate on madalaim just kõige madalama RVOL-i detsiilis, mitte kõrgeima.
+Staatus: Candidate (registreeritud, vajab täiendavat testimist teisel valimil)
+```
+
+**Avatud küsimus:** kas see täpsustus (RVOL kui alumise-otsa filter, mitte ülemise-otsa
+ranking) muudab MF1 staatust või praktilist kasutusviisi Trade Engine'is, ja kas
+tasub seda uut, täpsemat hüpoteesi eraldi testida enne RSI-oversold juurde
+liikumist?
+
+## 14. Avatud küsimused järgmiseks etapiks
 
 1. Kas C1 "Candidate → Core" ülendamiseks tuleks oodata reaalset uut turutsüklit
    (ajaline sõltumatus), või on olemas mõistlik proxy (nt eraldi test spetsiifiliselt
