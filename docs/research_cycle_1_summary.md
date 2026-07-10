@@ -600,28 +600,53 @@ mitte lihtsalt "D1 = väikesed ebalikviidsed aktsiad".
 D1 mean-median lõhe (0.74) on palju suurem kui D2-D10 oma (0.294) — D1 p95 (4.08)
 on selgelt paksem kui D2-D10 oma (3.16). **Pärast trimmimist/winsoriseerimist on D1
 tegelikult marginaalselt HALVEM, mitte parem, kui D2-D10** (trimmed: 1.125 vs 1.240;
-winsorized: 1.271 vs 1.295). **Kinnitatud: D1 kõrge toormean R tuleb haruldastest
-suurtest võitjatest (fat right tail), mitte üldiselt paremast jaotusest.**
+winsorized: 1.271 vs 1.295).
+
+**Terminoloogia parandus (ChatGPT tähelepanek):** "D1 kõrge mean R on statistiline
+artefakt" on liiga tugev väide — fat right tail on **reaalne** osa jaotusest, mitte
+artefakt. Õigem sõnastus: **D1 kõrge keskmine R ei kirjelda tüüpilise setup'i
+kvaliteeti, vaid on tugevalt mõjutatud haruldastest väga suurtest võitjatest.** See
+tähendab, et Low Relative Participation on halb keskkond *tüüpilise* swing-trade
+kandidaadi jaoks, kuid selle sees eksisteerib haruldane erandite klass väga suurte
+tõusudega — mida ei tohiks tulevases mudelis kaotada jäiga välistusreegliga.
 
 ### Lõplik järeldus
 
-**"Low Relative Participation" (D1) on genuiinne, laialt kehtiv riskiseisund** — madal
-võiduprotsent, mis püsib kõigil likviidsuse tasemetel, ja mis pole peidetud
-võimaluste tsoon isegi arvestades selle kõrget toormean R-i (mis on statistiline
-artefakt, mitte reaalne edge). Riskiga kohandatuna (trimmed/winsorized) on D1 pigem
-kergelt kehvem kui tavaline tsoon, lihtsalt suurema variatiivsusega.
+**"Low Relative Participation" (D1) on halb keskkond tüüpilise kandidaadi jaoks**,
+mis püsib kõigil likviidsuse tasemetel — madal võiduprotsent, ja riskiga kohandatuna
+(trimmed/winsorized) pigem kergelt kehvem kui tavaline tsoon. Samas ei tohiks seda
+implementeerida jäiga reeglina (`if RVOL < 0.4: reject`) — pigem tulevikus
+kontekstuaalse negatiivse kaaluna (`low_relative_participation = true`), mida mõni
+teine tugev signaal saab kompenseerida, et mitte kaotada harva esinevaid suure
+tõusupotentsiaaliga erandeid.
 
 **MF1 staatus jääb muutumatuks** (Validated Bull-regime Informational Feature).
-"Low Relative Participation" on nüüd hästi diagnoositud, aga formaalselt eraldi
-**Candidate**-hüpotees Hypothesis Backlog'is, mitte veel Locked Test'iga kinnitatud
-oma õigel puutumata andmestikul.
+**"Low Relative Participation" = Candidate Context Feature** (mitte Validated —
+hüpotees sündis Locked Test andmete uurimisest ja vajab tulevikus oma
+confirmatory valimit; ChatGPT soovitab mitte kulutada uut Locked Test valimit
+selle kohese kinnitamise peale praeguses faasis).
 
-**Avatud küsimus:** kas see tulemus on piisav, et registreerida "Low Relative
-Participation" hüpotees kindlamalt (nt kui Bull-mooduli täiendav kontekst-tunnus,
-mitte iseseisev filter), või tuleks enne veel midagi kontrollida, ja kas nüüd on
-õige hetk liikuda RSI<30 testi juurde (paralleelselt, nagu ChatGPT soovitas)?
+## 15. RSI-O1: RSI(14)<30 oversold reversal — Signal Lab
 
-## 15. Avatud küsimused järgmiseks etapiks
+Järgmine samm, ChatGPT täpsustusega registreeritud enne testimist:
+
+```
+Hüpotees RSI-O1: RSI(14) < 30 seisund ennustab paremat järgneva swing-trade
+outcome'i kui RSI >= 30, mõõdetuna 20-päeva triple-barrier R-multiple ja
+success rate'iga.
+Primary horizon: 20 päeva (mitte 10 — võrreldavuse pärast C1/MF1-ga)
+Secondary horizons: 10 ja 40 päeva
+Analüüs: Bull ja Bear režiimis eraldi
+Primary metrics: Δ success rate, Δ mediaan R-multiple (mitte Spearman IC, kuna
+  signaal on binaarne, mitte pidev)
+Lisamõõdikud: MFE/MAE profiil mõlema grupi jaoks
+Oluline: testitakse SEISUNDIT (RSI<30 vs RSI>=30), mitte olemasolevat
+  rsi_signal skoori (mis on juba olemas Trade Score v2-s, aga testib
+  vastupidist majanduslikku hüpoteesi — kõrgem RSI = tugevus, mitte
+  mean-reversion)
+```
+
+## 16. Avatud küsimused järgmiseks etapiks
 
 1. Kas C1 "Candidate → Core" ülendamiseks tuleks oodata reaalset uut turutsüklit
    (ajaline sõltumatus), või on olemas mõistlik proxy (nt eraldi test spetsiifiliselt
