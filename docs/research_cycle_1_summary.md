@@ -569,7 +569,59 @@ ranking) muudab MF1 staatust või praktilist kasutusviisi Trade Engine'is, ja ka
 tasub seda uut, täpsemat hüpoteesi eraldi testida enne RSI-oversold juurde
 liikumist?
 
-## 14. Avatud küsimused järgmiseks etapiks
+## 14. D1 diagnostika lõpptulemus: "Low Relative Participation" kinnitatud, fat-tail selgitatud
+
+ChatGPT täpsustas §13 järel, et "Liquidity Filter" oli semantiliselt liiga tugev
+väide (RVOL mõõdab suhtelist aktiivsust, mitte absoluutset likviidsust) ja nõudis
+kahte piiratud diagnostikat enne mistahes uue hüpoteesi registreerimist: (1) kas D1
+efekt püsib ADV20 likviidsuse tertsiilides, (2) kas D1 üllatavalt kõrge mean R
+(1.617) tuleb fat-tail jaotusest.
+
+### 1. D1 efekt ADV20 (likviidsuse) tertsiilides
+
+| Tertsiil | D1 success | non-D1 success | Gap |
+|---|---|---|---|
+| Low_ADV | 0.300 (n=1615) | 0.331 (n=6888) | −0.031 |
+| Medium_ADV | 0.262 (n=698) | 0.345 (n=7804) | −0.083 |
+| High_ADV | 0.290 (n=238) | 0.340 (n=8265) | −0.050 |
+
+**Gap on negatiivne kõigis kolmes tertsiilis, sh High_ADV** (kõige likviidsemad
+suure-kapitalisatsiooniga aktsiad). **Kinnitatud: see ei ole absoluutse
+ebalikviidsuse artefakt** — efekt on genuiinne "madala suhtelise osalemise" nähtus,
+mitte lihtsalt "D1 = väikesed ebalikviidsed aktsiad".
+
+### 2. D1 R-multiple jaotus (fat-tail kontroll)
+
+| | Mean | Median | Trimmed(10%) | Winsorized(5%) | p95 |
+|---|---|---|---|---|---|
+| D1 | **1.652** | 0.911 | 1.125 | 1.271 | 4.083 |
+| D2-D10 | 1.396 | 1.102 | 1.240 | 1.295 | 3.160 |
+
+D1 mean-median lõhe (0.74) on palju suurem kui D2-D10 oma (0.294) — D1 p95 (4.08)
+on selgelt paksem kui D2-D10 oma (3.16). **Pärast trimmimist/winsoriseerimist on D1
+tegelikult marginaalselt HALVEM, mitte parem, kui D2-D10** (trimmed: 1.125 vs 1.240;
+winsorized: 1.271 vs 1.295). **Kinnitatud: D1 kõrge toormean R tuleb haruldastest
+suurtest võitjatest (fat right tail), mitte üldiselt paremast jaotusest.**
+
+### Lõplik järeldus
+
+**"Low Relative Participation" (D1) on genuiinne, laialt kehtiv riskiseisund** — madal
+võiduprotsent, mis püsib kõigil likviidsuse tasemetel, ja mis pole peidetud
+võimaluste tsoon isegi arvestades selle kõrget toormean R-i (mis on statistiline
+artefakt, mitte reaalne edge). Riskiga kohandatuna (trimmed/winsorized) on D1 pigem
+kergelt kehvem kui tavaline tsoon, lihtsalt suurema variatiivsusega.
+
+**MF1 staatus jääb muutumatuks** (Validated Bull-regime Informational Feature).
+"Low Relative Participation" on nüüd hästi diagnoositud, aga formaalselt eraldi
+**Candidate**-hüpotees Hypothesis Backlog'is, mitte veel Locked Test'iga kinnitatud
+oma õigel puutumata andmestikul.
+
+**Avatud küsimus:** kas see tulemus on piisav, et registreerida "Low Relative
+Participation" hüpotees kindlamalt (nt kui Bull-mooduli täiendav kontekst-tunnus,
+mitte iseseisev filter), või tuleks enne veel midagi kontrollida, ja kas nüüd on
+õige hetk liikuda RSI<30 testi juurde (paralleelselt, nagu ChatGPT soovitas)?
+
+## 15. Avatud küsimused järgmiseks etapiks
 
 1. Kas C1 "Candidate → Core" ülendamiseks tuleks oodata reaalset uut turutsüklit
    (ajaline sõltumatus), või on olemas mõistlik proxy (nt eraldi test spetsiifiliselt
