@@ -194,8 +194,12 @@ def main() -> None:
     rows: list[dict] = []
     print(f"\ncomputing compression + RVOL state + labels (step={STEP_DAYS} bars)...", flush=True)
     for i, (symbol, frame) in enumerate(frames.items()):
-        comp_df = calculate_compression_state(frame, lookback=COMPRESSION_LOOKBACK)
-        mf_df = calculate_money_flow_features(frame, rvol_window=RVOL_WINDOW)
+        try:
+            comp_df = calculate_compression_state(frame, lookback=COMPRESSION_LOOKBACK)
+            mf_df = calculate_money_flow_features(frame, rvol_window=RVOL_WINDOW)
+        except ValueError as exc:
+            print(f"  skipping {symbol}: {exc}", flush=True)
+            continue
 
         max_t = len(frame) - max(LABELING_CONFIG.horizons) - 1
         for t_pos in range(TEST_START_POS, max_t, STEP_DAYS):
