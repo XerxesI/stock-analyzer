@@ -704,7 +704,52 @@ tagasilükkamiseks ilma rolling window kontrollita, ja mis peaks olema järgmine
 samm — kas Volatility Compression/Expansion nähtuse juurde liikumine (ChatGPT
 varem mainitud), või midagi muud?
 
-## 17. Avatud küsimused järgmiseks etapiks
+## 17. VC1 tulemus: compression ennustab amplituudi, mitte suunda — nagu klassikaline teooria ütleb
+
+Testisime VC1 hüpoteesi (bottom 20% compression_pct vs ülejäänud) dev-valimil,
+primary horizon=20d, secondary=10d, Bull/Bear eraldi, mõõtes nii suunda
+(success rate delta, median R delta) kui amplituudi (MFE, MAE).
+
+### Tulemus
+
+| Horisont | Režiim | Success delta | Median R delta | MFE (compressed vs mitte) |
+|---|---|---|---|---|
+| 10d | Bull | −0.007 | −0.069 | 0.119 vs 0.069 |
+| 10d | Bear | −0.032 | −0.031 | 0.112 vs 0.083 |
+| **20d (PRIMARY)** | **Bull** | −0.007 | −0.060 | **0.164 vs 0.075** |
+| **20d (PRIMARY)** | **Bear** | −0.039 | −0.088 | 0.127 vs 0.095 |
+
+Kõik neli kombinatsiooni näitavad madalamat success rate'i ja median R-i
+kompressiooni-seisundis, samal ajal kui MFE on 20d Bull'is ligi **2x kõrgem**
+(0.164 vs 0.075).
+
+### Miks see EI OLE sama järeldus, mis RSI-O1 puhul
+
+RSI-O1 oli pre-registreeritud **otsese suuna-hüpoteesina** ("RSI<30 ennustab
+tõusu") ja ebaõnnestus selgelt — suund oli vale suunas. **VC1 oli teadlikult
+disainitud testima mõlemat (suund JA amplituud) eraldi, ilma eeldamata, et
+suund üksi peaks töötama.** Klassikaline "Bollinger Squeeze" teooria ennustab
+otseselt, et kompressioon ennustab **suurt liikumist**, mitte **liikumise
+suunda** — suuna peab määrama alles aktiveerimis-trigger (breakout, mahu
+kinnitus). Selle vaatenurga alt käitub VC1 tulemus **täpselt nii, nagu teooria
+ennustaks**: amplituud (MFE) kahekordistus, suund üksi ei paranenud (mida
+polnudki oodata ilma triggerita).
+
+**See õigustab liikumist VC2 (compression + aktiveerimis-trigger) juurde, mitte
+kogu nähtuse tagasilükkamist**, erinevalt RSI-O1-st.
+
+### Kolmas kinnitus "Extreme State Instability" mustrile
+
+See on nüüd kolmas kord (D1 madal RVOL, RSI oversold, nüüd compression), kus
+äärmuslik/haruldane seisund → suurem amplituud, aga halvem tüüpiline (mediaan)
+tulemus. Mõõdukalt tugevdab varasemat Observation-tasemel märkust §16-st,
+kuigi see pole ise veel eraldi testitav hüpotees.
+
+**Avatud küsimus:** kas ChatGPT nõustub, et see tulemus õigustab VC2
+(compression + price breakout või compression + RVOL activation) testimist,
+ja kui jah, milline aktiveerimis-trigger tuleks esimesena pre-registreerida?
+
+## 18. Avatud küsimused järgmiseks etapiks
 
 1. Kas C1 "Candidate → Core" ülendamiseks tuleks oodata reaalset uut turutsüklit
    (ajaline sõltumatus), või on olemas mõistlik proxy (nt eraldi test spetsiifiliselt
