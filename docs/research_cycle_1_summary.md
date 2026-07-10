@@ -738,18 +738,67 @@ polnudki oodata ilma triggerita).
 **See õigustab liikumist VC2 (compression + aktiveerimis-trigger) juurde, mitte
 kogu nähtuse tagasilükkamist**, erinevalt RSI-O1-st.
 
+### Täpsustus: |MAE| kontroll (ChatGPT nõutud, olemasolevatest andmetest)
+
+ChatGPT tähelepanek: MFE üksi mõõdab ainult ülespoole potentsiaali, mitte
+sümmeetrilist amplituudi. Juba testitud andmetest (§17 esialgne tabel) saab
+|MAE| kõrvutada:
+
+| Horisont/Režiim | MFE (compr vs mitte) | \|MAE\| (compr vs mitte) |
+|---|---|---|
+| 10d Bull | 0.119 vs 0.069 (+72%) | 0.055 vs 0.054 (+4%) |
+| 10d Bear | 0.112 vs 0.083 (+35%) | 0.070 vs 0.059 (+20%) |
+| 20d Bull | 0.164 vs 0.075 (+113%) | 0.061 vs 0.057 (+6%) |
+| 20d Bear | 0.127 vs 0.095 (+34%) | 0.079 vs 0.065 (+22%) |
+
+**|MAE| tõuseb kõigil neljal juhul** — kinnitab, et tegu on tõesti
+amplituudi-nähtusega, mitte ainult MFE-spetsiifilise artefaktiga. **Aga
+asümmeetria on soodne projekti eesmärgi jaoks:** 20d Bull'is kasvab MFE 113%,
+|MAE| ainult 6% — kompressioon ennustab ebaproportsionaalselt rohkem ülespoole
+potentsiaali, tagasihoidliku downside kasvuga.
+
 ### Kolmas kinnitus "Extreme State Instability" mustrile
 
 See on nüüd kolmas kord (D1 madal RVOL, RSI oversold, nüüd compression), kus
 äärmuslik/haruldane seisund → suurem amplituud, aga halvem tüüpiline (mediaan)
-tulemus. Mõõdukalt tugevdab varasemat Observation-tasemel märkust §16-st,
-kuigi see pole ise veel eraldi testitav hüpotees.
+tulemus. Jääb **Observation** staatusesse — praegune väärtus on metodoloogiline
+õppetund (äärmuslikke seisundeid tuleb testida eraldi amplituudi ja suuna
+suhtes), mitte veel iseseisev testitav hüpotees.
 
-**Avatud küsimus:** kas ChatGPT nõustub, et see tulemus õigustab VC2
-(compression + price breakout või compression + RVOL activation) testimist,
-ja kui jah, milline aktiveerimis-trigger tuleks esimesena pre-registreerida?
+## 18. VC2-PB: Compression + Bullish Breakout — pre-registered hüpotees
 
-## 18. Avatud küsimused järgmiseks etapiks
+ChatGPT valis **price breakout**, mitte RVOL, esimeseks aktiveerimis-triggeriks
+(puhtam katse — RVOL on juba valideeritud Bull-informational feature, mistõttu
+compression+RVOL test ei eristaks selgelt, kust edge tuleb).
+
+```
+Hüpotees VC2-PB: pärast volatility compression seisundit toimuv bullish
+breakout (Close > eelneva 20-päeva High) identifitseerib setup'id, millel on
+parem 20-päeva triple-barrier outcome kui compression-seisundil ilma
+breakout'ita.
+
+Breakout definitsioon (külmutatud, ei testita alternatiive): Close > prior
+20-day High (tänane päev rolling high arvutusest välja jäetud)
+
+Primary horizon: 20 päeva
+Secondary horizon: 10 päeva
+Primary metrics: success-rate delta, median R delta
+Secondary: MFE, |MAE|, deduplitseeritud setup arv, coverage
+
+Testistruktuur: 2×2 seisundi võrdlus
+                    No breakout    Bullish breakout
+No compression           A               B
+Compression               C               D
+
+Põhiküsimused:
+  D − C > 0? (breakout aitab compression-seisundis)
+  D − B > 0? (compression parandab breakout'i kvaliteeti)
+```
+
+See eristab tõelist interaktsiooni geneerilisest breakout-efektist — mitte
+ainult "kas compression+breakout on parem kui kogu populatsioon".
+
+## 19. Avatud küsimused järgmiseks etapiks
 
 1. Kas C1 "Candidate → Core" ülendamiseks tuleks oodata reaalset uut turutsüklit
    (ajaline sõltumatus), või on olemas mõistlik proxy (nt eraldi test spetsiifiliselt
