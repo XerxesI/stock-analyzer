@@ -948,7 +948,72 @@ success-rate paranemine + median R, mis on suuresti ühe ajaakna vedatud.
 tulemusi), või tuleks VC3 sellegipoolest ettevaatlikult Locked Test'ile saata,
 arvestades, et formaalne primary kriteerium agregaadi tasemel täideti?
 
-## 22. Avatud küsimused järgmiseks etapiks
+## 22. VC3-RVOL Locked Test + praktiline profiil: REPLICATED
+
+### Locked Test tulemus (seed=123, sama valim mis M1/S1/C1/MF1, esimene kasutus VC3 jaoks)
+
+```
+D-C success delta: +0.005 (positive)
+D-C median R delta: +0.077 (positive)
+VERDICT: REPLICATED
+```
+
+**Tulemus vastab peaaegu täpselt ChatGPT eelnevalt registreeritud (enne testi
+kirja pandud) ootusele:**
+
+| | Dev (algne) | Locked Test | Pre-test ootus |
+|---|---|---|---|
+| Success delta (D−C) | +0.022 | +0.005 | "nõrgalt replitseerub" ✓ |
+| Median R delta (D−C) | +0.154 | +0.077 | "ei replitseeru täies suuruses, väiksem positiivne pole ebaõnnestumine" ✓ |
+
+See on metodoloogiliselt eriti veenev — ennustati tulemuse **kuju** enne testimist,
+mitte ainult suunda, ja see kattus.
+
+D-raku sekundaarne profiil (Locked Test): MFE=0.090, |MAE|=0.050 (~1.8x suhe,
+säilitab soodsa asümmeetria, kuigi absoluutväärtused väiksemad kui dev-valimis —
+kooskõlas ootusega, et efekt oli osaliselt ajaliselt kontsentreeritud).
+
+### Praktiline profiil
+
+**Monotoonsus D-raku sees (lame, mitte tõusev):**
+
+| Lõige | Success rate | Median R |
+|---|---|---|
+| All D | 0.333 | 1.133 |
+| Top 50% RVOL | 0.311 | 1.085 |
+| Top 30% RVOL | 0.317 | 1.109 |
+| Top 20% RVOL | 0.325 | 1.085 |
+
+Kõrgem RVOL D-raku sees ei paranda tulemust edasi — kordab MF1 detsiili-analüüsi
+mustrit (kõrgeim RVOL pole monotoonselt parim). Efekt tuleb läve ületamisest
+(RVOL>1), mitte "mida rohkem, seda parem" loogikast — täpselt nagu binaarse,
+mitte ekstreemse läve valik ette nägi.
+
+**Tickerite kontsentratsioon:** 277/287 tickerit panustasid, mediaan 3 setup't
+tickeri kohta, max 10, **top-10 osakaal 8.3%** — laialt jaotunud, sama muster
+mis C1 ja MF1 puhul.
+
+**Coverage:** **482 deduplitseeritud setup't aastas** kogu universumi peale —
+tunduvalt sagedasem kui C1 (~107/aastas Bear-spetsiifiliselt).
+
+### Kolm valideeritud ehituskivi
+
+| Komponent | Režiim | Iseloom |
+|---|---|---|
+| C1 (Support + Bear-Momentum) | Bear | Harvem, tugevam edge (~320 setup't/3a) |
+| MF1 (RVOL) | Bull | Laiaulatuslik konteksttunnus, tagasihoidlik lift |
+| **VC3-RVOL** (Compression + RVOL activation) | Bull | Sagedasem signaal (~482 setup't/a), mõõdukas edge |
+
+See on täpselt režiimipõhine struktuur, mida ChatGPT terve tsükli jooksul ette
+nägi: Bear → C1; Bull → MF1 kontekst + VC3 aktiveerimine.
+
+**Avatud küsimus:** kas ChatGPT hinnangul on see piisav, et lugeda VC-uurimisrada
+edukalt lõpetatuks (VC3 = Validated Combination Candidate, sarnaselt C1-ga), ja
+milline peaks olema järgmine samm — kas registreeritud RSI-oversold+RVOL
+kombinatsiooni test (mis jäi varem ootele), Bull-mooduli kokkupanemine
+olemasolevatest valideeritud tükkidest, või hoopis midagi muud?
+
+## 23. Avatud küsimused järgmiseks etapiks
 
 1. Kas C1 "Candidate → Core" ülendamiseks tuleks oodata reaalset uut turutsüklit
    (ajaline sõltumatus), või on olemas mõistlik proxy (nt eraldi test spetsiifiliselt
