@@ -97,8 +97,6 @@ def label_at(
         if hit_stop and fixed_stop_day is None:
             fixed_stop_hit = True
             fixed_stop_day = offset
-        if days_to_target is not None or fixed_stop_day is not None:
-            break
 
     if target_20pct_20d:
         target_before_fixed_stop = fixed_stop_day is None or (
@@ -159,4 +157,3 @@ def label_frame(
         labels["date"] = pd.to_datetime(labels["date"])
         labels["entry_date"] = pd.to_datetime(labels["entry_date"])
     return LabelFrameResult(labels=labels, quality_counts=counts)
-

@@ -43,6 +43,28 @@ def test_missing_next_day_open_is_not_replaced_with_close():
     assert counts["missing_entry_open_count"] == 1
 
 
+def test_fixed_stop_before_target_does_not_change_primary_target_label():
+    df = _frame(
+        [
+            {"Open": 100, "High": 101, "Low": 99, "Close": 100, "Volume": 1000},
+            {"Open": 100, "High": 101, "Low": 90, "Close": 95, "Volume": 1000},
+            {"Open": 95, "High": 125, "Low": 94, "Close": 120, "Volume": 1000},
+            {"Open": 120, "High": 126, "Low": 119, "Close": 124, "Volume": 1000},
+        ]
+    )
+
+    result, _ = label_at(
+        df,
+        0,
+        LabelConfig(horizon_days=3, target_return=0.20, fixed_stop=-0.08),
+    )
+
+    assert result is not None
+    assert result["fixed_stop_hit"] is True
+    assert result["target_20pct_20d"] is True
+    assert result["target_before_fixed_stop"] is False
+
+
 def test_overlapping_positive_windows_form_one_economic_event():
     df = _frame(
         [
@@ -60,4 +82,3 @@ def test_overlapping_positive_windows_form_one_economic_event():
     assert int(labels["target_20pct_20d"].sum()) == 2
     assert len(events) == 1
     assert int(events.iloc[0]["raw_observation_count"]) == 2
-
