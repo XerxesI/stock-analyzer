@@ -52,6 +52,7 @@ Thumbs.db
 *.log
 
 # Runtime artifacts
+artifacts/swing_20/
 artifacts/logs/*.log
 artifacts/reports/runtime_metrics.json
 artifacts/reports/rank_ic_obs.csv

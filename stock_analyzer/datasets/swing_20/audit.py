@@ -23,16 +23,27 @@ def run_audit(
 ) -> AuditResult:
     """Run the SWING_20 audit over preloaded OHLCV data."""
 
+    frames = build_audit_frames(price_data, metadata=metadata, config=config)
+    return run_audit_from_frames(
+        labels=frames["labels"],
+        eligibility=frames["eligibility"],
+        quality_counts=frames["quality_counts"],
+        config=config,
+    )
+
+
+def build_audit_frames(
+    price_data: dict[str, pd.DataFrame],
+    metadata: dict[str, SymbolMetadata] | None = None,
+    config: Swing20Config = Swing20Config(),
+) -> dict[str, object]:
+    """Build reusable eligibility and label frames from in-memory OHLCV data."""
+
     metadata = metadata or {}
     all_eligibility: list[pd.DataFrame] = []
     all_labels: list[pd.DataFrame] = []
     label_quality_counts: list[dict[str, int]] = []
     price_quality_counts: list[dict[str, int]] = []
-    warnings = [
-        "UNIVERSE_MEMBERSHIP_NOT_POINT_IN_TIME",
-        "SECTOR_NOT_POINT_IN_TIME",
-        "MARKET_CAP_NOT_POINT_IN_TIME",
-    ]
 
     for symbol, df in price_data.items():
         meta = metadata.get(symbol.upper(), SymbolMetadata(symbol=symbol.upper()))
@@ -53,10 +64,33 @@ def run_audit(
         pd.concat(all_eligibility, ignore_index=True) if all_eligibility else pd.DataFrame()
     )
     labels_all = pd.concat(all_labels, ignore_index=True) if all_labels else pd.DataFrame()
+    quality_counts = merge_counts(price_quality_counts + label_quality_counts)
+    return {
+        "eligibility": eligibility_frame_all,
+        "labels": labels_all,
+        "quality_counts": quality_counts,
+    }
+
+
+def run_audit_from_frames(
+    labels: pd.DataFrame,
+    eligibility: pd.DataFrame | None = None,
+    quality_counts: dict[str, int] | None = None,
+    config: Swing20Config = Swing20Config(),
+) -> AuditResult:
+    """Run the SWING_20 audit from frozen intermediate frames."""
+
+    warnings = [
+        "UNIVERSE_MEMBERSHIP_NOT_POINT_IN_TIME",
+        "SECTOR_NOT_POINT_IN_TIME",
+        "MARKET_CAP_NOT_POINT_IN_TIME",
+    ]
+
+    labels_all = labels.copy()
     labels_with_splits = assign_temporal_splits(labels_all, config.splits) if not labels_all.empty else labels_all
     events = deduplicate_positive_events(labels_with_splits, config.label.horizon_days)
 
-    quality_counts = merge_counts(price_quality_counts + label_quality_counts)
+    quality_counts = quality_counts or {}
     splits = split_summary(labels_with_splits)
     events_info = event_summary(labels_with_splits, events)
     decision = decide_trainability(labels_with_splits, splits, quality_counts, warnings=warnings)
@@ -79,7 +113,7 @@ def run_audit(
         spec_version=config.spec_version,
         generated_at=datetime.now(UTC).replace(microsecond=0).isoformat(),
         date_range=date_range,
-        universe=universe_summary(eligibility_frame_all),
+        universe=universe_summary(eligibility if eligibility is not None else pd.DataFrame()),
         labels=label_summary,
         splits=splits,
         baseline=baseline_summary(labels_with_splits),
@@ -113,4 +147,3 @@ def _label_summary(labels: pd.DataFrame) -> dict[str, object]:
             float(labels["close_return_20d"].median()) if "close_return_20d" in labels else None
         ),
     }
-
