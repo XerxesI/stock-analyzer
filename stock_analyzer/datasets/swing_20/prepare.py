@@ -25,6 +25,7 @@ from stock_analyzer.datasets.swing_20.universe import SymbolMetadata
 
 def prepare_frozen_dataset(
     symbols: list[str] | None = None,
+    universe_source: str = "full_us",
     period: str = "5y",
     output_dir: Path | str = Path("artifacts/swing_20"),
     storage_format: StorageFormat = "parquet",
@@ -33,13 +34,14 @@ def prepare_frozen_dataset(
 ) -> dict[str, object]:
     """Build frozen universe, price, label, and manifest artifacts."""
 
-    universe = _resolve_universe(symbols=symbols, max_symbols=max_symbols)
+    universe = _resolve_universe(symbols=symbols, universe_source=universe_source, max_symbols=max_symbols)
     metadata = _metadata_from_universe(universe)
     price_data = _fetch_price_data(universe["symbol"].tolist(), period=period)
     return write_frozen_dataset(
         price_data=price_data,
         universe=universe,
         metadata=metadata,
+        universe_source="symbols" if symbols else universe_source,
         period=period,
         output_dir=output_dir,
         storage_format=storage_format,
@@ -51,6 +53,7 @@ def write_frozen_dataset(
     price_data: dict[str, pd.DataFrame],
     universe: pd.DataFrame,
     metadata: dict[str, SymbolMetadata] | None = None,
+    universe_source: str = "custom",
     period: str = "5y",
     output_dir: Path | str = Path("artifacts/swing_20"),
     storage_format: StorageFormat = "parquet",
@@ -85,6 +88,7 @@ def write_frozen_dataset(
         "dataset_version": generated_at.strftime("swing20_%Y%m%dT%H%M%SZ"),
         "created_at": generated_at.isoformat(),
         "period": period,
+        "universe_source": universe_source,
         "storage_format": storage_format,
         "symbol_count_requested": int(len(universe)),
         "symbol_count_with_prices": int(len(price_data)),
@@ -141,7 +145,11 @@ def load_frozen_dataset(dataset_dir: Path | str) -> dict[str, object]:
     }
 
 
-def _resolve_universe(symbols: list[str] | None, max_symbols: int | None) -> pd.DataFrame:
+def _resolve_universe(
+    symbols: list[str] | None,
+    universe_source: str,
+    max_symbols: int | None,
+) -> pd.DataFrame:
     if symbols:
         rows = [
             {
@@ -154,9 +162,11 @@ def _resolve_universe(symbols: list[str] | None, max_symbols: int | None) -> pd.
             if symbol.strip()
         ]
         universe = pd.DataFrame(rows).drop_duplicates(subset="symbol")
-    else:
+    elif universe_source == "full_us":
         universe = build_full_universe().copy()
         universe["instrument_type"] = "COMMON_STOCK"
+    else:
+        raise ValueError(f"Unsupported universe source: {universe_source}")
 
     if max_symbols is not None:
         universe = universe.head(max_symbols).copy()

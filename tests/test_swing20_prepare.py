@@ -38,6 +38,7 @@ def test_write_and_load_frozen_dataset_round_trip(tmp_path):
     manifest = write_frozen_dataset(
         price_data={"AAA": _price_frame()},
         universe=universe,
+        universe_source="test_universe",
         period="synthetic",
         output_dir=tmp_path,
         storage_format="csv",
@@ -46,6 +47,7 @@ def test_write_and_load_frozen_dataset_round_trip(tmp_path):
     loaded = load_frozen_dataset(tmp_path)
 
     assert manifest["storage_format"] == "csv"
+    assert manifest["universe_source"] == "test_universe"
     assert manifest["symbol_count_requested"] == 1
     assert manifest["symbol_count_with_prices"] == 1
     assert not loaded["labels"].empty

@@ -2,7 +2,7 @@
 
 Examples:
     python scripts/prepare_swing_20_dataset.py --symbols AAPL MSFT NVDA --format csv
-    python scripts/prepare_swing_20_dataset.py --max-symbols 250 --period 5y
+    python scripts/prepare_swing_20_dataset.py --universe full_us --max-symbols 250 --period 5y
 """
 
 from __future__ import annotations
@@ -23,7 +23,13 @@ from stock_analyzer.datasets.swing_20.prepare import prepare_frozen_dataset
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Prepare frozen SWING_20 dataset artifacts.")
-    parser.add_argument("--symbols", nargs="+", help="Optional ticker symbols. Defaults to the full US universe.")
+    parser.add_argument(
+        "--universe",
+        choices=["full_us"],
+        default="full_us",
+        help="Universe source to freeze when --symbols is not supplied.",
+    )
+    parser.add_argument("--symbols", nargs="+", help="Optional ticker symbols for a custom diagnostic universe.")
     parser.add_argument("--period", default="5y", help="Yahoo Finance period, e.g. 5y.")
     parser.add_argument("--output-dir", default="artifacts/swing_20", help="Dataset artifact directory.")
     parser.add_argument(
@@ -40,6 +46,7 @@ def main() -> None:
     args = parse_args()
     manifest = prepare_frozen_dataset(
         symbols=args.symbols,
+        universe_source=args.universe,
         period=args.period,
         output_dir=Path(args.output_dir),
         storage_format=args.format,
@@ -51,6 +58,7 @@ def main() -> None:
         {
             "manifest": manifest.get("manifest"),
             "storage_format": manifest.get("storage_format"),
+            "universe_source": manifest.get("universe_source"),
             "symbol_count_requested": manifest.get("symbol_count_requested"),
             "symbol_count_with_prices": manifest.get("symbol_count_with_prices"),
             "symbols_without_prices": len(manifest.get("symbols_without_prices", [])),
