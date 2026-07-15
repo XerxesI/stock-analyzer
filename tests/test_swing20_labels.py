@@ -77,7 +77,7 @@ def test_overlapping_positive_windows_form_one_economic_event():
     )
     labels = label_frame("TEST", df, LabelConfig(horizon_days=3, target_return=0.20)).labels
 
-    events = deduplicate_positive_events(labels, horizon_days=3)
+    events = deduplicate_positive_events(labels)
 
     assert int(labels["target_20pct_20d"].sum()) == 2
     assert len(events) == 1

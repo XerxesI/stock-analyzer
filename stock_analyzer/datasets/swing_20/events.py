@@ -5,13 +5,19 @@ from __future__ import annotations
 import pandas as pd
 
 
-def deduplicate_positive_events(labels: pd.DataFrame, horizon_days: int = 20) -> pd.DataFrame:
+def deduplicate_positive_events(labels: pd.DataFrame) -> pd.DataFrame:
     """Group overlapping positive labels into economic events.
 
     For the same ticker, positive observations whose signal-date windows overlap are
     treated as one event. This keeps daily point-in-time observations available for model
     training while preventing practical metrics from treating one price move as many
     independent opportunities.
+
+    Overlap is determined using each label's own ``window_end_date`` (the date of the
+    actual last trading bar in its outcome window), not a ``signal_date + BDay(horizon)``
+    approximation. Business-day arithmetic only skips weekends, so it silently
+    under/overshoots the true window end whenever a market holiday or a missing ticker
+    bar falls inside the horizon.
     """
 
     if labels.empty:
@@ -26,7 +32,7 @@ def deduplicate_positive_events(labels: pd.DataFrame, horizon_days: int = 20) ->
                 "first_days_to_target",
             ]
         )
-    required = {"symbol", "date", "entry_date", "target_20pct_20d"}
+    required = {"symbol", "date", "entry_date", "window_end_date", "target_20pct_20d"}
     missing = required - set(labels.columns)
     if missing:
         raise ValueError(f"Labels frame is missing required columns: {sorted(missing)}")
@@ -47,6 +53,7 @@ def deduplicate_positive_events(labels: pd.DataFrame, horizon_days: int = 20) ->
 
     positives["date"] = pd.to_datetime(positives["date"])
     positives["entry_date"] = pd.to_datetime(positives["entry_date"])
+    positives["window_end_date"] = pd.to_datetime(positives["window_end_date"])
     positives = positives.sort_values(["symbol", "date"])
 
     events: list[dict[str, object]] = []
@@ -58,7 +65,7 @@ def deduplicate_positive_events(labels: pd.DataFrame, horizon_days: int = 20) ->
 
         for _, row in group.iterrows():
             date = pd.Timestamp(row["date"])
-            window_end = date + pd.offsets.BDay(horizon_days)
+            window_end = pd.Timestamp(row["window_end_date"])
             if not current_rows:
                 current_rows = [row]
                 current_end = window_end

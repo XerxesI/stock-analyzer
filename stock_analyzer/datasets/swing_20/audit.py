@@ -49,7 +49,13 @@ def build_audit_frames(
         meta = metadata.get(symbol.upper(), SymbolMetadata(symbol=symbol.upper()))
         eligibility = eligibility_frame(symbol, df, config.universe, meta)
         all_eligibility.append(eligibility)
-        price_quality_counts.append(ohlcv_quality_counts(df))
+        price_quality_counts.append(
+            ohlcv_quality_counts(
+                df,
+                ohlc_absolute_tolerance=config.quality.ohlc_absolute_tolerance,
+                ohlc_relative_tolerance=config.quality.ohlc_relative_tolerance,
+            )
+        )
 
         labels_result = label_frame(symbol, df, config.label)
         label_quality_counts.append(labels_result.quality_counts)
@@ -88,7 +94,7 @@ def run_audit_from_frames(
 
     labels_all = labels.copy()
     labels_with_splits = assign_temporal_splits(labels_all, config.splits) if not labels_all.empty else labels_all
-    events = deduplicate_positive_events(labels_with_splits, config.label.horizon_days)
+    events = deduplicate_positive_events(labels_with_splits)
 
     quality_counts = quality_counts or {}
     splits = split_summary(labels_with_splits)

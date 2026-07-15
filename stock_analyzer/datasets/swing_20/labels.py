@@ -113,6 +113,7 @@ def label_at(
     result = {
         "date": df.index[t_pos],
         "entry_date": df.index[entry_pos],
+        "window_end_date": df.index[horizon_end_exclusive - 1],
         "entry_price": entry_price,
         "target_price": target_price,
         "target_20pct_20d": bool(target_20pct_20d),
@@ -156,4 +157,5 @@ def label_frame(
     if not labels.empty:
         labels["date"] = pd.to_datetime(labels["date"])
         labels["entry_date"] = pd.to_datetime(labels["entry_date"])
+        labels["window_end_date"] = pd.to_datetime(labels["window_end_date"])
     return LabelFrameResult(labels=labels, quality_counts=counts)

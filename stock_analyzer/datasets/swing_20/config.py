@@ -25,6 +25,21 @@ class LabelConfig:
 
 
 @dataclass(frozen=True)
+class QualityConfig:
+    """Tolerances for OHLCV data-quality checks.
+
+    Adjusted Yahoo Finance prices carry float-rounding noise on the order of
+    1e-12 to 1e-15 in dollar terms; a raw ``close > high`` comparison flags
+    that noise as an OHLC inconsistency alongside genuinely bad bars. A
+    deviation is only treated as material once it exceeds
+    ``max(ohlc_absolute_tolerance, reference_price * ohlc_relative_tolerance)``.
+    """
+
+    ohlc_absolute_tolerance: float = 1e-6
+    ohlc_relative_tolerance: float = 1e-8
+
+
+@dataclass(frozen=True)
 class SplitConfig:
     """Temporal split fractions."""
 
@@ -49,4 +64,5 @@ class Swing20Config:
     universe: UniverseConfig = UniverseConfig()
     label: LabelConfig = LabelConfig()
     splits: SplitConfig = SplitConfig()
+    quality: QualityConfig = QualityConfig()
 

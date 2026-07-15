@@ -4,14 +4,35 @@ from __future__ import annotations
 
 import pandas as pd
 
+from stock_analyzer.datasets.swing_20.config import QualityConfig
 from stock_analyzer.datasets.swing_20.schema import AuditDecision
 
+# maximum_* fields are peak values, not additive counters: merge_counts() must
+# take their max across frames rather than summing them.
+_MAX_AGGREGATE_KEYS = {"maximum_ohlc_deviation", "maximum_ohlc_deviation_bps"}
 
-def ohlcv_quality_counts(df: pd.DataFrame) -> dict[str, int]:
-    """Return basic OHLCV quality counts for one price frame."""
 
-    counts = {
+def ohlcv_quality_counts(
+    df: pd.DataFrame,
+    ohlc_absolute_tolerance: float = QualityConfig().ohlc_absolute_tolerance,
+    ohlc_relative_tolerance: float = QualityConfig().ohlc_relative_tolerance,
+) -> dict[str, int]:
+    """Return basic OHLCV quality counts for one price frame.
+
+    ``ohlc_inconsistency_count`` is every raw ``close/open`` value that falls
+    outside ``[Low, High]``, including sub-cent float-rounding noise from
+    adjusted prices. That raw count is split into
+    ``ohlc_material_inconsistency_count`` (deviation exceeds the configured
+    tolerance) and ``ohlc_rounding_tolerance_count`` (deviation is within
+    tolerance); only the material count should gate trainability.
+    """
+
+    counts: dict[str, int | float] = {
         "ohlc_inconsistency_count": 0,
+        "ohlc_material_inconsistency_count": 0,
+        "ohlc_rounding_tolerance_count": 0,
+        "maximum_ohlc_deviation": 0.0,
+        "maximum_ohlc_deviation_bps": 0.0,
         "stale_price_count": 0,
         "duplicate_bar_count": 0,
         "extreme_gap_count": 0,
@@ -23,11 +44,22 @@ def ohlcv_quality_counts(df: pd.DataFrame) -> dict[str, int]:
     counts["duplicate_bar_count"] = int(ordered.index.duplicated().sum())
     required = {"Open", "High", "Low", "Close"}
     if required.issubset(ordered.columns):
-        invalid_ohlc = (
-            (ordered["High"] < ordered[["Open", "Close", "Low"]].max(axis=1))
-            | (ordered["Low"] > ordered[["Open", "Close", "High"]].min(axis=1))
-        )
-        counts["ohlc_inconsistency_count"] = int(invalid_ohlc.sum())
+        high_deficit = (ordered[["Open", "Close", "Low"]].max(axis=1) - ordered["High"]).clip(lower=0)
+        low_deficit = (ordered["Low"] - ordered[["Open", "Close", "High"]].min(axis=1)).clip(lower=0)
+        deviation = pd.concat([high_deficit, low_deficit], axis=1).max(axis=1)
+        invalid = deviation > 0
+        counts["ohlc_inconsistency_count"] = int(invalid.sum())
+
+        if invalid.any():
+            reference_price = ordered["Close"].abs()
+            tolerance = (reference_price * ohlc_relative_tolerance).clip(lower=ohlc_absolute_tolerance)
+            material = invalid & (deviation > tolerance)
+            counts["ohlc_material_inconsistency_count"] = int(material.sum())
+            counts["ohlc_rounding_tolerance_count"] = int(invalid.sum() - material.sum())
+            counts["maximum_ohlc_deviation"] = float(deviation[invalid].max())
+            deviation_bps = (deviation / reference_price.where(reference_price > 0)) * 10000
+            counts["maximum_ohlc_deviation_bps"] = float(deviation_bps[invalid].max())
+
         stale = (
             (ordered["Open"] == ordered["High"])
             & (ordered["High"] == ordered["Low"])
@@ -40,12 +72,19 @@ def ohlcv_quality_counts(df: pd.DataFrame) -> dict[str, int]:
 
 
 def merge_counts(counts: list[dict[str, int]]) -> dict[str, int]:
-    """Sum homogenous integer counter dictionaries."""
+    """Sum homogenous integer counter dictionaries.
+
+    ``_MAX_AGGREGATE_KEYS`` fields are peak values and are combined with
+    ``max`` instead of being summed across frames.
+    """
 
     merged: dict[str, int] = {}
     for item in counts:
         for key, value in item.items():
-            merged[key] = merged.get(key, 0) + int(value)
+            if key in _MAX_AGGREGATE_KEYS:
+                merged[key] = max(float(merged.get(key, 0.0)), float(value))
+            else:
+                merged[key] = merged.get(key, 0) + int(value)
     return merged
 
 
@@ -65,9 +104,11 @@ def decide_trainability(
         hard_blockers.append("TARGET_TOO_RARE_TO_EVALUATE")
         reasons.append("No label observations were produced.")
 
-    if quality_counts.get("ohlc_inconsistency_count", 0) > 0:
+    if quality_counts.get("ohlc_material_inconsistency_count", 0) > 0:
         hard_blockers.append("UNRESOLVED_SPLIT_ARTIFACTS")
-        reasons.append("OHLC inconsistencies were detected.")
+        reasons.append("Material OHLC inconsistencies were detected.")
+    elif quality_counts.get("ohlc_rounding_tolerance_count", 0) > 0:
+        warning_list.append("OHLC_ROUNDING_TOLERANCE_ARTIFACTS_PRESENT")
 
     if quality_counts.get("missing_entry_open_count", 0) > 0:
         warning_list.append("MISSING_ENTRY_PRICE_ROWS_EXCLUDED")
