@@ -22,9 +22,10 @@ from __future__ import annotations
 import random
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import cast
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -44,6 +45,14 @@ from stock_analyzer.datasets.swing_20.config import Swing20Config
 from stock_analyzer.datasets.swing_20.universe import SymbolMetadata
 
 DEFAULT_SAMPLE_SEED = 42
+
+# A daily bar for the current session can be fetched mid-day, before High/Low
+# have caught up with a live Open/Close snapshot -- yfinance does not mark it
+# as provisional. Every snapshot therefore excludes the current US market
+# calendar date unconditionally, so the frozen data is reproducible regardless
+# of what time of day (or in what local timezone) it was built.
+DATA_CUTOFF_POLICY = "EXCLUDE_CURRENT_NEW_YORK_DATE"
+NY_TIMEZONE = ZoneInfo("America/New_York")
 
 
 def prepare_frozen_dataset(
@@ -96,10 +105,25 @@ def write_frozen_dataset(
     directory already exists (e.g. two runs within the same second), a
     numeric suffix is appended until a fresh, never-before-used directory is
     found. A prior snapshot is therefore never silently overwritten.
+
+    Any bar dated on or after today's US market calendar date (per
+    :data:`DATA_CUTOFF_POLICY`) is dropped from ``price_data`` before labels
+    and eligibility are computed, so the frozen snapshot never depends on a
+    same-day bar that may still be incomplete.
     """
 
     root_dir = Path(output_dir)
     metadata = metadata or _metadata_from_universe(universe)
+    failures = dict(failures or {})
+
+    requested_end_date = _current_ny_calendar_date()
+    price_data, cutoff_removed_rows, cutoff_affected_symbols, cutoff_emptied_symbols = (
+        _apply_current_day_cutoff(price_data, requested_end_date)
+    )
+    for symbol in cutoff_emptied_symbols:
+        failures.setdefault(symbol, "EMPTY_AFTER_CURRENT_DAY_CUTOFF")
+    effective_end_date = _max_price_date(price_data)
+
     frames = build_audit_frames(price_data, metadata=metadata, config=config)
 
     generated_at = datetime.now(timezone.utc).replace(microsecond=0)
@@ -116,7 +140,6 @@ def write_frozen_dataset(
     prices = _price_data_to_frame(price_data)
     labels = frames["labels"]
     eligibility = frames["eligibility"]
-    failures = failures or {}
     failures_frame = _failures_to_frame(failures)
 
     write_frame(universe, universe_path, storage_format)
@@ -155,6 +178,12 @@ def write_frozen_dataset(
         "symbol_count_with_prices": int(len(price_data)),
         "symbol_count_failed": len(failures),
         "symbols_without_prices": symbols_without_prices,
+        "data_cutoff_policy": DATA_CUTOFF_POLICY,
+        "snapshot_market_timezone": "America/New_York",
+        "requested_end_date": str(requested_end_date),
+        "effective_end_date": str(effective_end_date) if effective_end_date is not None else None,
+        "rows_removed_as_incomplete_current_day": cutoff_removed_rows,
+        "symbols_affected_by_current_day_removal": cutoff_affected_symbols,
         "artifacts": {name: str(path) for name, path in artifact_paths.items()},
         "artifact_hashes": artifact_hashes,
         "quality_counts": frames["quality_counts"],
@@ -252,6 +281,65 @@ def _allocate_snapshot_dir(root_dir: Path, base_version: str) -> tuple[Path, str
         except FileExistsError:
             attempt += 1
             candidate_version = f"{base_version}-{attempt}"
+
+
+def _current_ny_calendar_date() -> date:
+    """Return today's calendar date in the US market timezone.
+
+    Always converts via :data:`NY_TIMEZONE` rather than consulting the host
+    machine's local timezone, so the result is the same regardless of where
+    the snapshot job runs.
+    """
+
+    return datetime.now(NY_TIMEZONE).date()
+
+
+def _apply_current_day_cutoff(
+    price_data: dict[str, pd.DataFrame],
+    cutoff_date: date,
+) -> tuple[dict[str, pd.DataFrame], int, list[str], list[str]]:
+    """Drop any bar dated on or after ``cutoff_date`` from every symbol's frame.
+
+    Returns the trimmed price data, the total number of rows removed, the
+    symbols that had at least one row removed, and the subset of those left
+    with no bars at all (e.g. a symbol whose only fetched bar was today's).
+    """
+
+    cutoff_ts = pd.Timestamp(cutoff_date)
+    trimmed: dict[str, pd.DataFrame] = {}
+    removed_rows = 0
+    affected_symbols: list[str] = []
+    emptied_symbols: list[str] = []
+
+    for symbol, df in price_data.items():
+        index_dates = pd.DatetimeIndex(df.index)
+        if index_dates.tz is not None:
+            index_dates = index_dates.tz_localize(None)
+        keep_mask = index_dates < cutoff_ts
+        removed = int((~keep_mask).sum())
+        if removed:
+            removed_rows += removed
+            affected_symbols.append(symbol)
+        filtered = df.loc[keep_mask]
+        if filtered.empty:
+            emptied_symbols.append(symbol)
+            continue
+        trimmed[symbol] = filtered
+
+    return trimmed, removed_rows, sorted(affected_symbols), sorted(emptied_symbols)
+
+
+def _max_price_date(price_data: dict[str, pd.DataFrame]) -> date | None:
+    """Return the latest bar date across every symbol's frame, or ``None`` if empty."""
+
+    max_date: date | None = None
+    for df in price_data.values():
+        if df.empty:
+            continue
+        candidate = pd.Timestamp(df.index.max()).date()
+        if max_date is None or candidate > max_date:
+            max_date = candidate
+    return max_date
 
 
 def _resolve_universe(
