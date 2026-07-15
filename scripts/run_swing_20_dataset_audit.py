@@ -18,7 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from stock_analyzer.data.data_fetcher import get_stock_data
 from stock_analyzer.datasets.swing_20.audit import run_audit, run_audit_from_frames
 from stock_analyzer.datasets.swing_20.config import Swing20Config
-from stock_analyzer.datasets.swing_20.prepare import load_frozen_dataset
+from stock_analyzer.datasets.swing_20.prepare import load_frozen_dataset, verify_frozen_dataset
 from stock_analyzer.evaluation.swing_20_dataset_audit_report import render_markdown
 
 
@@ -27,11 +27,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--symbols", nargs="+", help="Ticker symbols to audit.")
     parser.add_argument(
         "--dataset-dir",
-        help="Optional frozen dataset directory created by scripts/prepare_swing_20_dataset.py.",
+        help="A specific frozen dataset SNAPSHOT directory created by "
+        "scripts/prepare_swing_20_dataset.py, e.g. "
+        "artifacts/swing_20/snapshots/swing20_20260711T210000Z (not the shared "
+        "artifacts/swing_20 root, which may contain multiple snapshots).",
     )
     parser.add_argument("--period", default="5y", help="Yahoo Finance period, e.g. 5y.")
     parser.add_argument("--json-out", default="artifacts/swing_20_dataset_audit.json")
     parser.add_argument("--markdown-out", default="artifacts/swing_20_dataset_audit.md")
+    parser.add_argument(
+        "--skip-verify",
+        action="store_true",
+        help="Skip SHA-256 artifact hash verification for --dataset-dir input.",
+    )
     args = parser.parse_args()
     if not args.dataset_dir and not args.symbols:
         parser.error("Provide either --dataset-dir or --symbols.")
@@ -42,6 +50,15 @@ def main() -> None:
     args = parse_args()
     config = Swing20Config()
     if args.dataset_dir:
+        if not args.skip_verify:
+            verification = verify_frozen_dataset(args.dataset_dir)
+            failed = sorted(name for name, ok in verification.items() if not ok)
+            if failed:
+                raise SystemExit(
+                    "Refusing to audit a dataset snapshot with hash mismatches or missing "
+                    f"artifacts: {', '.join(failed)}. Re-run scripts/prepare_swing_20_dataset.py "
+                    "to produce a fresh snapshot, or pass --skip-verify to override."
+                )
         frozen = load_frozen_dataset(Path(args.dataset_dir))
         result = run_audit_from_frames(
             labels=frozen["labels"],

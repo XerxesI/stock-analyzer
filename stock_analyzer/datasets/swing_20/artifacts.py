@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 from typing import Literal
 
@@ -62,6 +63,16 @@ def artifact_path(output_dir: Path, name: str, storage_format: StorageFormat) ->
     return output_dir / f"{name}{suffix}"
 
 
+def file_sha256(path: Path) -> str:
+    """Return a SHA-256 hash for a frozen artifact."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _format_from_suffix(path: Path) -> StorageFormat:
     suffix = path.suffix.lower()
     if suffix == ".parquet":
@@ -69,4 +80,3 @@ def _format_from_suffix(path: Path) -> StorageFormat:
     if suffix == ".csv":
         return "csv"
     raise ValueError(f"Cannot infer storage format from suffix: {path.suffix}")
-

@@ -1,8 +1,28 @@
-"""Prepare frozen SWING_20 dataset artifacts."""
+"""Prepare frozen, versioned SWING_20 dataset artifacts.
+
+Every call to :func:`prepare_frozen_dataset` / :func:`write_frozen_dataset`
+writes into a brand-new, timestamp-versioned snapshot directory::
+
+    <output_dir>/snapshots/<dataset_version>/
+        manifest.json
+        universe.parquet
+        prices.parquet
+        labels.parquet
+        eligibility.parquet
+        failures.parquet
+
+A snapshot directory is never reused or overwritten by a later run, so a
+past audit input can always be reproduced exactly, and download failures
+are recorded (not silently dropped) so universe coverage gaps are
+auditable rather than invisible.
+"""
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+import random
+import subprocess
+import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import cast
 
@@ -13,6 +33,7 @@ from stock_analyzer.data.universe_filter import build_full_universe
 from stock_analyzer.datasets.swing_20.artifacts import (
     StorageFormat,
     artifact_path,
+    file_sha256,
     read_frame,
     read_manifest,
     write_frame,
@@ -21,6 +42,8 @@ from stock_analyzer.datasets.swing_20.artifacts import (
 from stock_analyzer.datasets.swing_20.audit import build_audit_frames
 from stock_analyzer.datasets.swing_20.config import Swing20Config
 from stock_analyzer.datasets.swing_20.universe import SymbolMetadata
+
+DEFAULT_SAMPLE_SEED = 42
 
 
 def prepare_frozen_dataset(
@@ -31,12 +54,15 @@ def prepare_frozen_dataset(
     storage_format: StorageFormat = "parquet",
     config: Swing20Config = Swing20Config(),
     max_symbols: int | None = None,
+    seed: int = DEFAULT_SAMPLE_SEED,
 ) -> dict[str, object]:
-    """Build frozen universe, price, label, and manifest artifacts."""
+    """Build a new frozen universe, price, label, and manifest snapshot."""
 
-    universe = _resolve_universe(symbols=symbols, universe_source=universe_source, max_symbols=max_symbols)
+    universe = _resolve_universe(
+        symbols=symbols, universe_source=universe_source, max_symbols=max_symbols, seed=seed
+    )
     metadata = _metadata_from_universe(universe)
-    price_data = _fetch_price_data(universe["symbol"].tolist(), period=period)
+    price_data, failures = _fetch_price_data(universe["symbol"].tolist(), period=period)
     return write_frozen_dataset(
         price_data=price_data,
         universe=universe,
@@ -46,6 +72,8 @@ def prepare_frozen_dataset(
         output_dir=output_dir,
         storage_format=storage_format,
         config=config,
+        failures=failures,
+        sample_seed=seed if max_symbols is not None else None,
     )
 
 
@@ -58,52 +86,79 @@ def write_frozen_dataset(
     output_dir: Path | str = Path("artifacts/swing_20"),
     storage_format: StorageFormat = "parquet",
     config: Swing20Config = Swing20Config(),
+    failures: dict[str, str] | None = None,
+    sample_seed: int | None = None,
 ) -> dict[str, object]:
-    """Write frozen SWING_20 artifacts from already loaded price data."""
+    """Write a new, versioned SWING_20 snapshot from already loaded price data.
 
-    output_path = Path(output_dir)
+    Writes to ``<output_dir>/snapshots/<dataset_version>/`` where
+    ``dataset_version`` is derived from the current UTC timestamp. If that
+    directory already exists (e.g. two runs within the same second), a
+    numeric suffix is appended until a fresh, never-before-used directory is
+    found. A prior snapshot is therefore never silently overwritten.
+    """
+
+    root_dir = Path(output_dir)
     metadata = metadata or _metadata_from_universe(universe)
     frames = build_audit_frames(price_data, metadata=metadata, config=config)
 
-    universe_path = artifact_path(output_path, "universe", storage_format)
-    prices_path = artifact_path(output_path, "prices", storage_format)
-    labels_path = artifact_path(output_path, "labels", storage_format)
-    eligibility_path = artifact_path(output_path, "eligibility", storage_format)
-    manifest_path = output_path / "manifest.json"
+    generated_at = datetime.now(timezone.utc).replace(microsecond=0)
+    base_version = generated_at.strftime("swing20_%Y%m%dT%H%M%SZ")
+    snapshot_dir, dataset_version = _allocate_snapshot_dir(root_dir, base_version)
+
+    universe_path = artifact_path(snapshot_dir, "universe", storage_format)
+    prices_path = artifact_path(snapshot_dir, "prices", storage_format)
+    labels_path = artifact_path(snapshot_dir, "labels", storage_format)
+    eligibility_path = artifact_path(snapshot_dir, "eligibility", storage_format)
+    failures_path = artifact_path(snapshot_dir, "failures", storage_format)
+    manifest_path = snapshot_dir / "manifest.json"
 
     prices = _price_data_to_frame(price_data)
     labels = frames["labels"]
     eligibility = frames["eligibility"]
+    failures = failures or {}
+    failures_frame = _failures_to_frame(failures)
 
     write_frame(universe, universe_path, storage_format)
     write_frame(prices, prices_path, storage_format)
     write_frame(labels, labels_path, storage_format)
     write_frame(eligibility, eligibility_path, storage_format)
+    write_frame(failures_frame, failures_path, storage_format)
 
-    generated_at = datetime.now(UTC).replace(microsecond=0)
+    artifact_paths = {
+        "universe": universe_path,
+        "prices": prices_path,
+        "labels": labels_path,
+        "eligibility": eligibility_path,
+        "failures": failures_path,
+    }
+    artifact_hashes = {name: file_sha256(path) for name, path in artifact_paths.items()}
+
     price_symbols = {str(price_symbol).upper() for price_symbol in price_data}
+    requested_symbols = [str(symbol).upper() for symbol in universe["symbol"].tolist()]
+    symbols_without_prices = [
+        symbol
+        for symbol in requested_symbols
+        if symbol not in price_symbols and symbol not in failures
+    ]
+
     manifest = {
         "strategy": config.strategy,
         "spec_version": config.spec_version,
-        "dataset_version": generated_at.strftime("swing20_%Y%m%dT%H%M%SZ"),
+        "dataset_version": dataset_version,
         "created_at": generated_at.isoformat(),
         "period": period,
         "universe_source": universe_source,
+        "sample_seed": sample_seed,
         "storage_format": storage_format,
         "symbol_count_requested": int(len(universe)),
         "symbol_count_with_prices": int(len(price_data)),
-        "symbols_without_prices": [
-            str(symbol)
-            for symbol in universe["symbol"].tolist()
-            if str(symbol).upper() not in price_symbols
-        ],
-        "artifacts": {
-            "universe": str(universe_path),
-            "prices": str(prices_path),
-            "labels": str(labels_path),
-            "eligibility": str(eligibility_path),
-        },
+        "symbol_count_failed": len(failures),
+        "symbols_without_prices": symbols_without_prices,
+        "artifacts": {name: str(path) for name, path in artifact_paths.items()},
+        "artifact_hashes": artifact_hashes,
         "quality_counts": frames["quality_counts"],
+        "provenance": _provenance(),
         "limitations": [
             "Universe snapshot is based on current symbol availability unless a custom symbol list is supplied.",
             "OHLCV data comes from yfinance adjusted daily data.",
@@ -112,11 +167,17 @@ def write_frozen_dataset(
     }
     write_manifest(manifest, manifest_path)
     manifest["manifest"] = str(manifest_path)
+    manifest["snapshot_dir"] = str(snapshot_dir)
     return manifest
 
 
 def load_frozen_dataset(dataset_dir: Path | str) -> dict[str, object]:
-    """Load a frozen SWING_20 dataset written by ``write_frozen_dataset``."""
+    """Load a frozen SWING_20 snapshot written by ``write_frozen_dataset``.
+
+    ``dataset_dir`` must be a specific snapshot directory (as returned in
+    ``manifest["snapshot_dir"]``), not the shared ``artifacts/swing_20``
+    root that contains multiple snapshots.
+    """
 
     dataset_path = Path(dataset_dir)
     manifest_path = dataset_path / "manifest.json"
@@ -133,6 +194,8 @@ def load_frozen_dataset(dataset_dir: Path | str) -> dict[str, object]:
         path = Path(str(raw_path))
         if not path.is_absolute() and not path.exists():
             path = dataset_path / path.name
+        if not path.exists():
+            return pd.DataFrame()
         return read_frame(path, storage_format=storage_format)
 
     return {
@@ -141,14 +204,61 @@ def load_frozen_dataset(dataset_dir: Path | str) -> dict[str, object]:
         "prices": _read_artifact("prices"),
         "labels": _read_artifact("labels"),
         "eligibility": _read_artifact("eligibility"),
+        "failures": _read_artifact("failures"),
         "quality_counts": manifest.get("quality_counts", {}),
     }
+
+
+def verify_frozen_dataset(dataset_dir: Path | str) -> dict[str, bool]:
+    """Recompute artifact hashes and compare them against the manifest.
+
+    Returns a mapping of artifact name to whether its on-disk content still
+    matches the SHA-256 hash recorded in ``manifest.json`` at snapshot time.
+    A missing hash entry (e.g. a snapshot written before this check existed)
+    or a missing file counts as a failed check.
+    """
+
+    dataset_path = Path(dataset_dir)
+    manifest = read_manifest(dataset_path / "manifest.json")
+    recorded_hashes = manifest.get("artifact_hashes", {})
+    artifacts = manifest.get("artifacts", {})
+    if not isinstance(artifacts, dict) or not isinstance(recorded_hashes, dict):
+        return {}
+
+    results: dict[str, bool] = {}
+    for name, raw_path in artifacts.items():
+        path = Path(str(raw_path))
+        if not path.is_absolute() and not path.exists():
+            path = dataset_path / path.name
+        if not path.exists():
+            results[name] = False
+            continue
+        expected = recorded_hashes.get(name)
+        results[name] = expected is not None and file_sha256(path) == expected
+    return results
+
+
+def _allocate_snapshot_dir(root_dir: Path, base_version: str) -> tuple[Path, str]:
+    """Create and return a fresh, never-before-used snapshot directory."""
+
+    snapshots_root = root_dir / "snapshots"
+    candidate_version = base_version
+    attempt = 0
+    while True:
+        candidate_dir = snapshots_root / candidate_version
+        try:
+            candidate_dir.mkdir(parents=True, exist_ok=False)
+            return candidate_dir, candidate_version
+        except FileExistsError:
+            attempt += 1
+            candidate_version = f"{base_version}-{attempt}"
 
 
 def _resolve_universe(
     symbols: list[str] | None,
     universe_source: str,
     max_symbols: int | None,
+    seed: int = DEFAULT_SAMPLE_SEED,
 ) -> pd.DataFrame:
     if symbols:
         rows = [
@@ -168,9 +278,25 @@ def _resolve_universe(
     else:
         raise ValueError(f"Unsupported universe source: {universe_source}")
 
-    if max_symbols is not None:
-        universe = universe.head(max_symbols).copy()
+    universe = universe.reset_index(drop=True)
+    if max_symbols is not None and max_symbols < len(universe):
+        universe = _deterministic_sample(universe, max_symbols, seed)
     return universe.reset_index(drop=True)
+
+
+def _deterministic_sample(universe: pd.DataFrame, n: int, seed: int) -> pd.DataFrame:
+    """Return a reproducible random (not positional) subset of ``universe``.
+
+    Using ``head(n)`` would silently bias the sample toward whatever order
+    the upstream source happens to list symbols in (e.g. alphabetical, which
+    over-weights early letters). A seeded random sample is reproducible
+    across runs with the same ``seed`` while avoiding that ordering bias.
+    """
+
+    symbols = [str(symbol) for symbol in universe["symbol"].tolist()]
+    rng = random.Random(seed)
+    chosen = set(rng.sample(symbols, n))
+    return universe[universe["symbol"].isin(chosen)].copy()
 
 
 def _metadata_from_universe(universe: pd.DataFrame) -> dict[str, SymbolMetadata]:
@@ -186,15 +312,37 @@ def _metadata_from_universe(universe: pd.DataFrame) -> dict[str, SymbolMetadata]
     return metadata
 
 
-def _fetch_price_data(symbols: list[str], period: str) -> dict[str, pd.DataFrame]:
+def _fetch_price_data(
+    symbols: list[str], period: str
+) -> tuple[dict[str, pd.DataFrame], dict[str, str]]:
+    """Fetch OHLCV data per symbol, recording (not discarding) any failure.
+
+    Every symbol that does not end up with usable price data gets an entry
+    in the returned failures mapping describing why, so download coverage
+    gaps are traceable in the frozen snapshot instead of silently vanishing.
+    """
+
     price_data: dict[str, pd.DataFrame] = {}
+    failures: dict[str, str] = {}
     for symbol in symbols:
         try:
-            price_data[symbol] = get_stock_data(symbol, period)
-        except Exception:
-            # Failed symbols remain visible by absence in manifest counts and universe artifact.
+            df = get_stock_data(symbol, period)
+        except Exception as exc:  # noqa: BLE001 - every failure reason must be recorded, never swallowed
+            failures[symbol] = f"{type(exc).__name__}: {exc}"
             continue
-    return price_data
+        if df is None or df.empty:
+            failures[symbol] = "EMPTY_OR_MISSING_DATA"
+            continue
+        price_data[symbol] = df
+    return price_data, failures
+
+
+def _failures_to_frame(failures: dict[str, str]) -> pd.DataFrame:
+    if not failures:
+        return pd.DataFrame(columns=["symbol", "reason"])
+    return pd.DataFrame(
+        [{"symbol": symbol, "reason": reason} for symbol, reason in sorted(failures.items())]
+    )
 
 
 def _price_data_to_frame(price_data: dict[str, pd.DataFrame]) -> pd.DataFrame:
@@ -214,3 +362,39 @@ def _optional_str(value: object) -> str | None:
     if value is None or pd.isna(value):
         return None
     return str(value)
+
+
+def _provenance() -> dict[str, object]:
+    """Best-effort reproducibility metadata: code version and dependency versions."""
+
+    return {
+        "git_commit": _git_commit(),
+        "python_version": sys.version.split()[0],
+        "pandas_version": pd.__version__,
+        "yfinance_version": _yfinance_version(),
+    }
+
+
+def _git_commit() -> str | None:
+    repo_root = Path(__file__).resolve().parents[3]
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except Exception:
+        return None
+    commit = result.stdout.strip()
+    return commit or None
+
+
+def _yfinance_version() -> str | None:
+    try:
+        import yfinance as yf
+    except Exception:
+        return None
+    return getattr(yf, "__version__", None)

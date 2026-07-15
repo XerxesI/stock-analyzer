@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 import pandas as pd
 
@@ -111,7 +111,7 @@ def run_audit_from_frames(
     return AuditResult(
         strategy=config.strategy,
         spec_version=config.spec_version,
-        generated_at=datetime.now(UTC).replace(microsecond=0).isoformat(),
+        generated_at=datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
         date_range=date_range,
         universe=universe_summary(eligibility if eligibility is not None else pd.DataFrame()),
         labels=label_summary,

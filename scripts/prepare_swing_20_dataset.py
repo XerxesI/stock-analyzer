@@ -38,7 +38,18 @@ def parse_args() -> argparse.Namespace:
         default="parquet",
         help="Frozen artifact storage format.",
     )
-    parser.add_argument("--max-symbols", type=int, help="Optional cap for diagnostic runs.")
+    parser.add_argument(
+        "--max-symbols",
+        type=int,
+        help="Optional cap for diagnostic runs. Applied as a deterministic seeded random "
+        "sample of the resolved universe, not a positional head() cut.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Seed for the deterministic --max-symbols sample (default: 42).",
+    )
     return parser.parse_args()
 
 
@@ -52,19 +63,25 @@ def main() -> None:
         storage_format=args.format,
         config=Swing20Config(),
         max_symbols=args.max_symbols,
+        seed=args.seed,
     )
 
     print(json.dumps(
         {
+            "snapshot_dir": manifest.get("snapshot_dir"),
             "manifest": manifest.get("manifest"),
+            "dataset_version": manifest.get("dataset_version"),
             "storage_format": manifest.get("storage_format"),
             "universe_source": manifest.get("universe_source"),
+            "sample_seed": manifest.get("sample_seed"),
             "symbol_count_requested": manifest.get("symbol_count_requested"),
             "symbol_count_with_prices": manifest.get("symbol_count_with_prices"),
+            "symbol_count_failed": manifest.get("symbol_count_failed"),
             "symbols_without_prices": len(manifest.get("symbols_without_prices", [])),
         },
         indent=2,
     ))
+    print(f"\nPass this snapshot to the audit script:\n  --dataset-dir {manifest.get('snapshot_dir')}")
 
 
 if __name__ == "__main__":
