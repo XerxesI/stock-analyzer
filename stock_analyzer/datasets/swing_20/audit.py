@@ -10,14 +10,30 @@ from pathlib import Path
 
 import pandas as pd
 
+from stock_analyzer.datasets.swing_20.artifacts import price_data_to_frame
 from stock_analyzer.datasets.swing_20.baseline import baseline_summary
 from stock_analyzer.datasets.swing_20.config import Swing20Config
 from stock_analyzer.datasets.swing_20.events import deduplicate_positive_events, event_summary
 from stock_analyzer.datasets.swing_20.labels import label_frame
-from stock_analyzer.datasets.swing_20.quality import decide_trainability, merge_counts, ohlcv_quality_counts
+from stock_analyzer.datasets.swing_20.quality import (
+    DATA_QUALITY_EXCLUSION_REASON,
+    decide_trainability,
+    evaluate_symbol_price_quality,
+    merge_counts,
+    ohlcv_quality_counts,
+)
 from stock_analyzer.datasets.swing_20.schema import AuditResult
 from stock_analyzer.datasets.swing_20.splits import assign_temporal_splits, split_summary
 from stock_analyzer.datasets.swing_20.universe import SymbolMetadata, eligibility_frame, universe_summary
+
+_EMPTY_QUARANTINE_SUMMARY: dict[str, object] = {
+    "data_quality_excluded_symbol_count": 0,
+    "data_quality_excluded_symbols": [],
+    "data_quality_exclusion_reason_counts": {},
+    "observations_removed_by_data_quality": 0,
+    "positive_labels_removed_by_data_quality": 0,
+    "events_removed_by_data_quality": 0,
+}
 
 
 def run_audit(
@@ -33,6 +49,7 @@ def run_audit(
         eligibility=frames["eligibility"],
         quality_counts=frames["quality_counts"],
         config=config,
+        prices=price_data_to_frame(price_data),
     )
 
 
@@ -188,25 +205,133 @@ def _load_frames_checkpoint(checkpoint_path: Path) -> dict[str, dict[str, object
         return pickle.load(handle)
 
 
+def apply_data_quality_quarantine(
+    labels: pd.DataFrame,
+    eligibility: pd.DataFrame,
+    prices: pd.DataFrame,
+    quality_counts: dict[str, int],
+    config: Swing20Config = Swing20Config(),
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, int], dict[str, object]]:
+    """Drop symbols whose price history is not economically interpretable.
+
+    A symbol is quarantined -- its rows removed from ``labels`` and
+    ``eligibility`` entirely, not just the offending rows -- when
+    :func:`~stock_analyzer.datasets.swing_20.quality.evaluate_symbol_price_quality`
+    flags any non-positive OHLC value, High below Low, or a material OHLC
+    deviation anywhere in its history. A corrupt adjustment series (e.g. a
+    botched reverse-split back-calculation) taints every return computed from
+    it, not only the specific rows that fail the raw check, so the whole
+    symbol goes, not a per-row patch.
+
+    This never touches the frozen snapshot artifacts on disk: it filters the
+    in-memory frames passed to it and is applied at audit time, after
+    ``load_frozen_dataset`` / ``build_audit_frames`` have already run. The raw
+    frozen ``prices``/``labels``/``eligibility`` still contain the quarantined
+    symbol, preserving what the data source actually returned.
+
+    Returns ``(clean_labels, clean_eligibility, clean_quality_counts, summary)``.
+    ``clean_quality_counts`` recomputes the OHLC-derived counts (the ones
+    ``decide_trainability`` gates on) from only the surviving symbols, so a
+    quarantined symbol's bad prices can no longer trip the hard blocker. The
+    label-generation diagnostics (``missing_entry_open_count`` and friends)
+    are passed through unchanged: recomputing them would mean re-running
+    ``label_frame`` per symbol, the exact CPU cost this quarantine exists to
+    avoid paying twice, and one quarantined symbol's tiny contribution to
+    those counts does not change their interpretation.
+    """
+
+    evaluation = evaluate_symbol_price_quality(
+        prices,
+        ohlc_absolute_tolerance=config.quality.ohlc_absolute_tolerance,
+        ohlc_relative_tolerance=config.quality.ohlc_relative_tolerance,
+    )
+    quarantined = evaluation[evaluation["is_quarantined"]] if not evaluation.empty else evaluation
+    quarantined_symbols = set(quarantined["symbol"]) if not quarantined.empty else set()
+
+    if not quarantined_symbols:
+        return labels, eligibility, quality_counts, dict(_EMPTY_QUARANTINE_SUMMARY)
+
+    removed_labels = labels[labels["symbol"].isin(quarantined_symbols)] if not labels.empty else labels
+    removed_positive = int(removed_labels["target_20pct_20d"].sum()) if not removed_labels.empty else 0
+    removed_events = len(deduplicate_positive_events(removed_labels)) if not removed_labels.empty else 0
+
+    clean_labels = labels[~labels["symbol"].isin(quarantined_symbols)].copy() if not labels.empty else labels
+    clean_eligibility = (
+        eligibility[~eligibility["symbol"].isin(quarantined_symbols)].copy()
+        if not eligibility.empty
+        else eligibility
+    )
+
+    clean_evaluation = evaluation[~evaluation["is_quarantined"]]
+    clean_price_quality_counts = merge_counts(list(clean_evaluation["quality_counts"]))
+    clean_quality_counts = {**quality_counts, **clean_price_quality_counts}
+
+    excluded_symbols_detail = [
+        {
+            "symbol": row["symbol"],
+            "exclusion_reason": DATA_QUALITY_EXCLUSION_REASON,
+            "affected_row_count": int(row["affected_row_count"]),
+            "non_positive_price_rows": int(row["non_positive_price_rows"]),
+            "material_ohlc_inconsistency_rows": int(row["material_ohlc_inconsistency_rows"]),
+            "first_affected_date": (
+                str(row["first_affected_date"].date()) if row["first_affected_date"] is not None else None
+            ),
+            "last_affected_date": (
+                str(row["last_affected_date"].date()) if row["last_affected_date"] is not None else None
+            ),
+        }
+        for _, row in quarantined.sort_values("symbol").iterrows()
+    ]
+
+    summary = {
+        "data_quality_excluded_symbol_count": len(quarantined_symbols),
+        "data_quality_excluded_symbols": excluded_symbols_detail,
+        "data_quality_exclusion_reason_counts": {DATA_QUALITY_EXCLUSION_REASON: len(quarantined_symbols)},
+        "observations_removed_by_data_quality": int(len(removed_labels)),
+        "positive_labels_removed_by_data_quality": removed_positive,
+        "events_removed_by_data_quality": removed_events,
+    }
+    return clean_labels, clean_eligibility, clean_quality_counts, summary
+
+
 def run_audit_from_frames(
     labels: pd.DataFrame,
     eligibility: pd.DataFrame | None = None,
     quality_counts: dict[str, int] | None = None,
     config: Swing20Config = Swing20Config(),
+    prices: pd.DataFrame | None = None,
 ) -> AuditResult:
-    """Run the SWING_20 audit from frozen intermediate frames."""
+    """Run the SWING_20 audit from frozen intermediate frames.
+
+    If ``prices`` is given, a symbol-level data-quality quarantine runs first
+    (see :func:`apply_data_quality_quarantine`): symbols with an economically
+    invalid price history are dropped from ``labels`` and ``eligibility``
+    before any further audit computation, so the decision, universe stats,
+    splits, and baseline all reflect the model-eligible universe rather than
+    the raw frozen one. Without ``prices`` (e.g. a caller that never loaded
+    it), quarantine is skipped and the audit runs on the frames as given.
+    """
+
+    eligibility = eligibility if eligibility is not None else pd.DataFrame()
+    quality_counts = dict(quality_counts or {})
+    quarantine_summary = dict(_EMPTY_QUARANTINE_SUMMARY)
+    if prices is not None and not prices.empty:
+        labels, eligibility, quality_counts, quarantine_summary = apply_data_quality_quarantine(
+            labels, eligibility, prices, quality_counts, config
+        )
 
     warnings = [
         "UNIVERSE_MEMBERSHIP_NOT_POINT_IN_TIME",
         "SECTOR_NOT_POINT_IN_TIME",
         "MARKET_CAP_NOT_POINT_IN_TIME",
     ]
+    if quarantine_summary["data_quality_excluded_symbol_count"]:
+        warnings.append("DATA_QUALITY_SYMBOLS_QUARANTINED")
 
     labels_all = labels.copy()
     labels_with_splits = assign_temporal_splits(labels_all, config.splits) if not labels_all.empty else labels_all
     events = deduplicate_positive_events(labels_with_splits)
 
-    quality_counts = quality_counts or {}
     splits = split_summary(labels_with_splits)
     events_info = event_summary(labels_with_splits, events)
     decision = decide_trainability(labels_with_splits, splits, quality_counts, warnings=warnings)
@@ -229,11 +354,12 @@ def run_audit_from_frames(
         spec_version=config.spec_version,
         generated_at=datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
         date_range=date_range,
-        universe=universe_summary(eligibility if eligibility is not None else pd.DataFrame()),
+        universe=universe_summary(eligibility),
         labels=label_summary,
         splits=splits,
         baseline=baseline_summary(labels_with_splits),
         quality=quality,
+        data_quality_quarantine=quarantine_summary,
         decision=decision,
     )
 

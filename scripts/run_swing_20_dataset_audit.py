@@ -65,6 +65,7 @@ def main() -> None:
             eligibility=frozen["eligibility"],
             quality_counts=frozen["quality_counts"],
             config=config,
+            prices=frozen["prices"],
         )
     else:
         price_data = {}

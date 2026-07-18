@@ -73,6 +73,27 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def price_data_to_frame(price_data: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Concatenate a per-symbol OHLCV dict into one frame with symbol/date columns.
+
+    Shared by both the snapshot writer (``prepare.py``) and the audit path
+    (``audit.py``), which needs the same concatenated shape to run a
+    symbol-level data-quality quarantine directly from a frozen snapshot's
+    ``prices`` artifact.
+    """
+
+    rows: list[pd.DataFrame] = []
+    for symbol, df in price_data.items():
+        frame = df.sort_index().copy().reset_index()
+        date_col = frame.columns[0]
+        frame = frame.rename(columns={date_col: "date"})
+        frame.insert(0, "symbol", symbol)
+        rows.append(frame)
+    if not rows:
+        return pd.DataFrame(columns=["symbol", "date", "Open", "High", "Low", "Close", "Volume"])
+    return pd.concat(rows, ignore_index=True)
+
+
 def _format_from_suffix(path: Path) -> StorageFormat:
     suffix = path.suffix.lower()
     if suffix == ".parquet":

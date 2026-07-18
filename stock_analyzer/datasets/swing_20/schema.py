@@ -32,6 +32,7 @@ class AuditResult:
     splits: dict[str, Any]
     baseline: dict[str, Any]
     quality: dict[str, Any]
+    data_quality_quarantine: dict[str, Any]
     decision: AuditDecision
 
     def to_dict(self) -> dict[str, Any]:

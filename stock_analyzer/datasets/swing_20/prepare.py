@@ -40,6 +40,7 @@ from stock_analyzer.datasets.swing_20.artifacts import (
     StorageFormat,
     artifact_path,
     file_sha256,
+    price_data_to_frame,
     read_frame,
     read_manifest,
     write_frame,
@@ -201,7 +202,7 @@ def write_frozen_dataset(
 
     print(f"[build] writing artifacts to {snapshot_dir}...", flush=True)
     write_start = time.monotonic()
-    prices = _price_data_to_frame(price_data)
+    prices = price_data_to_frame(price_data)
     labels = frames["labels"]
     eligibility = frames["eligibility"]
     failures_frame = _failures_to_frame(failures)
@@ -587,19 +588,6 @@ def _failures_to_frame(failures: dict[str, str]) -> pd.DataFrame:
     return pd.DataFrame(
         [{"symbol": symbol, "reason": reason} for symbol, reason in sorted(failures.items())]
     )
-
-
-def _price_data_to_frame(price_data: dict[str, pd.DataFrame]) -> pd.DataFrame:
-    rows: list[pd.DataFrame] = []
-    for symbol, df in price_data.items():
-        frame = df.sort_index().copy().reset_index()
-        date_col = frame.columns[0]
-        frame = frame.rename(columns={date_col: "date"})
-        frame.insert(0, "symbol", symbol)
-        rows.append(frame)
-    if not rows:
-        return pd.DataFrame(columns=["symbol", "date", "Open", "High", "Low", "Close", "Volume"])
-    return pd.concat(rows, ignore_index=True)
 
 
 def _optional_str(value: object) -> str | None:

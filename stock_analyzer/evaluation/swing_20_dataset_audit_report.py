@@ -73,7 +73,11 @@ def render_markdown(result: AuditResult) -> str:
             "",
             _key_value_table(data["baseline"]),
             "",
-            "## 12. Recommended Next Step",
+            "## 12. Data Quality Quarantine",
+            "",
+            _quarantine_section(data.get("data_quality_quarantine", {})),
+            "",
+            "## 13. Recommended Next Step",
             "",
             decision.get("recommended_next_step", ""),
             "",
@@ -134,4 +138,41 @@ def _event_section(labels: dict[str, object]) -> str:
 def _outcome_section(labels: dict[str, object]) -> str:
     keys = ["mfe_20d_median", "mae_20d_median", "close_return_20d_median"]
     return _key_value_table({key: labels.get(key) for key in keys})
+
+
+def _quarantine_section(quarantine: dict[str, object]) -> str:
+    summary_keys = [
+        "data_quality_excluded_symbol_count",
+        "data_quality_exclusion_reason_counts",
+        "observations_removed_by_data_quality",
+        "positive_labels_removed_by_data_quality",
+        "events_removed_by_data_quality",
+    ]
+    summary_table = _key_value_table({key: quarantine.get(key) for key in summary_keys})
+
+    excluded = quarantine.get("data_quality_excluded_symbols") or []
+    if not excluded:
+        return summary_table + "\n\n_No symbols were quarantined._"
+
+    rows = [
+        "| Symbol | Reason | Affected Rows | Non-Positive Price | Material OHLC | First Date | Last Date |",
+        "|---|---|---:|---:|---:|---|---|",
+    ]
+    for entry in excluded:
+        rows.append(
+            "| "
+            + " | ".join(
+                [
+                    f"`{entry.get('symbol')}`",
+                    f"`{entry.get('exclusion_reason')}`",
+                    f"`{entry.get('affected_row_count')}`",
+                    f"`{entry.get('non_positive_price_rows')}`",
+                    f"`{entry.get('material_ohlc_inconsistency_rows')}`",
+                    f"`{entry.get('first_affected_date')}`",
+                    f"`{entry.get('last_affected_date')}`",
+                ]
+            )
+            + " |"
+        )
+    return summary_table + "\n\n" + "\n".join(rows)
 

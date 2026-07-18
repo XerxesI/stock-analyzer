@@ -11,6 +11,33 @@ from stock_analyzer.datasets.swing_20.schema import AuditDecision
 # take their max across frames rather than summing them.
 _MAX_AGGREGATE_KEYS = {"maximum_ohlc_deviation", "maximum_ohlc_deviation_bps"}
 
+# Stable reason code for the symbol-level data-quality quarantine (see
+# evaluate_symbol_price_quality): a symbol's entire price history is dropped
+# from the model-eligible universe, not just the offending rows, because a
+# corrupt adjustment series (e.g. a botched reverse-split back-calculation)
+# taints every return computed from it, not only the rows that fail the
+# raw OHLC check.
+DATA_QUALITY_EXCLUSION_REASON = "INVALID_PRICE_SERIES"
+
+
+def _ohlc_deviation(df: pd.DataFrame) -> pd.Series:
+    """Per-row OHLC deviation: how far Open/Close falls outside [Low, High]."""
+
+    high_deficit = (df[["Open", "Close", "Low"]].max(axis=1) - df["High"]).clip(lower=0)
+    low_deficit = (df["Low"] - df[["Open", "Close", "High"]].min(axis=1)).clip(lower=0)
+    return pd.concat([high_deficit, low_deficit], axis=1).max(axis=1)
+
+
+def _material_mask(
+    df: pd.DataFrame,
+    deviation: pd.Series,
+    ohlc_absolute_tolerance: float,
+    ohlc_relative_tolerance: float,
+) -> pd.Series:
+    reference_price = df["Close"].abs()
+    tolerance = (reference_price * ohlc_relative_tolerance).clip(lower=ohlc_absolute_tolerance)
+    return (deviation > 0) & (deviation > tolerance)
+
 
 def ohlcv_quality_counts(
     df: pd.DataFrame,
@@ -44,19 +71,16 @@ def ohlcv_quality_counts(
     counts["duplicate_bar_count"] = int(ordered.index.duplicated().sum())
     required = {"Open", "High", "Low", "Close"}
     if required.issubset(ordered.columns):
-        high_deficit = (ordered[["Open", "Close", "Low"]].max(axis=1) - ordered["High"]).clip(lower=0)
-        low_deficit = (ordered["Low"] - ordered[["Open", "Close", "High"]].min(axis=1)).clip(lower=0)
-        deviation = pd.concat([high_deficit, low_deficit], axis=1).max(axis=1)
+        deviation = _ohlc_deviation(ordered)
         invalid = deviation > 0
         counts["ohlc_inconsistency_count"] = int(invalid.sum())
 
         if invalid.any():
-            reference_price = ordered["Close"].abs()
-            tolerance = (reference_price * ohlc_relative_tolerance).clip(lower=ohlc_absolute_tolerance)
-            material = invalid & (deviation > tolerance)
+            material = _material_mask(ordered, deviation, ohlc_absolute_tolerance, ohlc_relative_tolerance)
             counts["ohlc_material_inconsistency_count"] = int(material.sum())
             counts["ohlc_rounding_tolerance_count"] = int(invalid.sum() - material.sum())
             counts["maximum_ohlc_deviation"] = float(deviation[invalid].max())
+            reference_price = ordered["Close"].abs()
             deviation_bps = (deviation / reference_price.where(reference_price > 0)) * 10000
             counts["maximum_ohlc_deviation_bps"] = float(deviation_bps[invalid].max())
 
@@ -69,6 +93,67 @@ def ohlcv_quality_counts(
         gap = ordered["Open"].pct_change().abs()
         counts["extreme_gap_count"] = int((gap > 0.50).sum())
     return counts
+
+
+def evaluate_symbol_price_quality(
+    prices: pd.DataFrame,
+    ohlc_absolute_tolerance: float = QualityConfig().ohlc_absolute_tolerance,
+    ohlc_relative_tolerance: float = QualityConfig().ohlc_relative_tolerance,
+) -> pd.DataFrame:
+    """Evaluate every symbol in a concatenated ``prices`` frame for quarantine.
+
+    ``prices`` must have ``symbol``, ``date``, and OHLC columns (the frozen
+    snapshot's ``prices`` artifact shape). Returns one row per symbol with a
+    ``quality_counts`` dict (same shape as :func:`ohlcv_quality_counts`) and a
+    quarantine verdict: a symbol is quarantined if any row has a non-positive
+    Open/High/Low/Close, High below Low, or a material OHLC deviation --
+    conditions under which a return computed from that row is not
+    economically interpretable.
+    """
+
+    columns = [
+        "symbol",
+        "is_quarantined",
+        "non_positive_price_rows",
+        "high_below_low_rows",
+        "material_ohlc_inconsistency_rows",
+        "affected_row_count",
+        "first_affected_date",
+        "last_affected_date",
+        "quality_counts",
+    ]
+    if prices.empty:
+        return pd.DataFrame(columns=columns)
+
+    prices = prices.assign(date=pd.to_datetime(prices["date"]))
+
+    records: list[dict[str, object]] = []
+    for symbol, group in prices.sort_values("date").groupby("symbol", sort=True):
+        ordered = group.set_index("date")
+        quality_counts = ohlcv_quality_counts(ordered, ohlc_absolute_tolerance, ohlc_relative_tolerance)
+
+        non_positive_mask = (ordered[["Open", "High", "Low", "Close"]] <= 0).any(axis=1)
+        high_below_low_mask = ordered["High"] < ordered["Low"]
+        deviation = _ohlc_deviation(ordered)
+        material_mask = _material_mask(ordered, deviation, ohlc_absolute_tolerance, ohlc_relative_tolerance)
+
+        invalid_mask = non_positive_mask | high_below_low_mask | material_mask
+        affected_dates = ordered.index[invalid_mask]
+
+        records.append(
+            {
+                "symbol": symbol,
+                "is_quarantined": bool(invalid_mask.any()),
+                "non_positive_price_rows": int(non_positive_mask.sum()),
+                "high_below_low_rows": int(high_below_low_mask.sum()),
+                "material_ohlc_inconsistency_rows": int(material_mask.sum()),
+                "affected_row_count": int(invalid_mask.sum()),
+                "first_affected_date": affected_dates.min() if len(affected_dates) else None,
+                "last_affected_date": affected_dates.max() if len(affected_dates) else None,
+                "quality_counts": quality_counts,
+            }
+        )
+    return pd.DataFrame(records, columns=columns)
 
 
 def merge_counts(counts: list[dict[str, int]]) -> dict[str, int]:
