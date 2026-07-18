@@ -11,7 +11,12 @@ import stock_analyzer.sandbox.application.candidate_service as candidate_service
 from stock_analyzer.sandbox.application.candidate_service import CandidateService
 from stock_analyzer.sandbox.application.entry_service import EntryService
 from stock_analyzer.sandbox.application.monitoring_service import MonitoringService
-from stock_analyzer.sandbox.application.replay_service import ReplayAlreadyCompletedError, ReplayService
+from stock_analyzer.sandbox.application.replay_service import (
+    ReplayAlreadyCompletedError,
+    ReplayConfigurationMismatchError,
+    ReplayInputError,
+    ReplayService,
+)
 from stock_analyzer.sandbox.config import SandboxConfig
 from stock_analyzer.sandbox.domain.replay import COMPLETED, DEVELOPMENT_HISTORICAL_REPLAY, ReplayMetadata
 from stock_analyzer.sandbox.infrastructure.schema import init_db
@@ -262,3 +267,98 @@ def test_replay_metrics_funnel_and_counterfactual_counts(repo: SandboxRepository
     assert metrics["candidate_selection"]["actionable_candidates_created"] == metrics["funnel"]["actionable_candidates_total"]
     assert isinstance(metrics["operational"]["max_simultaneous_open_positions"], int)
     assert metrics["operational"]["max_simultaneous_open_positions"] >= 1
+
+
+def test_unsorted_trading_dates_are_rejected(repo: SandboxRepository, monkeypatch):
+    symbols = ["AAA"]
+    dates = _business_days(date(2026, 1, 5), 5)
+    service = _make_replay_service(repo, symbols, dates, monkeypatch)
+    replay = _replay_metadata("replay-unsorted", dates, dates[-1])
+
+    unsorted_dates = [dates[1], dates[0], dates[2], dates[3], dates[4]]
+    with pytest.raises(ReplayInputError, match="sorted"):
+        service.run(replay, unsorted_dates)
+
+
+def test_duplicate_trading_dates_are_rejected(repo: SandboxRepository, monkeypatch):
+    symbols = ["AAA"]
+    dates = _business_days(date(2026, 1, 5), 5)
+    service = _make_replay_service(repo, symbols, dates, monkeypatch)
+    replay = _replay_metadata("replay-dupes", dates, dates[-1])
+
+    dates_with_dupe = dates[:3] + [dates[2]] + dates[3:]
+    with pytest.raises(ReplayInputError, match="duplicate"):
+        service.run(replay, dates_with_dupe)
+
+
+def test_trading_dates_before_signal_start_are_rejected(repo: SandboxRepository, monkeypatch):
+    symbols = ["AAA"]
+    dates = _business_days(date(2026, 1, 5), 5)
+    service = _make_replay_service(repo, symbols, dates, monkeypatch)
+    replay = _replay_metadata("replay-early", dates, dates[-1])
+    replay.signal_start_date = dates[1]  # first registered date is dates[1], not dates[0]
+
+    with pytest.raises(ReplayInputError, match="signal_start_date"):
+        service.run(replay, dates)  # dates[0] is before the registered signal_start_date
+
+
+def test_trading_dates_after_outcome_end_are_rejected(repo: SandboxRepository, monkeypatch):
+    symbols = ["AAA"]
+    dates = _business_days(date(2026, 1, 5), 5)
+    service = _make_replay_service(repo, symbols, dates, monkeypatch)
+    replay = _replay_metadata("replay-late", dates, dates[-1])
+    replay.outcome_data_end_date = dates[-2]  # registered end is before the last supplied date
+
+    with pytest.raises(ReplayInputError, match="outcome_data_end_date"):
+        service.run(replay, dates)
+
+
+def test_resume_with_mismatched_configuration_is_rejected(repo: SandboxRepository, monkeypatch):
+    symbols = ["AAA"]
+    dates = _business_days(date(2026, 1, 5), 5)
+    service = _make_replay_service(repo, symbols, dates, monkeypatch)
+
+    # Register a RUNNING replay directly (simulating a crash before completion),
+    # then attempt to resume with a different configuration_hash.
+    original = _replay_metadata("replay-resume", dates, dates[-1])
+    repo.create_replay_metadata(original)
+
+    changed = _replay_metadata("replay-resume", dates, dates[-1])
+    changed.configuration_hash = "a-different-hash"
+
+    with pytest.raises(ReplayConfigurationMismatchError, match="configuration_hash"):
+        service.run(changed, dates)
+
+
+def test_resume_with_matching_configuration_proceeds(repo: SandboxRepository, monkeypatch):
+    symbols = ["AAA"]
+    dates = _business_days(date(2026, 1, 5), 5)
+    service = _make_replay_service(repo, symbols, dates, monkeypatch)
+
+    original = _replay_metadata("replay-resume-ok", dates, dates[-1])
+    repo.create_replay_metadata(original)
+
+    same_config = _replay_metadata("replay-resume-ok", dates, dates[-1])
+    result = service.run(same_config, dates)
+
+    assert result.replay_id == "replay-resume-ok"
+    metadata = repo.get_replay_metadata("replay-resume-ok")
+    assert metadata.status == COMPLETED
+
+
+def test_exception_during_replay_marks_metadata_failed(repo: SandboxRepository, monkeypatch):
+    symbols = ["AAA"]
+    dates = _business_days(date(2026, 1, 5), 5)
+    service = _make_replay_service(repo, symbols, dates, monkeypatch)
+    replay = _replay_metadata("replay-crash", dates, dates[-1])
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated crash mid-replay")
+
+    monkeypatch.setattr(service, "_process_dates", boom)
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        service.run(replay, dates)
+
+    metadata = repo.get_replay_metadata("replay-crash")
+    assert metadata.status == "FAILED"

@@ -36,12 +36,41 @@ from stock_analyzer.sandbox.config import SandboxConfig
 from stock_analyzer.sandbox.domain.replay import COMPLETED, ReplayMetadata
 from stock_analyzer.sandbox.infrastructure.sqlite_repository import SandboxRepository
 
+# Fields that identify "the same replay configuration" -- compared on resume so a
+# RUNNING/FAILED replay cannot silently continue under changed code/config/data.
+# Excludes started_at/completed_at/status (expected to differ) and replay_id (the key
+# itself).
+_IDENTITY_FIELDS = (
+    "classification",
+    "code_commit_sha",
+    "model_version",
+    "feature_snapshot_id",
+    "market_data_snapshot_id",
+    "signal_start_date",
+    "signal_end_date",
+    "outcome_data_end_date",
+    "configuration_hash",
+)
+
 
 class ReplayAlreadyCompletedError(RuntimeError):
     """Raised when a replay_id that already completed is run again. Per spec: a
     repeated replay configuration must either verify identical results or fail
     clearly -- this implementation fails clearly rather than silently re-running or
     silently skipping."""
+
+
+class ReplayConfigurationMismatchError(RuntimeError):
+    """Raised when resuming a RUNNING/FAILED replay_id with a configuration that
+    differs from what was originally registered -- e.g. a retry after changing code,
+    the model, a feature/data snapshot, or the date boundaries. Resuming into a
+    partially-populated database under a different configuration would silently mix
+    two configurations' data under one replay_id."""
+
+
+class ReplayInputError(ValueError):
+    """Raised when the caller-supplied trading_dates do not satisfy ReplayService.run's
+    documented contract (sorted, unique, within the registered period)."""
 
 
 @dataclass
@@ -78,9 +107,11 @@ class ReplayService:
         self._config = config or SandboxConfig()
 
     def run(self, replay: ReplayMetadata, trading_dates: list[date], progress_every: int | None = None) -> ReplayRunResult:
-        """`trading_dates` must be sorted ascending and must span
+        """`trading_dates` must be sorted ascending, unique, and fall within
         [replay.signal_start_date, replay.outcome_data_end_date]. Candidate generation
         only happens for dates <= replay.signal_end_date."""
+
+        self._validate_trading_dates(replay, trading_dates)
 
         stored, created = self._repo.create_replay_metadata(replay)
         if not created:
@@ -90,10 +121,31 @@ class ReplayService:
                     "Use a new replay_id for a different configuration, or delete this replay's "
                     "isolated database to genuinely rerun it."
                 )
-            # RUNNING or FAILED: fall through and resume/retry within this same DB --
-            # every sub-step (candidates, orders, positions) is idempotent per-row, so
-            # resuming is safe.
+            # RUNNING or FAILED: only resume if the supplied configuration matches
+            # what was originally registered -- otherwise a retry after changing
+            # code/model/data could silently continue into a database populated
+            # under a different configuration.
+            self._require_matching_configuration(replay, stored)
 
+        try:
+            day_results = self._process_dates(replay, trading_dates, progress_every)
+        except Exception:
+            self._repo.fail_replay(replay.replay_id, datetime.now(timezone.utc))
+            raise
+
+        unresolved = [p.position_id for p in self._repo.get_open_positions()]
+        self._repo.complete_replay(replay.replay_id, datetime.now(timezone.utc))
+
+        return ReplayRunResult(
+            replay_id=replay.replay_id,
+            dates_processed=trading_dates,
+            day_results=day_results,
+            unresolved_position_ids=unresolved,
+        )
+
+    def _process_dates(
+        self, replay: ReplayMetadata, trading_dates: list[date], progress_every: int | None
+    ) -> list[ReplayDayResult]:
         day_results: list[ReplayDayResult] = []
         for position, as_of_date in enumerate(trading_dates, start=1):
             entry_outcomes = self._entries.process_entries(as_of_date)
@@ -122,13 +174,36 @@ class ReplayService:
                     f"(signal_day={is_signal_day})",
                     flush=True,
                 )
+        return day_results
 
-        unresolved = [p.position_id for p in self._repo.get_open_positions()]
-        self._repo.complete_replay(replay.replay_id, datetime.now(timezone.utc))
+    @staticmethod
+    def _validate_trading_dates(replay: ReplayMetadata, trading_dates: list[date]) -> None:
+        if not trading_dates:
+            raise ReplayInputError("trading_dates must not be empty.")
+        if len(trading_dates) != len(set(trading_dates)):
+            raise ReplayInputError("trading_dates contains duplicate dates.")
+        if trading_dates != sorted(trading_dates):
+            raise ReplayInputError("trading_dates must be sorted ascending.")
+        if trading_dates[0] < replay.signal_start_date:
+            raise ReplayInputError(
+                f"trading_dates[0]={trading_dates[0]} is before signal_start_date={replay.signal_start_date}."
+            )
+        if trading_dates[-1] > replay.outcome_data_end_date:
+            raise ReplayInputError(
+                f"trading_dates[-1]={trading_dates[-1]} is after outcome_data_end_date={replay.outcome_data_end_date}."
+            )
 
-        return ReplayRunResult(
-            replay_id=replay.replay_id,
-            dates_processed=trading_dates,
-            day_results=day_results,
-            unresolved_position_ids=unresolved,
-        )
+    @staticmethod
+    def _require_matching_configuration(replay: ReplayMetadata, stored: ReplayMetadata) -> None:
+        mismatches = {
+            field: (getattr(stored, field), getattr(replay, field))
+            for field in _IDENTITY_FIELDS
+            if getattr(stored, field) != getattr(replay, field)
+        }
+        if mismatches:
+            raise ReplayConfigurationMismatchError(
+                f"Resuming replay '{replay.replay_id}' (status={stored.status}) with a configuration "
+                f"that differs from the originally registered one: {mismatches}. Use a new replay_id "
+                "for a genuinely different configuration, or delete this replay's isolated database to "
+                "start over with the new configuration under the same id."
+            )
