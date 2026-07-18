@@ -73,9 +73,29 @@ def build_replay_metrics(
     target_exits = [p for p in closed_positions if p["exit_reason"] == "SELL_TARGET"]
     time_exits = [p for p in closed_positions if p["exit_reason"] == "SELL_TIME"]
 
+    # Read holding_day_count/mfe/mae from each position's own FINAL position_snapshots
+    # row (the append-only source of truth, ADR-006) rather than virtual_positions'
+    # current-state columns -- those are kept in sync on close as of the fix that
+    # accompanies this comment, but position_snapshots is authoritative regardless of
+    # whether some future code path forgets to update virtual_positions again.
+    final_snapshot_by_position = _final_snapshots(conn, [p["position_id"] for p in positions])
+    holding_days = [
+        final_snapshot_by_position[p["position_id"]]["holding_day_count"]
+        for p in closed_positions
+        if p["position_id"] in final_snapshot_by_position
+    ]
+    mfe_values = [
+        final_snapshot_by_position[p["position_id"]]["mfe"]
+        for p in positions
+        if p["position_id"] in final_snapshot_by_position
+    ]
+    mae_values = [
+        final_snapshot_by_position[p["position_id"]]["mae"]
+        for p in positions
+        if p["position_id"] in final_snapshot_by_position
+    ]
+
     realized_returns = [p["realized_return"] for p in closed_positions if p["realized_return"] is not None]
-    mfe_values = [p["mfe"] for p in positions]
-    mae_values = [p["mae"] for p in positions]
     wins = [r for r in realized_returns if r > 0]
 
     exclusion_reasons: dict[str, int] = {}
@@ -149,8 +169,8 @@ def build_replay_metrics(
             "sell_target_pct": _success_rate(len(target_exits), len(closed_positions)),
             "sell_time_count": len(time_exits),
             "sell_time_pct": _success_rate(len(time_exits), len(closed_positions)),
-            "holding_days_mean": statistics.mean(p["current_holding_day_count"] for p in closed_positions) if closed_positions else None,
-            "holding_days_median": statistics.median(p["current_holding_day_count"] for p in closed_positions) if closed_positions else None,
+            "holding_days_mean": statistics.mean(holding_days) if holding_days else None,
+            "holding_days_median": statistics.median(holding_days) if holding_days else None,
             "realized_return_mean": statistics.mean(realized_returns) if realized_returns else None,
             "realized_return_median": statistics.median(realized_returns) if realized_returns else None,
             "win_rate": _success_rate(len(wins), len(realized_returns)),
@@ -222,6 +242,24 @@ def _shadow_ranking_success(shadow_rows: list, actionable_rows: list, label_look
         "target_hit_rate_by_adv_quintile": by_adv,
         "target_hit_rate_by_market_regime": by_regime,
     }
+
+
+def _final_snapshots(conn, position_ids: list[str]) -> dict[str, dict[str, object]]:
+    """Each position's own latest (by as_of_date) position_snapshots row -- the
+    correct source for a position's final holding_day_count/mfe/mae, per the
+    EXP-004 review finding that virtual_positions' current-state columns could be
+    one session stale for a closed position."""
+
+    result: dict[str, dict[str, object]] = {}
+    for position_id in position_ids:
+        row = conn.execute(
+            "SELECT holding_day_count, mfe, mae FROM position_snapshots "
+            "WHERE position_id = ? ORDER BY as_of_date DESC LIMIT 1",
+            (position_id,),
+        ).fetchone()
+        if row is not None:
+            result[position_id] = {"holding_day_count": row["holding_day_count"], "mfe": row["mfe"], "mae": row["mae"]}
+    return result
 
 
 def _max_simultaneous_open(repo: SandboxRepository, signal_start: date, outcome_end: date) -> int:

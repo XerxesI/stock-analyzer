@@ -118,6 +118,44 @@ def test_target_reached_at_open(repo: SandboxRepository, monkeypatch):
     assert updated.exit_reason == "SELL_TARGET"
 
 
+def test_closed_position_holding_mfe_mae_match_final_snapshot_not_stale(repo: SandboxRepository, monkeypatch):
+    # Regression test for the EXP-004 review finding: closing a position must persist
+    # THAT DAY's holding_day_count/mfe/mae onto virtual_positions, not leave it frozen
+    # at the prior day's HOLD update. Three sessions: two HOLD days (holding day 1, 2),
+    # then a target hit on holding day 3 -- a single-day scenario wouldn't distinguish
+    # a stale value (day 2) from the correct one (day 3).
+    position = _open_position(repo, entry_price=10.0)  # target = 12.0
+    day2 = date.fromordinal(ENTRY_DATE.toordinal() + 1)
+    day3 = date.fromordinal(ENTRY_DATE.toordinal() + 2)
+    _patch_bars(
+        monkeypatch,
+        {
+            ENTRY_DATE: _bar(open_=10.1, high=10.6, low=9.8, close=10.2),  # mfe so far: 0.06, mae: -0.02
+            day2: _bar(open_=10.2, high=11.9, low=10.0, close=10.5),  # mfe so far: 0.19, mae: -0.02
+            day3: _bar(open_=10.6, high=12.4, low=10.4, close=12.1),  # target hit intraday -> exit at 12.0
+        },
+    )
+    service = MonitoringService(repo, CONFIG)
+
+    service.monitor(ENTRY_DATE)
+    service.monitor(day2)
+    outcomes = service.monitor(day3)
+
+    assert outcomes[0].recommendation == "SELL_TARGET"
+    updated = repo.get_position(position.position_id)
+    assert updated.status == "CLOSED"
+
+    final_snapshot = repo.get_snapshots_for_position(position.position_id)[-1]
+    assert final_snapshot.as_of_date == day3
+    assert updated.current_holding_day_count == 3
+    assert updated.current_holding_day_count == final_snapshot.holding_day_count
+    assert updated.mfe == pytest.approx(final_snapshot.mfe)
+    assert updated.mae == pytest.approx(final_snapshot.mae)
+    # The bug this guards against would leave holding_day_count at 2 (day2's HOLD
+    # value) and mfe at day2's 0.19 instead of day3's higher intraday high.
+    assert updated.mfe == pytest.approx((12.4 - 10.0) / 10.0)
+
+
 def test_target_reached_intraday_not_at_open(repo: SandboxRepository, monkeypatch):
     position = _open_position(repo, entry_price=10.0)  # target = 12.0
     _patch_bars(monkeypatch, {ENTRY_DATE: _bar(open_=10.5, high=12.4, low=10.4, close=11.8)})

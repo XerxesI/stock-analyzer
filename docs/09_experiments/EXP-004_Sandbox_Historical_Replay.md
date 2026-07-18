@@ -186,18 +186,47 @@ from git).
 
 # Part 2 -- Result
 
-The replay ran twice. The first run (before this Part 2 was written) surfaced a real
-bug: `ranked_candidates.actionable` was persisted from per-symbol data-quality checks
-only, before the top-3 rank cap and already-open/already-pending exclusions were
-applied -- so every data-quality-clean shadow candidate (typically all 10/day) was
-stored as `actionable=True`, corrupting `actionable_candidates_total` and any
-consumer reading that column directly (daily reports, this replay's own funnel
-metrics). This was a code bug in `CandidateService`, not a change to Model 2, the
-entry-price policy, the candidate count, the target, or the holding horizon -- it was
-fixed (`CandidateService.generate_candidates` restructured into build-drafts ->
-decide-selection -> persist -> create-orders, so `actionable` reflects the true
-selection outcome; regression test added), and the replay was re-run from a clean
-isolated database before any result below was used. See commit history for the fix.
+The replay ran twice, and its metrics were regenerated a third time from the same
+database after a second bug was found by an independent Codex audit. Neither
+correction changed Model 2, the entry-price policy, the candidate count, the target,
+or the holding horizon.
+
+**Bug 1 (found before this Part 2 was first written): `actionable` flag persisted
+before selection.** `ranked_candidates.actionable` was set from per-symbol
+data-quality checks only, before the top-3 rank cap and already-open/already-pending
+exclusions were applied -- so every data-quality-clean shadow candidate (typically all
+10/day) was stored as `actionable=True`, corrupting `actionable_candidates_total` and
+any consumer reading that column directly. Fixed by restructuring
+`CandidateService.generate_candidates` into build-drafts -> decide-selection ->
+persist -> create-orders; the replay was re-run from a clean isolated database before
+any result was used.
+
+**Bug 2 (found by an independent Codex audit after Part 2 was first published,
+confirmed by directly querying the replay database before any code changed):
+holding-day-count/MFE/MAE were stale by one session on every closed position.**
+`MonitoringService._handle_session` correctly computes and writes the closing
+session's `holding_day_count`/`mfe`/`mae` to that position's final
+`position_snapshots` row, but on `SELL_TARGET`/`SELL_TIME` it only called
+`close_position()`, which updated `status`/`exit_date`/`exit_price`/`exit_reason`/
+`realized_return` on `virtual_positions` -- never the current-state
+`current_holding_day_count`/`mfe`/`mae` columns, which stayed at whatever the
+*previous* day's `HOLD` update had left them. `build_replay_metrics` read those stale
+`virtual_positions` columns instead of each position's own final `position_snapshots`
+row. Verified directly against the (unmodified) EXP-004 database before fixing
+anything: all 521 closed positions had a stale holding-day count (mean 15.9693
+instead of the correct 16.9693 -- exactly one session low, as expected since the
+bug always misses the closing session), 155 had a stale MFE (mean 8.5448% instead of
+15.5179%), and 73 had a stale MAE (mean -16.0075% instead of -16.5151%). Realized
+return and total P&L were unaffected -- those are computed from stored entry/exit
+prices, a different code path that had no bug. Fixed in two places: `close_position()`
+(repository and `MonitoringService`) now requires and persists the closing session's
+final holding/MFE/MAE onto `virtual_positions` too (defense in depth), and
+`build_replay_metrics` now reads each position's own final `position_snapshots` row
+rather than `virtual_positions`' current-state columns (the architecturally correct
+source per ADR-006's append-only design). Metrics below were regenerated from the
+**existing, already-completed** replay database -- a full 230-day rerun was not
+necessary, since `position_snapshots` had held the correct values all along; only the
+current-state mirror and the metrics-reading code were wrong.
 
 ## Replay identity
 
@@ -291,11 +320,11 @@ outright; most unfilled attempts still resolved on the second session.
 | Positions still open (unresolved) | 0 |
 | `SELL_TARGET` | 124 (23.8%) |
 | `SELL_TIME` | 397 (76.2%) |
-| Holding days, mean / median | 16.0 / 19 |
+| Holding days, mean / median | **16.97 / 20** (corrected; see Bug 2 above) |
 | Realized return, mean / median | -1.76% / -0.32% |
 | Win rate (realized return > 0) | 49.7% |
-| MFE mean | +8.5% |
-| MAE mean | -16.0% |
+| MFE mean | **+15.52%** (corrected; see Bug 2 above) |
+| MAE mean | **-16.52%** (corrected; see Bug 2 above) |
 | Best realized return | +99.2% |
 | Worst realized return | -87.2% |
 | Total virtual P&L ($1,000 notional/position) | -$9,195.29 |
@@ -313,6 +342,18 @@ noted above, is exactly the kind of question later, separately pre-registered re
 should address -- not something to resolve by adjusting a policy constant after seeing
 this number.
 
+**Additional observation from the corrected MFE (+15.52%, not the originally-reported
++8.5%): positions moved substantially into profit quite often (mean favorable
+excursion well above the eventual mean realized return of -1.76%), but that favorable
+excursion was frequently not captured by exit.** With no stop-loss and no partial
+take-profit in MVP 2 (spec section 11, intentional), a position that moves to +15%
+unrealized and then drifts back down still exits via `SELL_TIME` at whatever the
+20th-session close happens to be, or via `SELL_TARGET` only if the full +20% is
+reached. This gap between MFE and realized return is a specific, falsifiable
+observation about the **exit policy**, separable from the ranking and portfolio
+questions above -- worth investigating before any new modeling work, not resolved
+here.
+
 ## Operational
 
 | Metric | Value |
@@ -322,13 +363,18 @@ this number.
 
 ## Test results
 
-49/49 sandbox tests pass (`tests/test_sandbox_*.py`), including the new regression
-test for the actionable-flag bug found during this replay.
+51/51 sandbox tests pass (`tests/test_sandbox_*.py`), including the actionable-flag
+regression test (Bug 1) and two new tests for the holding/MFE/MAE staleness
+regression (Bug 2): `test_closed_position_holding_mfe_mae_match_final_snapshot_not_stale`
+(`tests/test_sandbox_monitoring_service.py`) and
+`test_replay_metrics_holding_mfe_mae_use_final_snapshot`
+(`tests/test_sandbox_replay_metrics.py`, new file).
 
 ## Commit SHAs
 
 See git history: the actionable-flag fix, the replay engine/metrics (Part 1
-pre-registration), and this Part 2 result are each separate commits.
+pre-registration), this Part 2 result, and the holding/MFE/MAE staleness fix are each
+separate commits.
 
 ## Remaining blockers before `FORWARD_PAPER_EVALUATION`
 

@@ -403,15 +403,30 @@ class SandboxRepository:
         exit_price: float,
         exit_reason: str,
         realized_return: float,
+        final_holding_day_count: int,
+        final_mfe: float,
+        final_mae: float,
     ) -> None:
+        """`final_holding_day_count`/`final_mfe`/`final_mae` are required -- the
+        closing session's own values, matching what was just written to that
+        position's final position_snapshots row. Without this, current_holding_day_
+        count/mfe/mae would freeze at the PRIOR day's HOLD update and read one
+        session stale forever after close (see EXP-004 review: reported mean
+        holding days/MFE/MAE were wrong because a consumer read this table's
+        current-state columns instead of the final snapshot)."""
+
         self._conn.execute(
             "UPDATE virtual_positions SET status='CLOSED', exit_date=?, exit_price=?, "
-            "exit_reason=?, realized_return=?, updated_at=? WHERE position_id=?",
+            "exit_reason=?, realized_return=?, current_holding_day_count=?, mfe=?, mae=?, "
+            "updated_at=? WHERE position_id=?",
             (
                 exit_date.isoformat(),
                 exit_price,
                 exit_reason,
                 realized_return,
+                final_holding_day_count,
+                final_mfe,
+                final_mae,
                 datetime.now(timezone.utc).isoformat(),
                 position_id,
             ),

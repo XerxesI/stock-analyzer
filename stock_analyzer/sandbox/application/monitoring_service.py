@@ -168,7 +168,15 @@ class MonitoringService:
         )
 
         if recommendation in (SELL_TARGET, SELL_TIME):
-            self._close_position(position, exit_date=as_of_date, exit_price=exit_price, exit_reason=recommendation)
+            self._close_position(
+                position,
+                exit_date=as_of_date,
+                exit_price=exit_price,
+                exit_reason=recommendation,
+                final_holding_day_count=holding_day_count,
+                final_mfe=mfe,
+                final_mae=mae,
+            )
         else:
             self._repo.update_position_state(
                 position.position_id,
@@ -193,7 +201,16 @@ class MonitoringService:
         existing = self._repo.get_snapshots_for_position(position.position_id)
         return len(existing) + 1
 
-    def _close_position(self, position: VirtualPosition, exit_date: date, exit_price: float, exit_reason: str) -> None:
+    def _close_position(
+        self,
+        position: VirtualPosition,
+        exit_date: date,
+        exit_price: float,
+        exit_reason: str,
+        final_holding_day_count: int,
+        final_mfe: float,
+        final_mae: float,
+    ) -> None:
         realized_return = (exit_price - position.entry_price) / position.entry_price
         self._repo.close_position(
             position.position_id,
@@ -201,6 +218,9 @@ class MonitoringService:
             exit_price=round_price(exit_price),
             exit_reason=exit_reason,
             realized_return=realized_return,
+            final_holding_day_count=final_holding_day_count,
+            final_mfe=final_mfe,
+            final_mae=final_mae,
         )
         self._repo.insert_transaction(
             VirtualTransaction(
