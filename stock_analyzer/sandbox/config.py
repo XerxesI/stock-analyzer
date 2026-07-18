@@ -32,6 +32,10 @@ class SandboxConfig:
     holding_horizon_days: int = 20  # entry day = holding day 1 (see spec section 11)
     max_actionable_candidates: int = 3
     shadow_top_n: int = 10
+    # Provisional data-failure terminal threshold (spec section 11, "Data failure"):
+    # a single missing bar defers, never sells; SELL_DATA_FAILURE only fires once this
+    # many missing-data monitoring days have been recorded for the position's symbol.
+    data_failure_consecutive_missing_days_threshold: int = 5
 
     def config_hash(self) -> str:
         """Deterministic hash of this configuration, stored on every sandbox_runs row
