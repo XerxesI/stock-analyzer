@@ -16,6 +16,7 @@ from stock_analyzer.sandbox.domain.data_quality import DataQualityEvent
 from stock_analyzer.sandbox.domain.entry_order import EntryOrder, EntryOrderAttempt
 from stock_analyzer.sandbox.domain.position import PositionSnapshot, VirtualPosition
 from stock_analyzer.sandbox.domain.recommendation import Recommendation
+from stock_analyzer.sandbox.domain.replay import ReplayMetadata
 from stock_analyzer.sandbox.domain.run import SandboxRun
 from stock_analyzer.sandbox.domain.transaction import VirtualTransaction
 
@@ -35,6 +36,15 @@ def _b(value: int | None) -> bool | None:
 class SandboxRepository:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
+
+    @property
+    def connection(self) -> sqlite3.Connection:
+        """Read-only escape hatch for ad hoc reporting queries (e.g. replay_metrics.py)
+        that would be premature to promote into named repository methods. Application
+        services must not use this for writes -- all writes go through the named
+        methods below so idempotency/append-only guarantees stay centralized."""
+
+        return self._conn
 
     # ---------------------------------------------------------------- runs
     def create_run(self, run: SandboxRun) -> tuple[SandboxRun, bool]:
@@ -669,3 +679,76 @@ class SandboxRepository:
             )
             for r in rows
         ]
+
+    # ------------------------------------------------------- replay metadata
+    def create_replay_metadata(self, replay: ReplayMetadata) -> tuple[ReplayMetadata, bool]:
+        """Idempotent by replay_id: a rerun with the same replay_id returns the
+        existing row (created=False) rather than a second one -- callers must decide
+        whether that means "verify identical" or "refuse to proceed" (EXP-004
+        section 5)."""
+
+        existing = self.get_replay_metadata(replay.replay_id)
+        if existing is not None:
+            return existing, False
+        self._conn.execute(
+            "INSERT INTO replay_metadata "
+            "(replay_id, classification, code_commit_sha, model_version, feature_snapshot_id, "
+            " market_data_snapshot_id, signal_start_date, signal_end_date, outcome_data_end_date, "
+            " configuration_json, configuration_hash, status, started_at, completed_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                replay.replay_id,
+                replay.classification,
+                replay.code_commit_sha,
+                replay.model_version,
+                replay.feature_snapshot_id,
+                replay.market_data_snapshot_id,
+                replay.signal_start_date.isoformat(),
+                replay.signal_end_date.isoformat(),
+                replay.outcome_data_end_date.isoformat(),
+                replay.configuration_json,
+                replay.configuration_hash,
+                replay.status,
+                replay.started_at.isoformat(),
+                replay.completed_at.isoformat() if replay.completed_at else None,
+            ),
+        )
+        self._conn.commit()
+        return replay, True
+
+    def get_replay_metadata(self, replay_id: str) -> ReplayMetadata | None:
+        row = self._conn.execute(
+            "SELECT * FROM replay_metadata WHERE replay_id = ?", (replay_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return ReplayMetadata(
+            replay_id=row["replay_id"],
+            classification=row["classification"],
+            code_commit_sha=row["code_commit_sha"],
+            model_version=row["model_version"],
+            feature_snapshot_id=row["feature_snapshot_id"],
+            market_data_snapshot_id=row["market_data_snapshot_id"],
+            signal_start_date=_d(row["signal_start_date"]),
+            signal_end_date=_d(row["signal_end_date"]),
+            outcome_data_end_date=_d(row["outcome_data_end_date"]),
+            configuration_json=row["configuration_json"],
+            configuration_hash=row["configuration_hash"],
+            status=row["status"],
+            started_at=_dt(row["started_at"]),
+            completed_at=_dt(row["completed_at"]),
+        )
+
+    def complete_replay(self, replay_id: str, completed_at: datetime) -> None:
+        self._conn.execute(
+            "UPDATE replay_metadata SET status='COMPLETED', completed_at=? WHERE replay_id=?",
+            (completed_at.isoformat(), replay_id),
+        )
+        self._conn.commit()
+
+    def fail_replay(self, replay_id: str, completed_at: datetime) -> None:
+        self._conn.execute(
+            "UPDATE replay_metadata SET status='FAILED', completed_at=? WHERE replay_id=?",
+            (completed_at.isoformat(), replay_id),
+        )
+        self._conn.commit()

@@ -184,6 +184,28 @@ CREATE TABLE IF NOT EXISTS schema_meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+-- One row per Historical Sandbox Replay run (see application/replay_service.py and
+-- docs/09_experiments/EXP-004_Sandbox_Historical_Replay.md). Each replay uses its own
+-- isolated database file, so in practice this table has at most one row per DB, but it
+-- is still a real table (not just a filename) so the metadata travels with the data
+-- and a rerun of the same replay_id can be detected and rejected.
+CREATE TABLE IF NOT EXISTS replay_metadata (
+    replay_id TEXT PRIMARY KEY,
+    classification TEXT NOT NULL,
+    code_commit_sha TEXT,
+    model_version TEXT,
+    feature_snapshot_id TEXT,
+    market_data_snapshot_id TEXT,
+    signal_start_date TEXT NOT NULL,
+    signal_end_date TEXT NOT NULL,
+    outcome_data_end_date TEXT NOT NULL,
+    configuration_json TEXT NOT NULL,
+    configuration_hash TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('RUNNING','COMPLETED','FAILED')),
+    started_at TEXT NOT NULL,
+    completed_at TEXT
+);
 """
 
 
