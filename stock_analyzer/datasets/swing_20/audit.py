@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import pickle
+import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pandas as pd
 
@@ -36,35 +39,86 @@ def build_audit_frames(
     price_data: dict[str, pd.DataFrame],
     metadata: dict[str, SymbolMetadata] | None = None,
     config: Swing20Config = Swing20Config(),
+    progress_every: int | None = None,
+    checkpoint_path: Path | None = None,
+    checkpoint_every: int = 200,
 ) -> dict[str, object]:
-    """Build reusable eligibility and label frames from in-memory OHLCV data."""
+    """Build reusable eligibility and label frames from in-memory OHLCV data.
+
+    This loops per symbol computing eligibility, OHLCV quality counts, and
+    labels, which is the CPU-bound step of building a snapshot -- for a large
+    universe it can take much longer than the price fetch itself. If
+    ``progress_every`` is set, progress (symbols done/total, ETA) is printed
+    every that many symbols. If ``checkpoint_path`` is given, per-symbol
+    results are periodically pickled to disk (every ``checkpoint_every``
+    symbols); if that file already exists, already-computed symbols are
+    loaded from it and skipped, so an interrupted run resumes instead of
+    recomputing every symbol from scratch.
+    """
 
     metadata = metadata or {}
-    all_eligibility: list[pd.DataFrame] = []
-    all_labels: list[pd.DataFrame] = []
-    label_quality_counts: list[dict[str, int]] = []
-    price_quality_counts: list[dict[str, int]] = []
+    per_symbol: dict[str, dict[str, object]] = {}
+    remaining_symbols = list(price_data.keys())
 
-    for symbol, df in price_data.items():
+    if checkpoint_path is not None and checkpoint_path.exists():
+        per_symbol = _load_frames_checkpoint(checkpoint_path)
+        already_done = set(per_symbol)
+        remaining_symbols = [symbol for symbol in price_data if symbol not in already_done]
+        print(
+            f"[labels] resuming from checkpoint: {len(already_done)} symbols already done, "
+            f"{len(remaining_symbols)} remaining.",
+            flush=True,
+        )
+
+    total = len(price_data)
+    start_time = time.monotonic()
+    for position, symbol in enumerate(remaining_symbols, start=1):
+        df = price_data[symbol]
         meta = metadata.get(symbol.upper(), SymbolMetadata(symbol=symbol.upper()))
         eligibility = eligibility_frame(symbol, df, config.universe, meta)
-        all_eligibility.append(eligibility)
-        price_quality_counts.append(
-            ohlcv_quality_counts(
-                df,
-                ohlc_absolute_tolerance=config.quality.ohlc_absolute_tolerance,
-                ohlc_relative_tolerance=config.quality.ohlc_relative_tolerance,
-            )
+        price_quality = ohlcv_quality_counts(
+            df,
+            ohlc_absolute_tolerance=config.quality.ohlc_absolute_tolerance,
+            ohlc_relative_tolerance=config.quality.ohlc_relative_tolerance,
         )
 
         labels_result = label_frame(symbol, df, config.label)
-        label_quality_counts.append(labels_result.quality_counts)
         labels = labels_result.labels
         if not labels.empty and not eligibility.empty:
             eligibility_subset = eligibility[["date", "eligible", "exclusion_reason", "history_days", "price", "adv20"]]
             labels = labels.merge(eligibility_subset, on="date", how="left")
             labels = labels[labels["eligible"] == True].copy()  # noqa: E712 - explicit bool compare for pandas
-        all_labels.append(labels)
+
+        per_symbol[symbol] = {
+            "eligibility": eligibility,
+            "labels": labels,
+            "price_quality_counts": price_quality,
+            "label_quality_counts": labels_result.quality_counts,
+        }
+
+        if progress_every and (position % progress_every == 0 or position == len(remaining_symbols)):
+            elapsed = time.monotonic() - start_time
+            rate = position / elapsed if elapsed > 0 else 0
+            remaining = len(remaining_symbols) - position
+            eta = f"{remaining / rate / 60:.1f} min" if rate > 0 else "unknown"
+            print(
+                f"[labels] {len(per_symbol)}/{total} symbols processed -- ETA {eta}",
+                flush=True,
+            )
+
+        if checkpoint_path is not None and position % checkpoint_every == 0:
+            _write_frames_checkpoint(checkpoint_path, per_symbol)
+
+    if checkpoint_path is not None and remaining_symbols:
+        _write_frames_checkpoint(checkpoint_path, per_symbol)
+
+    # Iterate price_data's own order (not per_symbol's insertion order) so the
+    # concatenated row order -- and therefore the written file's bytes/hash --
+    # is the same whether or not this run resumed from a checkpoint.
+    all_eligibility = [per_symbol[symbol]["eligibility"] for symbol in price_data]
+    all_labels = [per_symbol[symbol]["labels"] for symbol in price_data]
+    price_quality_counts = [per_symbol[symbol]["price_quality_counts"] for symbol in price_data]
+    label_quality_counts = [per_symbol[symbol]["label_quality_counts"] for symbol in price_data]
 
     eligibility_frame_all = (
         pd.concat(all_eligibility, ignore_index=True) if all_eligibility else pd.DataFrame()
@@ -76,6 +130,19 @@ def build_audit_frames(
         "labels": labels_all,
         "quality_counts": quality_counts,
     }
+
+
+def _write_frames_checkpoint(checkpoint_path: Path, per_symbol: dict[str, dict[str, object]]) -> None:
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = checkpoint_path.with_suffix(".pkl.tmp")
+    with tmp_path.open("wb") as handle:
+        pickle.dump(per_symbol, handle)
+    tmp_path.replace(checkpoint_path)
+
+
+def _load_frames_checkpoint(checkpoint_path: Path) -> dict[str, dict[str, object]]:
+    with checkpoint_path.open("rb") as handle:
+        return pickle.load(handle)
 
 
 def run_audit_from_frames(

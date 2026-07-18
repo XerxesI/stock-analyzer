@@ -20,11 +20,13 @@ auditable rather than invisible.
 from __future__ import annotations
 
 import hashlib
+import json
 import pickle
 import random
 import subprocess
 import sys
 import time
+from dataclasses import asdict
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import cast
@@ -86,6 +88,9 @@ def prepare_frozen_dataset(
     metadata = _metadata_from_universe(universe)
     requested_symbols = universe["symbol"].tolist()
     checkpoint_path = _checkpoint_path_for(Path(output_dir), requested_symbols, period)
+
+    print(f"[phase 1/2] fetching prices for {len(requested_symbols)} symbols...", flush=True)
+    fetch_start = time.monotonic()
     price_data, failures = _fetch_price_data(
         requested_symbols,
         period=period,
@@ -93,6 +98,14 @@ def prepare_frozen_dataset(
         progress_every=progress_every,
         checkpoint_every=checkpoint_every,
     )
+    print(
+        f"[phase 1/2] fetch complete in {time.monotonic() - fetch_start:.1f}s "
+        f"({len(price_data)} ok, {len(failures)} failed)",
+        flush=True,
+    )
+
+    print("[phase 2/2] building labels/eligibility and writing snapshot...", flush=True)
+    build_start = time.monotonic()
     manifest = write_frozen_dataset(
         price_data=price_data,
         universe=universe,
@@ -104,7 +117,10 @@ def prepare_frozen_dataset(
         config=config,
         failures=failures,
         sample_seed=seed if max_symbols is not None else None,
+        progress_every=progress_every,
+        checkpoint_every=checkpoint_every,
     )
+    print(f"[phase 2/2] snapshot build complete in {time.monotonic() - build_start:.1f}s", flush=True)
     checkpoint_path.unlink(missing_ok=True)
     return manifest
 
@@ -120,6 +136,8 @@ def write_frozen_dataset(
     config: Swing20Config = Swing20Config(),
     failures: dict[str, str] | None = None,
     sample_seed: int | None = None,
+    progress_every: int = 50,
+    checkpoint_every: int = 200,
 ) -> dict[str, object]:
     """Write a new, versioned SWING_20 snapshot from already loaded price data.
 
@@ -146,8 +164,25 @@ def write_frozen_dataset(
     for symbol in cutoff_emptied_symbols:
         failures.setdefault(symbol, "EMPTY_AFTER_CURRENT_DAY_CUTOFF")
     effective_end_date = _max_price_date(price_data)
+    if cutoff_removed_rows:
+        print(
+            f"[build] current-day cutoff removed {cutoff_removed_rows} row(s) across "
+            f"{len(cutoff_affected_symbols)} symbol(s) (effective end date {effective_end_date}).",
+            flush=True,
+        )
 
-    frames = build_audit_frames(price_data, metadata=metadata, config=config)
+    frames_checkpoint_path = _frames_checkpoint_path_for(root_dir, list(price_data.keys()), config)
+    print(f"[build] computing labels/eligibility for {len(price_data)} symbols...", flush=True)
+    labels_start = time.monotonic()
+    frames = build_audit_frames(
+        price_data,
+        metadata=metadata,
+        config=config,
+        progress_every=progress_every,
+        checkpoint_path=frames_checkpoint_path,
+        checkpoint_every=checkpoint_every,
+    )
+    print(f"[build] labels/eligibility done in {time.monotonic() - labels_start:.1f}s", flush=True)
 
     generated_at = datetime.now(timezone.utc).replace(microsecond=0)
     base_version = generated_at.strftime("swing20_%Y%m%dT%H%M%SZ")
@@ -160,6 +195,8 @@ def write_frozen_dataset(
     failures_path = artifact_path(snapshot_dir, "failures", storage_format)
     manifest_path = snapshot_dir / "manifest.json"
 
+    print(f"[build] writing artifacts to {snapshot_dir}...", flush=True)
+    write_start = time.monotonic()
     prices = _price_data_to_frame(price_data)
     labels = frames["labels"]
     eligibility = frames["eligibility"]
@@ -170,6 +207,7 @@ def write_frozen_dataset(
     write_frame(labels, labels_path, storage_format)
     write_frame(eligibility, eligibility_path, storage_format)
     write_frame(failures_frame, failures_path, storage_format)
+    print(f"[build] artifacts written in {time.monotonic() - write_start:.1f}s", flush=True)
 
     artifact_paths = {
         "universe": universe_path,
@@ -178,7 +216,10 @@ def write_frozen_dataset(
         "eligibility": eligibility_path,
         "failures": failures_path,
     }
+    print("[build] computing SHA-256 hashes...", flush=True)
+    hash_start = time.monotonic()
     artifact_hashes = {name: file_sha256(path) for name, path in artifact_paths.items()}
+    print(f"[build] hashing done in {time.monotonic() - hash_start:.1f}s", flush=True)
 
     price_symbols = {str(price_symbol).upper() for price_symbol in price_data}
     requested_symbols = [str(symbol).upper() for symbol in universe["symbol"].tolist()]
@@ -220,6 +261,7 @@ def write_frozen_dataset(
     write_manifest(manifest, manifest_path)
     manifest["manifest"] = str(manifest_path)
     manifest["snapshot_dir"] = str(snapshot_dir)
+    frames_checkpoint_path.unlink(missing_ok=True)
     return manifest
 
 
@@ -501,6 +543,20 @@ def _checkpoint_path_for(output_dir: Path, symbols: list[str], period: str) -> P
 
     fingerprint = hashlib.sha256(("|".join(sorted(symbols)) + "|" + period).encode("utf-8")).hexdigest()[:16]
     return output_dir / "_checkpoints" / f"fetch_{fingerprint}.pkl"
+
+
+def _frames_checkpoint_path_for(output_dir: Path, symbols: list[str], config: Swing20Config) -> Path:
+    """Return a stable checkpoint path fingerprinted by symbols and label/eligibility config.
+
+    Unlike the raw price fetch, computed eligibility/labels depend on
+    ``config`` (thresholds, target definition, tolerances). Fingerprinting on
+    a canonical dump of the config too means a checkpoint from a prior run
+    with different settings is never mistakenly reused.
+    """
+
+    config_key = json.dumps(asdict(config), sort_keys=True, default=str)
+    fingerprint = hashlib.sha256(("|".join(sorted(symbols)) + "|" + config_key).encode("utf-8")).hexdigest()[:16]
+    return output_dir / "_checkpoints" / f"frames_{fingerprint}.pkl"
 
 
 def _write_checkpoint(
