@@ -5,7 +5,7 @@ top-3, per MVP 2 spec sections 6-8.
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -34,6 +34,11 @@ ALREADY_PENDING_CANDIDATE = "ALREADY_PENDING_CANDIDATE"
 MISSING_MARKET_DATA = "MISSING_MARKET_DATA"
 INVALID_PRICE = "INVALID_PRICE"
 MISSING_ATR = "MISSING_ATR"
+# Not a data-quality issue -- the candidate was individually clean but ranked below
+# the max_actionable_candidates cutoff. Distinct from the other reasons so the
+# attribution funnel (reporting/replay_metrics.py) can separate "ranking put it
+# outside the top-3" from "we couldn't act on it even though it was top-3."
+RANK_LIMIT_EXCEEDED = "RANK_LIMIT_EXCEEDED"
 
 
 def compute_max_entry_price(signal_close: float | None, atr14: float | None, config: SandboxConfig) -> float | None:
@@ -97,6 +102,15 @@ class CandidateService:
         self._config = config or SandboxConfig()
 
     def generate_candidates(self, as_of_date: date) -> CandidateGenerationResult:
+        """Build all 10 shadow candidates and decide the final selection in memory
+        BEFORE persisting anything, so the `actionable` flag on every stored
+        ranked_candidates row reflects the actual selection outcome (one of the <=3
+        chosen symbols, not just per-symbol data quality) -- and entry orders (whose
+        candidate_id is a real foreign key) are only created after their candidate
+        row exists. ranked_candidates stays append-only (ADR-006): each row is
+        inserted exactly once, already carrying its final value -- never inserted
+        early and mutated later."""
+
         run_id = SandboxRun.make_id(as_of_date, "generate-candidates")
         run = SandboxRun(
             run_id=run_id,
@@ -120,23 +134,37 @@ class CandidateService:
         adv_edges = self._adapter.fit_params["adv_edges"]
         adv_labels = self._adapter.fit_params["adv_labels"]
 
-        shadow_candidates: list[RankedCandidate] = []
+        # Phase 1: build a data-quality-checked draft for every shadow symbol. Not
+        # persisted yet -- `actionable`/`exclusion_reason` here reflect only whether
+        # THIS symbol individually has usable price/ATR data, not the top-3 selection.
+        drafts: list[RankedCandidate] = []
         for rank, symbol in enumerate(shadow_symbols, start=1):
             feature_row = features_df.loc[symbol]
             log_adv20 = np.log(max(float(feature_row.get("adv20", 1.0)), 1.0))
             adv_quintile = _apply_quantile_bucket(pd.Series([log_adv20]), adv_edges, adv_labels).iloc[0]
-            candidate = self._build_candidate(
-                run_id, as_of_date, symbol, rank, float(ranked_symbols[symbol]), feature_row, adv_quintile
+            drafts.append(
+                self._build_candidate_draft(
+                    run_id, as_of_date, symbol, rank, float(ranked_symbols[symbol]), feature_row, adv_quintile
+                )
             )
-            self._repo.insert_ranked_candidate(candidate)
-            shadow_candidates.append(candidate)
 
-        actionable, orders = self._select_actionable(run_id, as_of_date, shadow_candidates)
+        # Phase 2: decide the final selection (rank-limit cap, already-open/pending
+        # exclusion), still in memory -- no orders yet, since entry_orders.candidate_id
+        # has a foreign key into ranked_candidates and no candidate row exists yet.
+        final_candidates, actionable = self._decide_selection(drafts)
+
+        # Phase 3: persist every shadow row exactly once, with its final values.
+        for candidate in final_candidates:
+            self._repo.insert_ranked_candidate(candidate)
+
+        # Phase 4: now that the candidate rows exist, create entry orders (and
+        # BUY_PENDING recommendations) for the selected symbols only.
+        orders = [self._create_entry_order(as_of_date, candidate) for candidate in actionable]
 
         self._repo.complete_run(run_id, datetime.now(timezone.utc))
-        return CandidateGenerationResult(run_id, as_of_date, shadow_candidates, actionable, orders)
+        return CandidateGenerationResult(run_id, as_of_date, final_candidates, actionable, orders)
 
-    def _build_candidate(
+    def _build_candidate_draft(
         self,
         run_id: str,
         as_of_date: date,
@@ -186,76 +214,81 @@ class CandidateService:
             else None,
         )
 
-    def _select_actionable(
-        self, run_id: str, as_of_date: date, shadow_candidates: list[RankedCandidate]
-    ) -> tuple[list[RankedCandidate], list[EntryOrder]]:
+    def _decide_selection(self, drafts: list[RankedCandidate]) -> tuple[list[RankedCandidate], list[RankedCandidate]]:
+        """Decides the final actionable/exclusion_reason for every draft, in rank
+        order, entirely in memory -- no entry orders are created here (their
+        candidate_id foreign key requires the candidate row to already be persisted,
+        which only happens after this returns). Returns (all 10 finalized
+        candidates, the selected <=3 actionable ones)."""
+
+        final_candidates: list[RankedCandidate] = []
         actionable: list[RankedCandidate] = []
-        orders: list[EntryOrder] = []
 
-        for candidate in shadow_candidates:
+        for draft in drafts:
+            if draft.exclusion_reason is not None:
+                # Data-quality exclusion decided in phase 1 -- final as-is.
+                final_candidates.append(draft)
+                continue
             if len(actionable) >= self._config.max_actionable_candidates:
-                break
-            if candidate.exclusion_reason is not None:
+                final_candidates.append(replace(draft, actionable=False, exclusion_reason=RANK_LIMIT_EXCEEDED))
                 continue
-            if self._repo.has_open_position_for_symbol(candidate.symbol):
-                self._mark_excluded(candidate, ALREADY_OPEN_POSITION)
+            if self._repo.has_open_position_for_symbol(draft.symbol):
+                final_candidates.append(self._finalize_excluded(draft, ALREADY_OPEN_POSITION))
                 continue
-            if self._repo.has_pending_order_for_symbol(candidate.symbol):
-                self._mark_excluded(candidate, ALREADY_PENDING_CANDIDATE)
+            if self._repo.has_pending_order_for_symbol(draft.symbol):
+                final_candidates.append(self._finalize_excluded(draft, ALREADY_PENDING_CANDIDATE))
                 continue
 
-            actionable.append(candidate)
-            valid_until = add_trading_sessions(as_of_date, self._config.entry_validity_sessions)
-            order = EntryOrder(
-                order_id=EntryOrder.make_id(candidate.candidate_id),
-                candidate_id=candidate.candidate_id,
-                symbol=candidate.symbol,
-                signal_date=as_of_date,
-                created_date=as_of_date,
-                valid_until=valid_until,
-                max_entry_price=candidate.max_entry_price,
-                status=ORDER_PENDING,
-            )
-            order, _created = self._repo.create_entry_order(order)
-            orders.append(order)
+            final_candidates.append(draft)
+            actionable.append(draft)
 
-            self._repo.insert_recommendation(
-                Recommendation(
-                    recommendation_id=Recommendation.make_id(ENTITY_CANDIDATE, candidate.candidate_id, as_of_date),
-                    entity_type=ENTITY_CANDIDATE,
-                    entity_id=candidate.candidate_id,
-                    symbol=candidate.symbol,
-                    as_of_date=as_of_date,
-                    recommendation=BUY_PENDING,
-                    reason=f"rank={candidate.daily_rank} model_score={candidate.model_score:.4f}",
-                )
-            )
+        return final_candidates, actionable
 
-        return actionable, orders
-
-    def _mark_excluded(self, candidate: RankedCandidate, reason: str) -> None:
-        # ranked_candidates rows are append-only and already persisted with
-        # actionable=True/exclusion_reason=None at this point (they only fail the
-        # ALREADY_OPEN/ALREADY_PENDING checks, which require repository state not
-        # known until selection time) -- record the real outcome as a recommendation
-        # instead of mutating the immutable candidate row.
+    def _finalize_excluded(self, draft: RankedCandidate, reason: str) -> RankedCandidate:
         # The frozen recommendation vocabulary (spec section 11) has one bucket,
         # SKIP_ALREADY_OPEN, covering both "already has an OPEN position" and
         # "already has a pending candidate" -- both mean "already committed to this
-        # symbol," distinct from a data-quality skip.
-        recommendation = (
-            "SKIP_ALREADY_OPEN"
-            if reason in (ALREADY_OPEN_POSITION, ALREADY_PENDING_CANDIDATE)
-            else "SKIP_DATA_QUALITY"
-        )
+        # symbol," distinct from a data-quality skip. recommendations.entity_id has
+        # no foreign key, so this insert is safe before the candidate row exists.
         self._repo.insert_recommendation(
             Recommendation(
-                recommendation_id=Recommendation.make_id(ENTITY_CANDIDATE, candidate.candidate_id, candidate.as_of_date),
+                recommendation_id=Recommendation.make_id(ENTITY_CANDIDATE, draft.candidate_id, draft.as_of_date),
                 entity_type=ENTITY_CANDIDATE,
-                entity_id=candidate.candidate_id,
-                symbol=candidate.symbol,
-                as_of_date=candidate.as_of_date,
-                recommendation=recommendation,
+                entity_id=draft.candidate_id,
+                symbol=draft.symbol,
+                as_of_date=draft.as_of_date,
+                recommendation="SKIP_ALREADY_OPEN",
                 reason=reason,
             )
         )
+        return replace(draft, actionable=False, exclusion_reason=reason)
+
+    def _create_entry_order(self, as_of_date: date, candidate: RankedCandidate) -> EntryOrder:
+        """Called only after `candidate` has already been persisted (its candidate_id
+        is entry_orders' foreign key target)."""
+
+        valid_until = add_trading_sessions(as_of_date, self._config.entry_validity_sessions)
+        order = EntryOrder(
+            order_id=EntryOrder.make_id(candidate.candidate_id),
+            candidate_id=candidate.candidate_id,
+            symbol=candidate.symbol,
+            signal_date=as_of_date,
+            created_date=as_of_date,
+            valid_until=valid_until,
+            max_entry_price=candidate.max_entry_price,
+            status=ORDER_PENDING,
+        )
+        order, _created = self._repo.create_entry_order(order)
+
+        self._repo.insert_recommendation(
+            Recommendation(
+                recommendation_id=Recommendation.make_id(ENTITY_CANDIDATE, candidate.candidate_id, as_of_date),
+                entity_type=ENTITY_CANDIDATE,
+                entity_id=candidate.candidate_id,
+                symbol=candidate.symbol,
+                as_of_date=as_of_date,
+                recommendation=BUY_PENDING,
+                reason=f"rank={candidate.daily_rank} model_score={candidate.model_score:.4f}",
+            )
+        )
+        return order

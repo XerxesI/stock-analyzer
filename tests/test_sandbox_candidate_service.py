@@ -161,6 +161,30 @@ def test_only_top_n_actionable_selected_in_rank_order(repo: SandboxRepository, m
     assert len(result.entry_orders) == 3
 
 
+def test_persisted_actionable_flag_matches_true_selection_not_just_data_quality(repo: SandboxRepository, monkeypatch):
+    # Regression test: an earlier version persisted `actionable=True` for every
+    # data-quality-clean shadow candidate (ranks 1-10), not just the <=3 actually
+    # selected -- this corrupted downstream reporting/funnel metrics that read
+    # ranked_candidates.actionable directly. Ranks 4-10 (all data-quality clean) must
+    # be persisted as actionable=False with exclusion_reason=RANK_LIMIT_EXCEEDED.
+    as_of = date(2026, 6, 15)
+    symbols = [f"SYM{i}" for i in range(10)]
+    scores = {sym: float(len(symbols) - i) for i, sym in enumerate(symbols)}
+    service = _make_service(repo, as_of, symbols, scores, monkeypatch)
+
+    service.generate_candidates(as_of)
+
+    persisted = repo.get_candidates_for_date(as_of)
+    assert len(persisted) == 10
+    actionable_persisted = [c for c in persisted if c.actionable]
+    assert len(actionable_persisted) == 3
+    assert {c.symbol for c in actionable_persisted} == {"SYM0", "SYM1", "SYM2"}
+    not_selected = [c for c in persisted if c.daily_rank > 3]
+    assert len(not_selected) == 7
+    assert all(c.actionable is False for c in not_selected)
+    assert all(c.exclusion_reason == "RANK_LIMIT_EXCEEDED" for c in not_selected)
+
+
 def test_already_open_symbol_is_excluded_from_actionable(repo: SandboxRepository, monkeypatch):
     as_of = date(2026, 6, 15)
     symbols = [f"SYM{i}" for i in range(5)]
