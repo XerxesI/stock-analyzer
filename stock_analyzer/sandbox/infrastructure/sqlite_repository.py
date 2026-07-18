@@ -613,3 +613,59 @@ class SandboxRepository:
             )
             for r in rows
         ]
+
+    # ------------------------------------------------------- reporting queries
+    def get_orders_created_on(self, as_of_date: date) -> list[EntryOrder]:
+        rows = self._conn.execute(
+            "SELECT * FROM entry_orders WHERE created_date = ?", (as_of_date.isoformat(),)
+        ).fetchall()
+        return [self._row_to_order(r) for r in rows]
+
+    def get_orders_filled_on(self, as_of_date: date) -> list[EntryOrder]:
+        rows = self._conn.execute(
+            "SELECT * FROM entry_orders WHERE fill_date = ? AND status = 'FILLED'", (as_of_date.isoformat(),)
+        ).fetchall()
+        return [self._row_to_order(r) for r in rows]
+
+    def get_orders_expired_or_skipped_on(self, as_of_date: date) -> list[EntryOrder]:
+        rows = self._conn.execute(
+            "SELECT eo.* FROM entry_orders eo "
+            "JOIN entry_order_attempts a ON a.order_id = eo.order_id "
+            "WHERE a.attempt_date = ? AND eo.status IN ('EXPIRED','SKIPPED')",
+            (as_of_date.isoformat(),),
+        ).fetchall()
+        return [self._row_to_order(r) for r in rows]
+
+    def get_positions_closed_on(self, as_of_date: date) -> list[VirtualPosition]:
+        rows = self._conn.execute(
+            "SELECT * FROM virtual_positions WHERE exit_date = ? AND status = 'CLOSED'", (as_of_date.isoformat(),)
+        ).fetchall()
+        return [self._row_to_position(r) for r in rows]
+
+    def get_snapshots_for_date(self, as_of_date: date) -> list[PositionSnapshot]:
+        rows = self._conn.execute(
+            "SELECT * FROM position_snapshots WHERE as_of_date = ?", (as_of_date.isoformat(),)
+        ).fetchall()
+        return [
+            PositionSnapshot(
+                snapshot_id=r["snapshot_id"],
+                position_id=r["position_id"],
+                symbol=r["symbol"],
+                as_of_date=_d(r["as_of_date"]),
+                close_price=r["close_price"],
+                daily_return=r["daily_return"],
+                cumulative_unrealized_return=r["cumulative_unrealized_return"],
+                holding_day_count=r["holding_day_count"],
+                mfe=r["mfe"],
+                mae=r["mae"],
+                distance_to_target=r["distance_to_target"],
+                current_rank=r["current_rank"],
+                current_model_score=r["current_model_score"],
+                rank_change_from_entry=r["rank_change_from_entry"],
+                current_adv_quintile=r["current_adv_quintile"],
+                current_market_regime=r["current_market_regime"],
+                data_quality_status=r["data_quality_status"],
+                recommendation=r["recommendation"],
+            )
+            for r in rows
+        ]
