@@ -27,6 +27,7 @@ from stock_analyzer.sandbox.domain.run import SandboxRun
 from stock_analyzer.sandbox.infrastructure.market_data_adapter import fetch_as_of, latest_close
 from stock_analyzer.sandbox.infrastructure.model2_prediction_adapter import Model2PredictionAdapter
 from stock_analyzer.sandbox.infrastructure.sqlite_repository import SandboxRepository
+from stock_analyzer.sandbox.infrastructure.trading_days import add_trading_sessions
 
 ALREADY_OPEN_POSITION = "ALREADY_OPEN_POSITION"
 ALREADY_PENDING_CANDIDATE = "ALREADY_PENDING_CANDIDATE"
@@ -204,7 +205,7 @@ class CandidateService:
                 continue
 
             actionable.append(candidate)
-            valid_until = _add_trading_sessions(as_of_date, self._config.entry_validity_sessions)
+            valid_until = add_trading_sessions(as_of_date, self._config.entry_validity_sessions)
             order = EntryOrder(
                 order_id=EntryOrder.make_id(candidate.candidate_id),
                 candidate_id=candidate.candidate_id,
@@ -258,19 +259,3 @@ class CandidateService:
                 reason=reason,
             )
         )
-
-
-def _add_trading_sessions(start: date, sessions: int) -> date:
-    """Naive calendar-day trading-session approximation for order validity windows
-    (weekends skipped; US market holidays not modeled in MVP 2). Sufficient for the
-    entry-order validity window, which only needs to bound how long an order stays
-    pending -- not to be confused with the point-in-time OHLC execution logic in
-    entry_service.py, which uses only real fetched trading-day bars."""
-
-    current = start
-    remaining = sessions
-    while remaining > 0:
-        current = date.fromordinal(current.toordinal() + 1)
-        if current.weekday() < 5:
-            remaining -= 1
-    return current
