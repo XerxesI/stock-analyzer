@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pickle
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -35,6 +36,40 @@ def run_audit(
     )
 
 
+def _compute_symbol_frames(
+    symbol: str,
+    df: pd.DataFrame,
+    meta: SymbolMetadata,
+    config: Swing20Config,
+) -> tuple[str, dict[str, object]]:
+    """Compute one symbol's eligibility/label/quality result.
+
+    Kept as a module-level function (not a closure) so it can be pickled and
+    sent to worker processes by :func:`build_audit_frames` when ``workers>1``.
+    """
+
+    eligibility = eligibility_frame(symbol, df, config.universe, meta)
+    price_quality = ohlcv_quality_counts(
+        df,
+        ohlc_absolute_tolerance=config.quality.ohlc_absolute_tolerance,
+        ohlc_relative_tolerance=config.quality.ohlc_relative_tolerance,
+    )
+
+    labels_result = label_frame(symbol, df, config.label)
+    labels = labels_result.labels
+    if not labels.empty and not eligibility.empty:
+        eligibility_subset = eligibility[["date", "eligible", "exclusion_reason", "history_days", "price", "adv20"]]
+        labels = labels.merge(eligibility_subset, on="date", how="left")
+        labels = labels[labels["eligible"] == True].copy()  # noqa: E712 - explicit bool compare for pandas
+
+    return symbol, {
+        "eligibility": eligibility,
+        "labels": labels,
+        "price_quality_counts": price_quality,
+        "label_quality_counts": labels_result.quality_counts,
+    }
+
+
 def build_audit_frames(
     price_data: dict[str, pd.DataFrame],
     metadata: dict[str, SymbolMetadata] | None = None,
@@ -42,12 +77,17 @@ def build_audit_frames(
     progress_every: int | None = None,
     checkpoint_path: Path | None = None,
     checkpoint_every: int = 200,
+    workers: int = 1,
 ) -> dict[str, object]:
     """Build reusable eligibility and label frames from in-memory OHLCV data.
 
-    This loops per symbol computing eligibility, OHLCV quality counts, and
-    labels, which is the CPU-bound step of building a snapshot -- for a large
-    universe it can take much longer than the price fetch itself. If
+    This computes eligibility, OHLCV quality counts, and labels per symbol,
+    which is the CPU-bound step of building a snapshot -- for a large universe
+    it can take much longer than the price fetch itself, since each symbol
+    involves a Python-level loop over its trading history. Symbols are fully
+    independent, so ``workers>1`` fans the work out across a
+    :class:`~concurrent.futures.ProcessPoolExecutor` (threads would not help:
+    this is CPU-bound pure-Python work serialized by the GIL). If
     ``progress_every`` is set, progress (symbols done/total, ETA) is printed
     every that many symbols. If ``checkpoint_path`` is given, per-symbol
     results are periodically pickled to disk (every ``checkpoint_every``
@@ -71,50 +111,53 @@ def build_audit_frames(
         )
 
     total = len(price_data)
+    total_remaining = len(remaining_symbols)
     start_time = time.monotonic()
-    for position, symbol in enumerate(remaining_symbols, start=1):
-        df = price_data[symbol]
-        meta = metadata.get(symbol.upper(), SymbolMetadata(symbol=symbol.upper()))
-        eligibility = eligibility_frame(symbol, df, config.universe, meta)
-        price_quality = ohlcv_quality_counts(
-            df,
-            ohlc_absolute_tolerance=config.quality.ohlc_absolute_tolerance,
-            ohlc_relative_tolerance=config.quality.ohlc_relative_tolerance,
-        )
 
-        labels_result = label_frame(symbol, df, config.label)
-        labels = labels_result.labels
-        if not labels.empty and not eligibility.empty:
-            eligibility_subset = eligibility[["date", "eligible", "exclusion_reason", "history_days", "price", "adv20"]]
-            labels = labels.merge(eligibility_subset, on="date", how="left")
-            labels = labels[labels["eligible"] == True].copy()  # noqa: E712 - explicit bool compare for pandas
-
-        per_symbol[symbol] = {
-            "eligibility": eligibility,
-            "labels": labels,
-            "price_quality_counts": price_quality,
-            "label_quality_counts": labels_result.quality_counts,
-        }
-
-        if progress_every and (position % progress_every == 0 or position == len(remaining_symbols)):
+    def _report_and_checkpoint(position: int) -> None:
+        if progress_every and (position % progress_every == 0 or position == total_remaining):
             elapsed = time.monotonic() - start_time
             rate = position / elapsed if elapsed > 0 else 0
-            remaining = len(remaining_symbols) - position
+            remaining = total_remaining - position
             eta = f"{remaining / rate / 60:.1f} min" if rate > 0 else "unknown"
             print(
                 f"[labels] {len(per_symbol)}/{total} symbols processed -- ETA {eta}",
                 flush=True,
             )
-
         if checkpoint_path is not None and position % checkpoint_every == 0:
             _write_frames_checkpoint(checkpoint_path, per_symbol)
+
+    if workers > 1 and remaining_symbols:
+        print(f"[labels] using {workers} worker processes...", flush=True)
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(
+                    _compute_symbol_frames,
+                    symbol,
+                    price_data[symbol],
+                    metadata.get(symbol.upper(), SymbolMetadata(symbol=symbol.upper())),
+                    config,
+                ): symbol
+                for symbol in remaining_symbols
+            }
+            for position, future in enumerate(as_completed(futures), start=1):
+                symbol, result = future.result()
+                per_symbol[symbol] = result
+                _report_and_checkpoint(position)
+    else:
+        for position, symbol in enumerate(remaining_symbols, start=1):
+            meta = metadata.get(symbol.upper(), SymbolMetadata(symbol=symbol.upper()))
+            _, result = _compute_symbol_frames(symbol, price_data[symbol], meta, config)
+            per_symbol[symbol] = result
+            _report_and_checkpoint(position)
 
     if checkpoint_path is not None and remaining_symbols:
         _write_frames_checkpoint(checkpoint_path, per_symbol)
 
-    # Iterate price_data's own order (not per_symbol's insertion order) so the
-    # concatenated row order -- and therefore the written file's bytes/hash --
-    # is the same whether or not this run resumed from a checkpoint.
+    # Iterate price_data's own order (not per_symbol's insertion/completion
+    # order, which is non-deterministic with workers>1) so the concatenated
+    # row order -- and therefore the written file's bytes/hash -- is the same
+    # regardless of resume or worker count.
     all_eligibility = [per_symbol[symbol]["eligibility"] for symbol in price_data]
     all_labels = [per_symbol[symbol]["labels"] for symbol in price_data]
     price_quality_counts = [per_symbol[symbol]["price_quality_counts"] for symbol in price_data]

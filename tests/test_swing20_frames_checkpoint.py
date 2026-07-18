@@ -86,6 +86,23 @@ def test_resumed_result_matches_single_pass_result(tmp_path):
     assert single_pass["quality_counts"] == resumed["quality_counts"]
 
 
+def test_parallel_workers_produce_identical_result_to_sequential():
+    price_data = _price_data(["AAA", "BBB", "CCC", "DDD", "EEE", "FFF"])
+
+    sequential = build_audit_frames(price_data, workers=1)
+    parallel = build_audit_frames(price_data, workers=3)
+
+    pd.testing.assert_frame_equal(
+        sequential["eligibility"].reset_index(drop=True),
+        parallel["eligibility"].reset_index(drop=True),
+    )
+    pd.testing.assert_frame_equal(
+        sequential["labels"].reset_index(drop=True),
+        parallel["labels"].reset_index(drop=True),
+    )
+    assert sequential["quality_counts"] == parallel["quality_counts"]
+
+
 def test_frames_checkpoint_path_is_fingerprinted_by_config(tmp_path):
     symbols = ["AAA", "BBB"]
     default_config = Swing20Config()

@@ -71,6 +71,7 @@ def prepare_frozen_dataset(
     seed: int = DEFAULT_SAMPLE_SEED,
     progress_every: int = 50,
     checkpoint_every: int = 200,
+    workers: int = 1,
 ) -> dict[str, object]:
     """Build a new frozen universe, price, label, and manifest snapshot.
 
@@ -119,6 +120,7 @@ def prepare_frozen_dataset(
         sample_seed=seed if max_symbols is not None else None,
         progress_every=progress_every,
         checkpoint_every=checkpoint_every,
+        workers=workers,
     )
     print(f"[phase 2/2] snapshot build complete in {time.monotonic() - build_start:.1f}s", flush=True)
     checkpoint_path.unlink(missing_ok=True)
@@ -138,6 +140,7 @@ def write_frozen_dataset(
     sample_seed: int | None = None,
     progress_every: int = 50,
     checkpoint_every: int = 200,
+    workers: int = 1,
 ) -> dict[str, object]:
     """Write a new, versioned SWING_20 snapshot from already loaded price data.
 
@@ -181,6 +184,7 @@ def write_frozen_dataset(
         progress_every=progress_every,
         checkpoint_path=frames_checkpoint_path,
         checkpoint_every=checkpoint_every,
+        workers=workers,
     )
     print(f"[build] labels/eligibility done in {time.monotonic() - labels_start:.1f}s", flush=True)
 

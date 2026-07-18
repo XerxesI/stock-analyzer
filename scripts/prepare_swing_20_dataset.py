@@ -63,6 +63,15 @@ def parse_args() -> argparse.Namespace:
         help="Checkpoint the in-progress fetch to disk every N symbols, so an "
         "interrupted run can resume instead of re-fetching everything (default: 200).",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Worker processes for the labels/eligibility build step (default: 1, "
+        "sequential). That step is CPU-bound pure-Python work independent per "
+        "symbol, so raising this on a large universe run can give a near-linear "
+        "speedup up to the machine's core count.",
+    )
     return parser.parse_args()
 
 
@@ -79,6 +88,7 @@ def main() -> None:
         seed=args.seed,
         progress_every=args.progress_every,
         checkpoint_every=args.checkpoint_every,
+        workers=args.workers,
     )
 
     print(json.dumps(
