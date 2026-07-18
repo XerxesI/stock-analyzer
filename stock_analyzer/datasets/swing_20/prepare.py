@@ -19,9 +19,12 @@ auditable rather than invisible.
 
 from __future__ import annotations
 
+import hashlib
+import pickle
 import random
 import subprocess
 import sys
+import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import cast
@@ -64,15 +67,33 @@ def prepare_frozen_dataset(
     config: Swing20Config = Swing20Config(),
     max_symbols: int | None = None,
     seed: int = DEFAULT_SAMPLE_SEED,
+    progress_every: int = 50,
+    checkpoint_every: int = 200,
 ) -> dict[str, object]:
-    """Build a new frozen universe, price, label, and manifest snapshot."""
+    """Build a new frozen universe, price, label, and manifest snapshot.
+
+    Fetching can take hours for the full US universe, so progress is logged
+    every ``progress_every`` symbols and the in-progress fetch is checkpointed
+    to disk every ``checkpoint_every`` symbols. If the process is interrupted
+    or crashes mid-fetch, re-running with the same symbols/period resumes from
+    the last checkpoint instead of re-fetching everything from scratch. The
+    checkpoint is deleted once the snapshot has been written successfully.
+    """
 
     universe = _resolve_universe(
         symbols=symbols, universe_source=universe_source, max_symbols=max_symbols, seed=seed
     )
     metadata = _metadata_from_universe(universe)
-    price_data, failures = _fetch_price_data(universe["symbol"].tolist(), period=period)
-    return write_frozen_dataset(
+    requested_symbols = universe["symbol"].tolist()
+    checkpoint_path = _checkpoint_path_for(Path(output_dir), requested_symbols, period)
+    price_data, failures = _fetch_price_data(
+        requested_symbols,
+        period=period,
+        checkpoint_path=checkpoint_path,
+        progress_every=progress_every,
+        checkpoint_every=checkpoint_every,
+    )
+    manifest = write_frozen_dataset(
         price_data=price_data,
         universe=universe,
         metadata=metadata,
@@ -84,6 +105,8 @@ def prepare_frozen_dataset(
         failures=failures,
         sample_seed=seed if max_symbols is not None else None,
     )
+    checkpoint_path.unlink(missing_ok=True)
+    return manifest
 
 
 def write_frozen_dataset(
@@ -401,28 +424,101 @@ def _metadata_from_universe(universe: pd.DataFrame) -> dict[str, SymbolMetadata]
 
 
 def _fetch_price_data(
-    symbols: list[str], period: str
+    symbols: list[str],
+    period: str,
+    checkpoint_path: Path | None = None,
+    progress_every: int = 50,
+    checkpoint_every: int = 200,
 ) -> tuple[dict[str, pd.DataFrame], dict[str, str]]:
     """Fetch OHLCV data per symbol, recording (not discarding) any failure.
 
     Every symbol that does not end up with usable price data gets an entry
     in the returned failures mapping describing why, so download coverage
     gaps are traceable in the frozen snapshot instead of silently vanishing.
+
+    A large universe can take hours to fetch one symbol at a time. Progress
+    (symbols done / total, ok vs. failed, ETA) is printed every
+    ``progress_every`` symbols. If ``checkpoint_path`` is given, accumulated
+    results are pickled to disk every ``checkpoint_every`` symbols; if that
+    file already exists when this is called, already-fetched/failed symbols
+    are loaded from it and skipped, so an interrupted run resumes instead of
+    starting over.
     """
 
     price_data: dict[str, pd.DataFrame] = {}
     failures: dict[str, str] = {}
-    for symbol in symbols:
+    if checkpoint_path is not None and checkpoint_path.exists():
+        price_data, failures = _load_checkpoint(checkpoint_path)
+        already_done = set(price_data) | set(failures)
+        symbols = [symbol for symbol in symbols if symbol not in already_done]
+        print(
+            f"[fetch] resuming from checkpoint: {len(already_done)} symbols already done, "
+            f"{len(symbols)} remaining.",
+            flush=True,
+        )
+
+    total = len(price_data) + len(failures) + len(symbols)
+    start_time = time.monotonic()
+    for position, symbol in enumerate(symbols, start=1):
         try:
             df = get_stock_data(symbol, period)
         except Exception as exc:  # noqa: BLE001 - every failure reason must be recorded, never swallowed
             failures[symbol] = f"{type(exc).__name__}: {exc}"
-            continue
-        if df is None or df.empty:
-            failures[symbol] = "EMPTY_OR_MISSING_DATA"
-            continue
-        price_data[symbol] = df
+        else:
+            if df is None or df.empty:
+                failures[symbol] = "EMPTY_OR_MISSING_DATA"
+            else:
+                price_data[symbol] = df
+
+        if position % progress_every == 0 or position == len(symbols):
+            done = len(price_data) + len(failures)
+            elapsed = time.monotonic() - start_time
+            rate = position / elapsed if elapsed > 0 else 0
+            remaining = len(symbols) - position
+            eta = f"{remaining / rate / 60:.1f} min" if rate > 0 else "unknown"
+            print(
+                f"[fetch] {done}/{total} symbols processed "
+                f"({len(price_data)} ok, {len(failures)} failed) -- ETA {eta}",
+                flush=True,
+            )
+
+        if checkpoint_path is not None and position % checkpoint_every == 0:
+            _write_checkpoint(checkpoint_path, price_data, failures)
+
+    if checkpoint_path is not None and symbols:
+        _write_checkpoint(checkpoint_path, price_data, failures)
+
     return price_data, failures
+
+
+def _checkpoint_path_for(output_dir: Path, symbols: list[str], period: str) -> Path:
+    """Return a stable checkpoint path fingerprinted by the exact fetch request.
+
+    Fingerprinting on the resolved symbol list and period (rather than a fixed
+    filename) means a checkpoint from a different universe/sample/period is
+    never mistakenly resumed from.
+    """
+
+    fingerprint = hashlib.sha256(("|".join(sorted(symbols)) + "|" + period).encode("utf-8")).hexdigest()[:16]
+    return output_dir / "_checkpoints" / f"fetch_{fingerprint}.pkl"
+
+
+def _write_checkpoint(
+    checkpoint_path: Path,
+    price_data: dict[str, pd.DataFrame],
+    failures: dict[str, str],
+) -> None:
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = checkpoint_path.with_suffix(".pkl.tmp")
+    with tmp_path.open("wb") as handle:
+        pickle.dump({"price_data": price_data, "failures": failures}, handle)
+    tmp_path.replace(checkpoint_path)
+
+
+def _load_checkpoint(checkpoint_path: Path) -> tuple[dict[str, pd.DataFrame], dict[str, str]]:
+    with checkpoint_path.open("rb") as handle:
+        payload = pickle.load(handle)
+    return payload["price_data"], payload["failures"]
 
 
 def _failures_to_frame(failures: dict[str, str]) -> pd.DataFrame:

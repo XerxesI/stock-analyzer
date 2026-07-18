@@ -50,6 +50,19 @@ def parse_args() -> argparse.Namespace:
         default=42,
         help="Seed for the deterministic --max-symbols sample (default: 42).",
     )
+    parser.add_argument(
+        "--progress-every",
+        type=int,
+        default=50,
+        help="Print fetch progress every N symbols (default: 50).",
+    )
+    parser.add_argument(
+        "--checkpoint-every",
+        type=int,
+        default=200,
+        help="Checkpoint the in-progress fetch to disk every N symbols, so an "
+        "interrupted run can resume instead of re-fetching everything (default: 200).",
+    )
     return parser.parse_args()
 
 
@@ -64,6 +77,8 @@ def main() -> None:
         config=Swing20Config(),
         max_symbols=args.max_symbols,
         seed=args.seed,
+        progress_every=args.progress_every,
+        checkpoint_every=args.checkpoint_every,
     )
 
     print(json.dumps(
