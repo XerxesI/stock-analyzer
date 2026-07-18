@@ -1,12 +1,14 @@
 """Daily position monitoring: target/time exits, HOLD, MFE/MAE tracking, per MVP 2
 spec sections 11-12.
 
-Position-level recommendation decisions (HOLD/SELL_TARGET/SELL_TIME/SELL_DATA_FAILURE)
+Position-level recommendation decisions (HOLD/SELL_TARGET/SELL_TIME/MONITORING_BLOCKED)
 live here rather than in a separate module, because the decision is inseparable from
 the monitoring computation that produces it (unlike candidate-level BUY decisions,
 which are a distinct upstream ranking/selection step -- see candidate_service.py). A
 thin RecommendationService (recommendation_service.py) provides read-only history
 queries used by reporting, keeping the read side separate from this write side.
+
+A missing price bar never mechanically sells a position -- see _handle_missing_data.
 """
 
 from __future__ import annotations
@@ -23,8 +25,8 @@ from stock_analyzer.sandbox.domain.position import PositionSnapshot, VirtualPosi
 from stock_analyzer.sandbox.domain.recommendation import (
     ENTITY_POSITION,
     HOLD,
+    MONITORING_BLOCKED,
     Recommendation,
-    SELL_DATA_FAILURE,
     SELL_TARGET,
     SELL_TIME,
 )
@@ -67,6 +69,15 @@ class MonitoringService:
 
     # ------------------------------------------------------------- missing data
     def _handle_missing_data(self, position: VirtualPosition, as_of_date: date) -> MonitoringOutcome:
+        """A missing price bar NEVER mechanically sells a position, no matter how many
+        consecutive days it persists. Per review: a calendar-days-since-last-snapshot
+        proxy (the prior MVP 2 behavior) is not a reliable enough signal of a genuine
+        terminal event (delisting, cash merger, ...) to justify a virtual sale --
+        MVP 2 has no such detector, so this only ever records the gap and blocks
+        monitoring for the day. SELL_DATA_FAILURE remains defined (recommendation.py)
+        for a future, formally confirmed terminal-event detector; it is not emitted
+        here."""
+
         self._repo.insert_data_quality_event(
             DataQualityEvent(
                 event_id=DataQualityEvent.make_id(position.symbol, as_of_date, DQ_MISSING_MARKET_DATA),
@@ -76,28 +87,24 @@ class MonitoringService:
                 details=f"No price bar for open position {position.position_id} on {as_of_date.isoformat()}.",
             )
         )
-
-        # No full market calendar exists in this MVP, so "N consecutive missing
-        # sessions" (spec section 11) is approximated as calendar days elapsed since
-        # this position's last real (bar-backed) snapshot -- a documented, provisional
-        # proxy, not a precise trading-session count.
-        snapshots = self._repo.get_snapshots_for_position(position.position_id)
-        last_seen_date = snapshots[-1].as_of_date if snapshots else position.entry_date
-        days_dark = (as_of_date - last_seen_date).days
-
-        if days_dark >= self._config.data_failure_consecutive_missing_days_threshold:
-            self._close_position(
-                position,
-                exit_date=as_of_date,
-                exit_price=position.current_close if position.current_close is not None else position.entry_price,
-                exit_reason=SELL_DATA_FAILURE,
+        self._repo.insert_recommendation(
+            Recommendation(
+                recommendation_id=Recommendation.make_id(ENTITY_POSITION, position.position_id, as_of_date),
+                entity_type=ENTITY_POSITION,
+                entity_id=position.position_id,
+                symbol=position.symbol,
+                as_of_date=as_of_date,
+                recommendation=MONITORING_BLOCKED,
+                reason=DQ_MISSING_MARKET_DATA,
             )
-            return MonitoringOutcome(position.position_id, position.symbol, SELL_DATA_FAILURE)
+        )
 
-        # Deferred: no snapshot row for a day with no data (never fabricate a price or
-        # a recommendation for a day nothing was observed) -- last known state carries
-        # forward in reports via the most recent snapshot, not by inventing a new one.
-        return MonitoringOutcome(position.position_id, position.symbol, "DEFERRED")
+        # No snapshot row for a day with no data (never fabricate a price) -- last
+        # known state carries forward in reports via the most recent snapshot, not by
+        # inventing a new one. The position stays OPEN and unresolved; it is reported
+        # explicitly (via data_quality_events + this MONITORING_BLOCKED recommendation)
+        # rather than silently or mechanically closed.
+        return MonitoringOutcome(position.position_id, position.symbol, MONITORING_BLOCKED)
 
     # ------------------------------------------------------------- normal session
     def _handle_session(

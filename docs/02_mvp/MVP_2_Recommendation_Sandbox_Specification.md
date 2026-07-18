@@ -290,7 +290,9 @@ Fixed, deterministic vocabulary for MVP 2 -- no free-text or scored recommendati
 **Candidate-level:** `BUY_PENDING`, `BUY_FILLED`, `SKIP_PRICE_TOO_HIGH`,
 `EXPIRED_ENTRY`, `SKIP_DATA_QUALITY`, `SKIP_ALREADY_OPEN`.
 
-**Open-position-level:** `HOLD`, `SELL_TARGET`, `SELL_TIME`, `SELL_DATA_FAILURE`.
+**Open-position-level:** `HOLD`, `SELL_TARGET`, `SELL_TIME`, `MONITORING_BLOCKED`,
+`SELL_DATA_FAILURE` (defined but never emitted automatically in MVP 2 -- see "Data
+failure" below).
 
 No stop-loss recommendation exists in MVP 2. This is intentional -- stop-loss design
 is risk-management research, deferred to a later phase (Section 3.2).
@@ -330,14 +332,23 @@ close. Recommendation: `SELL_TIME`.
 
 ### Data failure
 
-A single missing daily bar for an open position does not trigger a sale -- it first
-produces a `data_quality_events` alert and the position's recommendation for that day
-is deferred (last-known state carried forward in the report, not silently
-re-estimated). `SELL_DATA_FAILURE` is reserved for a formally confirmed terminal
-condition (e.g. delisting, or N consecutive missing sessions past a documented
-threshold) -- MVP 2 does not auto-liquidate on one missing row. The exact terminal
-threshold is a provisional sandbox policy, documented in code and configurable, not
-optimized.
+**Revised per review (see EXP-004 discussion): a missing price bar never mechanically
+sells a position, regardless of how many consecutive days it persists.** An earlier
+version of this spec allowed a calendar-days-since-last-snapshot proxy to trigger
+`SELL_DATA_FAILURE` after a configured threshold. That proxy is not a reliable enough
+signal of a genuine terminal event to justify a virtual sale, and has been removed.
+
+The current, conservative policy: a missing daily bar for an open position produces
+(1) a `data_quality_events` row and (2) a `MONITORING_BLOCKED` recommendation event for
+that day -- both persisted, so the gap is explicit and auditable. No snapshot is
+recorded for that day (never fabricate a price), and the position's status stays
+`OPEN` and unresolved, however long the gap lasts. `SELL_DATA_FAILURE` remains defined
+in the recommendation vocabulary for a future, formally confirmed terminal-event
+detector (delisting, cash merger, or other documented instrument-lifecycle
+termination) -- MVP 2 has no such detector, so this recommendation is never emitted
+automatically. Until one exists, an unresolved position is reported explicitly (see
+EXP-004's "unresolved positions" requirement) rather than closed with an invented exit
+price.
 
 ## 12. Daily monitoring
 
@@ -390,7 +401,6 @@ existing `.gitignore` policy):
 python -m stock_analyzer.sandbox generate-candidates --as-of YYYY-MM-DD
 python -m stock_analyzer.sandbox process-entries     --as-of YYYY-MM-DD
 python -m stock_analyzer.sandbox monitor             --as-of YYYY-MM-DD
-python -m stock_analyzer.sandbox execute-recommendations --as-of YYYY-MM-DD
 python -m stock_analyzer.sandbox daily-run           --as-of YYYY-MM-DD
 ```
 
@@ -398,6 +408,13 @@ No `python -m stock_analyzer.*` CLI pattern existed in this repo before MVP 2
 (confirmed by repo survey -- all prior entry points are standalone `scripts/*.py`
 files); `stock_analyzer/sandbox/cli.py` + `stock_analyzer/sandbox/__main__.py`
 introduce this pattern for the first time, scoped to the sandbox package only.
+
+There is deliberately no `execute-recommendations` command. An earlier draft had one
+as a documented no-op (BUY fills execute inside `process-entries`, SELL exits inside
+`monitor`, so there was never a separate queue of "approved but unexecuted"
+recommendations to apply) -- removed after review, since a command that appears to
+execute something but does nothing is misleading regardless of how clearly it is
+documented.
 
 `daily-run`'s orchestration order is fixed and tested:
 
@@ -463,7 +480,8 @@ reports:
 - 2-trading-session entry validity window.
 - Fixed $1000 virtual notional per position, no concurrent-position cap.
 - No stop-loss.
-- Data-failure terminal-condition threshold for `SELL_DATA_FAILURE`.
+- No terminal-event detector for `SELL_DATA_FAILURE` exists yet -- a missing bar
+  always produces `MONITORING_BLOCKED` and leaves the position open/unresolved.
 
 ## 19. Future extension points (explicitly not built in MVP 2)
 

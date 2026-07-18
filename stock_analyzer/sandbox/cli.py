@@ -3,19 +3,21 @@
     python -m stock_analyzer.sandbox generate-candidates --as-of YYYY-MM-DD
     python -m stock_analyzer.sandbox process-entries     --as-of YYYY-MM-DD
     python -m stock_analyzer.sandbox monitor             --as-of YYYY-MM-DD
-    python -m stock_analyzer.sandbox execute-recommendations --as-of YYYY-MM-DD
     python -m stock_analyzer.sandbox daily-run           --as-of YYYY-MM-DD
 
 No `python -m stock_analyzer.*` CLI pattern existed in this repo before MVP 2; every
 prior entry point was a standalone scripts/*.py file. This introduces the pattern
 scoped to the sandbox package only.
 
-`execute-recommendations` is a documented no-op / status query: this sandbox's BUY
-fills are executed inside `process-entries` (the fill price IS the recommendation) and
-SELL exits are executed inside `monitor` (the exit decision and its execution are the
-same computation) -- there is no separate queue of "approved but not yet executed"
-recommendations to apply. The command exists for interface completeness with the MVP 2
-specification and reports what already happened.
+There is intentionally no `execute-recommendations` command: BUY execution happens
+inside `process-entries` (the fill price IS the recommendation) and SELL execution
+happens inside `monitor` (the exit decision and its execution are the same
+computation). An earlier version of this CLI had an `execute-recommendations` command
+that did nothing -- removed per review, since a command that appears to execute
+recommendations but performs no work is misleading. If a future revision separates
+recommendation persistence from execution (recommendation event -> a distinct
+execution service -> transaction event), that would be a new, explicit, tested
+command, not a no-op.
 """
 
 from __future__ import annotations
@@ -87,7 +89,7 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="python -m stock_analyzer.sandbox")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    for name in ("generate-candidates", "process-entries", "monitor", "execute-recommendations", "daily-run"):
+    for name in ("generate-candidates", "process-entries", "monitor", "daily-run"):
         sub = subparsers.add_parser(name)
         _add_common_args(sub)
 
@@ -111,12 +113,6 @@ def main(argv: list[str] | None = None) -> None:
         print(f"[sandbox] {as_of_date}: monitored {len(outcomes)} open position(s)")
         for o in outcomes:
             print(f"  {o.symbol}: {o.recommendation}")
-    elif args.command == "execute-recommendations":
-        print(
-            "[sandbox] execute-recommendations is a no-op in this architecture: "
-            "fills are executed by process-entries and exits by monitor. "
-            "Run those commands (or daily-run) to actually act on recommendations."
-        )
     elif args.command == "daily-run":
         result = daily_run_service.run(as_of_date)
         if result.already_completed:

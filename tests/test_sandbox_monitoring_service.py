@@ -207,33 +207,42 @@ def test_no_duplicate_exit_when_monitored_twice_same_day(repo: SandboxRepository
     assert len(transactions) == 1  # single SELL, not two
 
 
-def test_missing_data_defers_and_does_not_sell_immediately(repo: SandboxRepository, monkeypatch):
+def test_missing_data_blocks_monitoring_and_does_not_sell(repo: SandboxRepository, monkeypatch):
     position = _open_position(repo, entry_price=10.0)
     _patch_bars(monkeypatch, {})  # no bar at all for ENTRY_DATE
 
     outcomes = MonitoringService(repo, CONFIG).monitor(ENTRY_DATE)
 
-    assert outcomes[0].recommendation == "DEFERRED"
+    assert outcomes[0].recommendation == "MONITORING_BLOCKED"
     updated = repo.get_position(position.position_id)
     assert updated.status == "OPEN"
     events = repo.get_data_quality_events_for_date(ENTRY_DATE)
     assert len(events) == 1
     assert events[0].symbol == "AAA"
+    # The gap is recorded as an auditable recommendation event too, not just silence.
+    from stock_analyzer.sandbox.application.recommendation_service import RecommendationService
+
+    history = RecommendationService(repo).position_history(position.position_id)
+    assert [r.recommendation for r in history] == ["MONITORING_BLOCKED"]
 
 
-def test_missing_data_past_threshold_triggers_data_failure_exit(repo: SandboxRepository, monkeypatch):
+def test_missing_data_never_triggers_a_sale_no_matter_how_long(repo: SandboxRepository, monkeypatch):
+    # Per review: a calendar-days proxy must never mechanically liquidate a position.
+    # This asserts the position survives many consecutive missing-data days untouched.
     position = _open_position(repo, entry_price=10.0)
     service = MonitoringService(repo, CONFIG)
     _patch_bars(monkeypatch, {})  # no data ever
 
     current = ENTRY_DATE
-    last_outcome = None
-    for _ in range(CONFIG.data_failure_consecutive_missing_days_threshold + 1):
+    outcomes_seen = []
+    for _ in range(30):
         result = service.monitor(current)
-        last_outcome = result[0] if result else last_outcome
+        outcomes_seen.extend(o.recommendation for o in result)
         current = date.fromordinal(current.toordinal() + 1)
 
-    assert last_outcome.recommendation == "SELL_DATA_FAILURE"
+    assert outcomes_seen  # monitoring did run each day
+    assert set(outcomes_seen) == {"MONITORING_BLOCKED"}
+    assert "SELL_DATA_FAILURE" not in outcomes_seen
     updated = repo.get_position(position.position_id)
-    assert updated.status == "CLOSED"
-    assert updated.exit_reason == "SELL_DATA_FAILURE"
+    assert updated.status == "OPEN"  # still unresolved, never auto-closed
+    assert updated.exit_reason is None
