@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 
 from stock_analyzer.datasets.swing_20.config import LabelConfig
 from stock_analyzer.datasets.swing_20.events import deduplicate_positive_events
@@ -96,6 +97,41 @@ def test_ordinary_entry_is_not_flagged_as_target_already_reached():
     assert result is not None
     assert result["target_already_reached_at_entry"] is False
     assert counts["target_already_reached_at_entry_count"] == 0
+
+
+@pytest.mark.parametrize(
+    "entry_open",
+    [
+        119.99,  # just below the +20% threshold
+        120.00,  # exactly at the threshold (entry_price == signal_close * 1.20)
+        120.01,  # just above the threshold
+        90.00,  # entry below signal-day close (negative gap)
+        100.00,  # entry unchanged from signal-day close (zero gap)
+        250.00,  # far above the threshold
+    ],
+)
+def test_target_already_reached_at_entry_matches_large_gap_at_entry_condition(entry_open):
+    """`target_already_reached_at_entry` and `large_gap_at_entry >= target_return` must
+    be the exact same condition (same reference price, threshold, comparison
+    operator) computed from the same label_at() call -- not two independently
+    re-derived formulas that happen to usually agree. This is what lets the
+    historical `large_gap_at_entry` field stand in for the newer
+    `target_already_reached_at_entry` flag on frozen snapshots predating it.
+    """
+
+    target_return = 0.20
+    df = _frame(
+        [
+            {"Open": 100, "High": 101, "Low": 99, "Close": 100, "Volume": 1000},
+            {"Open": entry_open, "High": entry_open * 1.01, "Low": entry_open * 0.99, "Close": entry_open, "Volume": 1000},
+            {"Open": entry_open, "High": entry_open * 1.01, "Low": entry_open * 0.99, "Close": entry_open, "Volume": 1000},
+        ]
+    )
+
+    result, _ = label_at(df, 0, LabelConfig(horizon_days=2, target_return=target_return))
+
+    assert result is not None
+    assert result["target_already_reached_at_entry"] == (result["large_gap_at_entry"] >= target_return)
 
 
 def test_overlapping_positive_windows_form_one_economic_event():
