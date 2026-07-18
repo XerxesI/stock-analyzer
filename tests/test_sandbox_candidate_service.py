@@ -121,12 +121,27 @@ def repo() -> SandboxRepository:
     return SandboxRepository(conn)
 
 
-def _make_service(repo: SandboxRepository, as_of: date, symbols: list[str], scores: dict[str, float], monkeypatch, missing_symbols: set[str] | None = None) -> CandidateService:
+def _make_service(
+    repo: SandboxRepository,
+    as_of: date,
+    symbols: list[str],
+    scores: dict[str, float],
+    monkeypatch,
+    missing_symbols: set[str] | None = None,
+    stale_symbols: set[str] | None = None,
+) -> CandidateService:
     missing_symbols = missing_symbols or set()
+    stale_symbols = stale_symbols or set()
 
     def fake_fetch_as_of(symbol: str, fetch_date: date, period: str = "2y") -> pd.DataFrame:
         if symbol in missing_symbols:
             return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+        if symbol in stale_symbols:
+            # No bar for fetch_date itself -- last available bar is 3 sessions earlier
+            # (e.g. a data lag or halted session), but fetch_as_of's own <= cutoff
+            # would otherwise let this through silently.
+            stale_as_of = pd.bdate_range(end=pd.Timestamp(fetch_date), periods=4)[0].date()
+            return _synthetic_prices(stale_as_of)
         return _synthetic_prices(fetch_date)
 
     monkeypatch.setattr(candidate_service_module, "fetch_as_of", fake_fetch_as_of)
@@ -271,6 +286,40 @@ def test_missing_market_data_excludes_symbol_with_reason(repo: SandboxRepository
     assert sym0.exclusion_reason == MISSING_MARKET_DATA
     assert sym0.shadow_top10 is True  # still retained in the shadow set
     assert "SYM0" not in [c.symbol for c in result.actionable]
+
+    # Regression test: a MISSING_MARKET_DATA candidate has signal_close=None, and
+    # ranked_candidates.signal_close was once NOT NULL -- INSERT OR IGNORE silently
+    # dropped the row while this in-memory result still listed it, so persisted
+    # attribution counts (replay_metrics.py) disagreed with the in-memory shadow
+    # count. Assert the row actually exists in the database, not just in memory.
+    persisted = repo.get_candidate(sym0.candidate_id)
+    assert persisted is not None
+    assert persisted.signal_close is None
+    assert persisted.exclusion_reason == MISSING_MARKET_DATA
+    assert len(repo.get_candidates_for_date(as_of)) == 5  # all 5 shadow rows persisted, none silently dropped
+
+
+def test_stale_signal_day_price_is_excluded_not_silently_accepted(repo: SandboxRepository, monkeypatch):
+    # Regression test: a symbol with price history but no bar dated exactly as_of_date
+    # (e.g. a data lag) must not silently use an older bar's close/ATR as the signal
+    # price -- that would distort the entry ceiling without being flagged anywhere.
+    from stock_analyzer.sandbox.application.candidate_service import STALE_DATA
+
+    as_of = date(2026, 6, 15)
+    symbols = [f"SYM{i}" for i in range(5)]
+    scores = {sym: float(len(symbols) - i) for i, sym in enumerate(symbols)}
+    service = _make_service(repo, as_of, symbols, scores, monkeypatch, stale_symbols={"SYM0"})
+
+    result = service.generate_candidates(as_of)
+
+    sym0 = next(c for c in result.shadow_top10 if c.symbol == "SYM0")
+    assert sym0.actionable is False
+    assert sym0.exclusion_reason == STALE_DATA
+    assert sym0.signal_close is None  # never populated from the stale bar
+    assert "SYM0" not in [c.symbol for c in result.actionable]
+
+    persisted = repo.get_candidate(sym0.candidate_id)
+    assert persisted.exclusion_reason == STALE_DATA
 
 
 def test_actionable_candidate_creates_pending_entry_order(repo: SandboxRepository, monkeypatch):

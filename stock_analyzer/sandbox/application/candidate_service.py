@@ -24,7 +24,7 @@ from stock_analyzer.sandbox.domain.entry_order import EntryOrder
 from stock_analyzer.sandbox.domain.entry_order import PENDING as ORDER_PENDING
 from stock_analyzer.sandbox.domain.recommendation import BUY_PENDING, ENTITY_CANDIDATE, Recommendation
 from stock_analyzer.sandbox.domain.run import SandboxRun
-from stock_analyzer.sandbox.infrastructure.market_data_adapter import fetch_as_of, latest_close
+from stock_analyzer.sandbox.infrastructure.market_data_adapter import fetch_as_of, session_bar
 from stock_analyzer.sandbox.infrastructure.model2_prediction_adapter import Model2PredictionAdapter
 from stock_analyzer.sandbox.infrastructure.sqlite_repository import SandboxRepository
 from stock_analyzer.sandbox.infrastructure.trading_days import add_trading_sessions
@@ -34,6 +34,11 @@ ALREADY_PENDING_CANDIDATE = "ALREADY_PENDING_CANDIDATE"
 MISSING_MARKET_DATA = "MISSING_MARKET_DATA"
 INVALID_PRICE = "INVALID_PRICE"
 MISSING_ATR = "MISSING_ATR"
+# Price history exists for the symbol, but not a bar dated exactly as_of_date (e.g. a
+# data lag or a halted session) -- distinct from MISSING_MARKET_DATA (no history at
+# all). Using an older bar's close/ATR as if it were the signal day's would silently
+# distort the entry ceiling; see market_data_adapter.session_bar.
+STALE_DATA = "STALE_DATA"
 # Not a data-quality issue -- the candidate was individually clean but ranked below
 # the max_actionable_candidates cutoff. Distinct from the other reasons so the
 # attribution funnel (reporting/replay_metrics.py) can separate "ranking put it
@@ -154,8 +159,20 @@ class CandidateService:
         final_candidates, actionable = self._decide_selection(drafts)
 
         # Phase 3: persist every shadow row exactly once, with its final values.
+        # Each candidate_id is freshly derived from (as_of_date, symbol) in this same
+        # call, so a False return here can only mean the insert was silently rejected
+        # (e.g. a constraint violation swallowed by INSERT OR IGNORE) -- never a
+        # legitimate "already exists." Raise loudly rather than let the in-memory
+        # result (used by callers and reports) silently disagree with what is
+        # actually in the database.
         for candidate in final_candidates:
-            self._repo.insert_ranked_candidate(candidate)
+            inserted = self._repo.insert_ranked_candidate(candidate)
+            if not inserted:
+                raise RuntimeError(
+                    f"ranked_candidates insert for {candidate.candidate_id} was silently rejected "
+                    "(constraint violation swallowed by INSERT OR IGNORE) -- in-memory result would "
+                    "no longer match persisted state."
+                )
 
         # Phase 4: now that the candidate rows exist, create entry orders (and
         # BUY_PENDING recommendations) for the selected symbols only.
@@ -175,21 +192,33 @@ class CandidateService:
         adv_quintile: str,
     ) -> RankedCandidate:
         prices = fetch_as_of(symbol, as_of_date)
-        signal_close = latest_close(prices)
+        signal_close: float | None = None
         atr14 = None
         exclusion_reason = None
 
-        if prices.empty or signal_close is None:
+        if prices.empty:
             exclusion_reason = MISSING_MARKET_DATA
-        elif signal_close <= 0:
-            exclusion_reason = INVALID_PRICE
         else:
-            enriched = calculate_indicators(prices)
-            atr_series = enriched.get("ATR14")
-            if atr_series is not None and not atr_series.empty and pd.notna(atr_series.iloc[-1]):
-                atr14 = float(atr_series.iloc[-1])
+            # The last bar in `prices` must be dated EXACTLY as_of_date -- fetch_as_of
+            # only guarantees no bar is dated after as_of_date, not that one exists ON
+            # it. Using an older bar (e.g. after a data lag or a halted session) would
+            # silently price the signal off a stale close/ATR.
+            signal_bar = session_bar(prices, as_of_date)
+            if signal_bar is None:
+                exclusion_reason = STALE_DATA
+            elif pd.isna(signal_bar["Close"]):
+                exclusion_reason = MISSING_MARKET_DATA
             else:
-                exclusion_reason = MISSING_ATR
+                signal_close = float(signal_bar["Close"])
+                if signal_close <= 0:
+                    exclusion_reason = INVALID_PRICE
+                else:
+                    enriched = calculate_indicators(prices)
+                    atr_series = enriched.get("ATR14")
+                    if atr_series is not None and not atr_series.empty and pd.notna(atr_series.iloc[-1]):
+                        atr14 = float(atr_series.iloc[-1])
+                    else:
+                        exclusion_reason = MISSING_ATR
 
         max_entry_price = compute_max_entry_price(signal_close, atr14, self._config) if exclusion_reason is None else None
         if exclusion_reason is None and max_entry_price is None:

@@ -13,7 +13,12 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 1
+# v2: signal_close is now nullable (a MISSING_MARKET_DATA candidate has no signal
+# close by definition; the NOT NULL constraint was silently swallowing that row via
+# INSERT OR IGNORE -- see the candidate-persistence fix in candidate_service.py).
+# CREATE TABLE IF NOT EXISTS does not retroactively migrate existing database files;
+# this only affects databases created after this change.
+SCHEMA_VERSION = 2
 
 _DDL = """
 PRAGMA foreign_keys = ON;
@@ -39,7 +44,7 @@ CREATE TABLE IF NOT EXISTS ranked_candidates (
     symbol TEXT NOT NULL,
     daily_rank INTEGER NOT NULL,
     model_score REAL NOT NULL,
-    signal_close REAL NOT NULL,
+    signal_close REAL,
     atr14 REAL,
     max_entry_price REAL,
     shadow_top10 INTEGER NOT NULL CHECK (shadow_top10 IN (0,1)),
