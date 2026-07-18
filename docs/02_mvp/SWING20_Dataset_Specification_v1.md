@@ -9,6 +9,8 @@
 - `docs/02_mvp/MVP_1_Specification.md` (aspirational audit requirements this specification satisfies)
 - `docs/04_decisions/ADR-001-SWING20.md`, `ADR-002-Target20.md`, `ADR-003-NextOpen.md`, `ADR-004-DatasetAuditBeforeModel.md`
 - `stock_analyzer/datasets/swing_20/` (implementation)
+- `docs/00_goal/Research_Strategy_v2.md` (governing research philosophy adopted after this
+  document was frozen — does not modify this contract)
 
 This document freezes the concrete, as-built definitions behind the SWING_20 dataset that
 produced a `CONDITIONALLY_TRAINABLE` audit decision. It exists so that feature and baseline

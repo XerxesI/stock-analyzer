@@ -2,7 +2,9 @@
 
 **Status:** FROZEN as product-direction baseline  
 **Project:** stock-analyzer  
-**Scope:** target product vision, not MVP implementation detail
+**Scope:** target product vision, not MVP implementation detail  
+**Related documents:** `docs/00_goal/Research_Strategy_v2.md` (governing research philosophy —
+how the research toward this goal is directed and evaluated)
 
 This document defines the purpose and long-term direction of Stock Analyzer. It separates
 the product goal from the narrower MVP 1 implementation. MVP 1 is the first falsifiable
@@ -178,7 +180,9 @@ trades. Avoiding bad trades is part of performance.
 
 ## 5. Research Foundation
 
-The project's research framework remains a permanent core component.
+The project's research framework remains a permanent core component. The governing research
+philosophy — how hypotheses are directed, evaluated, and when a research direction is
+stopped — is defined in `docs/00_goal/Research_Strategy_v2.md`.
 
 Its role is to:
 

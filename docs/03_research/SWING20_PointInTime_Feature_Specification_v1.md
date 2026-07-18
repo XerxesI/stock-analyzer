@@ -2,7 +2,10 @@
 
 **Status:** DRAFT (specification only — no feature dataset has been generated, no model trained)
 **Depends on:** `docs/02_mvp/SWING20_Dataset_Specification_v1.md` (frozen)
-**Related documents:** `docs/03_research/research_cycle_1_summary.md` (prior validated signals)
+**Related documents:** `docs/03_research/research_cycle_1_summary.md` (prior validated signals),
+`docs/00_goal/Research_Strategy_v2.md` (governing research philosophy adopted after this
+document was drafted — the Context Before Signal principle and per-feature fail-fast
+criteria below already anticipated this; does not modify this contract)
 
 ---
 

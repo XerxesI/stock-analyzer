@@ -3,7 +3,9 @@
 **Status:** FROZEN  
 **Project:** stock-analyzer  
 **Document owner:** project research process  
-**Primary next deliverable:** SWING_20 Dataset Audit generator and report
+**Primary next deliverable:** SWING_20 Dataset Audit generator and report  
+**Related documents:** `docs/00_goal/Research_Strategy_v2.md` (governing research philosophy
+adopted after this MVP's Dataset Audit phase closed — does not change this specification)
 
 This document defines the first MVP of the stock-analyzer project. It is the
 implementation specification for deciding whether the SWING_20 prediction problem is

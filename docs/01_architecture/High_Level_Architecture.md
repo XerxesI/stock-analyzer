@@ -2,7 +2,11 @@
 
 **Status:** Target architecture baseline  
 **Project:** stock-analyzer  
-**Scope:** long-term high-level architecture and MVP alignment
+**Scope:** long-term high-level architecture and MVP alignment  
+**Related documents:** `docs/00_goal/Research_Strategy_v2.md` (governing research
+philosophy — Context Before Signal, Context Engine / Opportunity Engine framing that refines
+sections 15 and 28 below; see the forthcoming `Context Engine Architecture Proposal v1` for
+the implementation-level detail this document does not yet contain)
 
 This document defines the high-level target architecture of Stock Analyzer. It describes
 the intended system shape, major components, and data flow. It is not a detailed
@@ -404,6 +408,13 @@ Future strategies may include:
 
 ## 15. Opportunity Detection Engine
 
+> **Note:** `docs/00_goal/Research_Strategy_v2.md` reframes this engine's relationship to
+> context: rather than Context being one input alongside Pattern and Event, the strategy
+> treats context (market regime, volatility regime, sector behavior) as an explicit,
+> first-class upstream stage — a "Context Engine" — that this Opportunity Detection Engine
+> then evaluates stocks within. See the forthcoming `Context Engine Architecture Proposal v1`
+> for how this splits into concrete components.
+
 The Opportunity Detection Engine identifies candidate situations.
 
 It generalizes the earlier idea of Pattern Detection:
@@ -711,6 +722,12 @@ Only after this should the system move toward recommendation outputs.
 ---
 
 ## 28. Future Knowledge Graph / Context Engine
+
+> **Note:** the "Context Engine" named here is the same concept `Research_Strategy_v2.md`
+> elevates to a governing architectural principle (Context Before Signal), not only a future
+> nice-to-have. The Knowledge Graph remains a later addition; the Context Engine's core
+> responsibility (market regime, volatility regime, sector leadership, breadth) does not
+> depend on the Knowledge Graph existing first.
 
 A Knowledge Graph may be useful later for representing relationships such as:
 

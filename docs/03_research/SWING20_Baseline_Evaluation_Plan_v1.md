@@ -3,6 +3,8 @@
 **Status:** DRAFT (plan only — no baseline has been run, no locked-test data has been touched)
 **Depends on:** `docs/02_mvp/SWING20_Dataset_Specification_v1.md` (frozen),
 `docs/03_research/SWING20_PointInTime_Feature_Specification_v1.md` (draft)
+**Related documents:** `docs/00_goal/Research_Strategy_v2.md` (governing research
+philosophy — does not modify this plan)
 
 ---
 
