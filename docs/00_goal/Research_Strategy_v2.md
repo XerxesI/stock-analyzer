@@ -38,8 +38,18 @@ research question.
 
 The business objective is simple:
 
-> Increase the probability that the daily Top-N recommended stocks outperform a naive
-> selection strategy over the next 20 trading days.
+> Increase the probability that the daily Top-N recommendations achieve the defined
+> opportunity target, with acceptable adverse excursion and turnover, materially more often
+> than random and naive-momentum baselines.
+
+This connects business value to four concrete things, not one vague word: target-hit
+probability, lift over the random and naive-momentum baselines (already specified in
+`docs/03_research/SWING20_Baseline_Evaluation_Plan_v1.md`), acceptable adverse excursion
+(MAE), and acceptable turnover/costs. "Outperform" alone was ambiguous about which of these
+it meant. This does **not** change the frozen SWING_20 target definition
+(`docs/02_mvp/SWING20_Dataset_Specification_v1.md` section 5, entry-Open +20%/20-day) — it
+only makes explicit what "business value" means when judging whether a hypothesis is worth
+pursuing.
 
 Success is **not** measured by model accuracy, F1 score, AUC, or elegant ML architecture.
 Success is measured by whether the recommendations become genuinely more useful for a real
@@ -129,9 +139,13 @@ useful.
 **Principle 3 — Negative results are valuable.** A rejected hypothesis removes uncertainty.
 Removing uncertainty is progress.
 
-**Principle 4 — Every failed hypothesis must generate the next hypothesis.** Research never
-ends with *it doesn't work.* Research ends with *why doesn't it work?* and *what should be
-tested next?*
+**Principle 4 — Every failed hypothesis must produce an explicit decision.** Not always
+another hypothesis in the same branch — the decision is one of the Fail-Fast Framework's
+five non-continue outcomes (section 7): **Stop**, **Narrow**, **Reframe**, **Combine**, or
+identify the highest-value next hypothesis. Research never ends with *it doesn't work* and
+silence. It ends with a recorded decision — and sometimes the correct decision is closing
+the branch entirely and moving to a different business question, not producing a variation
+of the same idea.
 
 **Principle 5 — Context is tested before complexity.** Before adding another feature or
 another model, ask: is the missing information actually context?
