@@ -51,12 +51,13 @@ Thumbs.db
 # Logs
 *.log
 
-# Runtime artifacts
-artifacts/swing_20/
-artifacts/logs/*.log
-artifacts/reports/runtime_metrics.json
-artifacts/reports/rank_ic_obs.csv
-artifacts/reports/*.csv
+# Generated experiment outputs and feature datasets: reproducible from committed
+# scripts + docs/09_experiments/*.md, not source-controlled project assets. See
+# docs/09_experiments/SWING20_Phase1_Artifact_Manifest.md for checksums of key
+# artifacts. (Files already tracked before this rule, e.g.
+# artifacts/reports/frozen_c1_params.json, are unaffected -- gitignore only applies
+# to untracked files.)
+artifacts/
 
 # Backups and archives (not source)
 *.bak
