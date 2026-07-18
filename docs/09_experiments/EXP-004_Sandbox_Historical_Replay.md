@@ -181,3 +181,162 @@ Uses the frozen train+validation feature dataset already recorded in
 fit and the historical universe/feature source. Writes its isolated database and a
 JSON metrics report under `artifacts/sandbox/replays/` (generated output, excluded
 from git).
+
+---
+
+# Part 2 -- Result
+
+The replay ran twice. The first run (before this Part 2 was written) surfaced a real
+bug: `ranked_candidates.actionable` was persisted from per-symbol data-quality checks
+only, before the top-3 rank cap and already-open/already-pending exclusions were
+applied -- so every data-quality-clean shadow candidate (typically all 10/day) was
+stored as `actionable=True`, corrupting `actionable_candidates_total` and any
+consumer reading that column directly (daily reports, this replay's own funnel
+metrics). This was a code bug in `CandidateService`, not a change to Model 2, the
+entry-price policy, the candidate count, the target, or the holding horizon -- it was
+fixed (`CandidateService.generate_candidates` restructured into build-drafts ->
+decide-selection -> persist -> create-orders, so `actionable` reflects the true
+selection outcome; regression test added), and the replay was re-run from a clean
+isolated database before any result below was used. See commit history for the fix.
+
+## Replay identity
+
+```text
+replay_id: development_replay_2024_11_2025_10
+classification: DEVELOPMENT_HISTORICAL_REPLAY -- NOT INDEPENDENT MODEL VALIDATION -- NOT FOR POLICY OPTIMIZATION
+signal_start_date: 2024-11-18
+signal_end_date: 2025-09-03
+outcome_data_end_date: 2025-10-20
+signal dates processed: 197
+outcome-only dates processed: 33
+total dates processed: 230
+unresolved positions at outcome end: 0
+```
+
+No rule was changed based on these results. Entry-price constants, candidate count,
+target, and holding horizon are exactly as specified in the MVP 2 spec and ADR-007,
+unchanged before and after this replay.
+
+## Funnel
+
+| Stage | Count | Conversion from prior stage |
+|---|---|---|
+| Shadow top-10 rows | 1,970 (197 dates x 10) | -- |
+| Actionable (selected, <=3/day) | 525 | 26.6% |
+| Entry orders created | 525 | 100% (1:1 with actionable) |
+| Entry orders filled | 521 | 99.2% |
+| Positions opened | 521 | 99.2% of orders |
+| Positions closed | 521 | 100% (0 unresolved) |
+
+Exclusions from the 1,445 shadow rows that did **not** become actionable:
+
+| Reason | Count |
+|---|---|
+| `ALREADY_OPEN_POSITION` | 1,035 |
+| `RANK_LIMIT_EXCEEDED` (data-quality clean, but beyond the top-3 cap) | 409 |
+| `ALREADY_PENDING_CANDIDATE` | 1 |
+| Data-quality (`MISSING_MARKET_DATA` / `INVALID_PRICE` / `MISSING_ATR`) | 0 |
+
+## Shadow ranking (uses the frozen SWING_20 label, `target_20pct_20d`)
+
+- **Top-10 (all shadow candidates) target-hit-rate: 33.5%** (n=1,970 labeled rows).
+- **Top-3 actionable target-hit-rate: 23.4%** (n=525) -- **lower** than the full
+  shadow set, not higher.
+- By rank: hit-rate declines monotonically and cleanly with rank as expected from a
+  working ranking signal -- rank 1: 49.7%, rank 2: 42.6%, rank 3: 34.5%, ..., rank 10:
+  28.9% (n=197 per rank).
+- By ADV quintile (train-fit edges): 1,786 of 1,970 shadow rows (90.7%) fall in
+  `adv_q1` (smallest), consistent with EXP-001/002/003's finding that Model 2's edge
+  concentrates in smaller/less-liquid names.
+- By market regime: `Bull_Normal` dominates (1,250 rows, 34.2% hit-rate); `Bear_High`
+  shows the highest hit-rate among regimes with meaningful sample size (180 rows,
+  42.8%), consistent with EXP-003's Locked Test finding that the ranking's edge is not
+  uniform across regimes.
+
+**Policy-attribution finding (observational, not a basis for any rule change): the
+by-rank breakdown shows the *ranking itself* is well-behaved (hit-rate falls
+monotonically from rank 1's 49.7% down through rank 10), but the *realized actionable
+set* (23.4%) is lower than even rank 10 alone.** The exclusion breakdown explains why:
+1,035 of 1,445 exclusions (71.6%) are `ALREADY_OPEN_POSITION` -- the model's top
+picks are "sticky" (the same names rank highly across many consecutive sessions), so
+whenever a top-ranked name is still within an open position's holding period, the
+already-open suppression policy correctly refuses to pyramid into it, but as a side
+effect this pushes the *actual* selected candidate further down the day's ranking far
+more often than the raw rank-1/2/3 hit-rates alone would suggest. This is exactly the
+kind of effect the funnel/attribution layers were built to surface -- the ranking
+engine and the selection policy must be evaluated separately, and this replay shows
+the already-open suppression has a real, non-trivial cost in realized hit-rate. No
+change is made to that policy based on this observation.
+
+## Entry policy
+
+| Metric | Value |
+|---|---|
+| Orders created | 525 |
+| Orders filled | 521 (99.2%) |
+| Filled at open | 453 (86.9% of fills) |
+| Filled at ceiling (gap-then-pullback) | 68 (13.1% of fills) |
+| No-fill attempts (session entirely above ceiling) | 15 |
+| Orders expired (2 sessions, never filled) | 4 (0.8%) |
+
+The entry-price ceiling policy did not meaningfully suppress opportunities in this
+replay -- a 99.2% fill rate means the 2%/0.25x-ATR ceiling rarely rejected a signal
+outright; most unfilled attempts still resolved on the second session.
+
+## Position lifecycle
+
+| Metric | Value |
+|---|---|
+| Positions opened / closed | 521 / 521 |
+| Positions still open (unresolved) | 0 |
+| `SELL_TARGET` | 124 (23.8%) |
+| `SELL_TIME` | 397 (76.2%) |
+| Holding days, mean / median | 16.0 / 19 |
+| Realized return, mean / median | -1.76% / -0.32% |
+| Win rate (realized return > 0) | 49.7% |
+| MFE mean | +8.5% |
+| MAE mean | -16.0% |
+| Best realized return | +99.2% |
+| Worst realized return | -87.2% |
+| Total virtual P&L ($1,000 notional/position) | -$9,195.29 |
+
+**This is an observational result, not a profitability claim, and MVP 2's hypothesis
+(Section 2 of the MVP 2 spec) does not require a profitable outcome to be considered
+validated -- it asks whether the process is reproducible, realistic, internally
+consistent, executable, auditable, and stable.** On that narrower question, the
+process ran cleanly across 230 real trading days with zero missing-data events, zero
+unresolved positions, and fully reconstructable append-only history for all 521
+positions. Whether the realized -1.76% mean / -$9,195 total virtual P&L reflects a
+genuine absence of edge once the sandbox's realistic entry/exit frictions are applied,
+versus this specific 9.5-month window, versus the already-open-suppression effect
+noted above, is exactly the kind of question later, separately pre-registered research
+should address -- not something to resolve by adjusting a policy constant after seeing
+this number.
+
+## Operational
+
+| Metric | Value |
+|---|---|
+| Maximum simultaneous open positions | 55 |
+| Missing-data events | 0 |
+
+## Test results
+
+49/49 sandbox tests pass (`tests/test_sandbox_*.py`), including the new regression
+test for the actionable-flag bug found during this replay.
+
+## Commit SHAs
+
+See git history: the actionable-flag fix, the replay engine/metrics (Part 1
+pre-registration), and this Part 2 result are each separate commits.
+
+## Remaining blockers before `FORWARD_PAPER_EVALUATION`
+
+1. **`DailyPointInTimeUniverseProvider`** (MVP 2 spec Section 19) -- not implemented.
+   This replay, like the smoke test, only replays dates already present in a frozen
+   feature dataset; it cannot generate real recommendations for a new trading day.
+2. A parity test for that provider against a frozen historical snapshot (exact/
+   tolerance match on eligible symbols, feature values, ranking scores, rank order)
+   -- depends on (1).
+3. An `EXP-005_Sandbox_Forward_Paper_Evaluation.md` pre-registration, committed
+   before the first forward-evaluation signal is generated -- not started.
