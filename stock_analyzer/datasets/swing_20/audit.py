@@ -294,6 +294,81 @@ def apply_data_quality_quarantine(
     return clean_labels, clean_eligibility, clean_quality_counts, summary
 
 
+_EMPTY_GAP_DIAGNOSTICS: dict[str, object] = {
+    "excluded_row_count": 0,
+    "excluded_by_split": {},
+    "excluded_by_symbol": {},
+    "observations_before": 0,
+    "observations_after": 0,
+    "raw_positive_before": 0,
+    "raw_positive_after": 0,
+    "positive_rate_before": None,
+    "positive_rate_after": None,
+    "deduplicated_events_before": 0,
+    "deduplicated_events_after": 0,
+}
+
+
+def exclude_target_already_reached_at_entry(
+    labels: pd.DataFrame,
+) -> tuple[pd.DataFrame, dict[str, object]]:
+    """Drop rows where the target was already reached before the modeled entry.
+
+    SWING_20's modeled strategy buys at the next trading day's Open. A row
+    where that Open already sits at or above the target return relative to
+    the signal-day Close (``target_already_reached_at_entry``, set in
+    :func:`~stock_analyzer.datasets.swing_20.labels.label_at`) represents a
+    move that happened *before* the model could have entered -- a live user
+    could never have captured it. These rows are removed from the primary
+    label population used for splits/events/the trainability decision (never
+    scored as ordinary positives, and never recoded as negatives either),
+    but nothing is deleted: the caller retains the full input frame, and this
+    function reports before/after counts for diagnostics.
+    """
+
+    if labels.empty or "target_already_reached_at_entry" not in labels.columns:
+        return labels, dict(_EMPTY_GAP_DIAGNOSTICS)
+
+    excluded_mask = labels["target_already_reached_at_entry"] == True  # noqa: E712
+    if not excluded_mask.any():
+        summary = dict(_EMPTY_GAP_DIAGNOSTICS)
+        summary["observations_before"] = summary["observations_after"] = int(len(labels))
+        positives = int(labels["target_20pct_20d"].sum())
+        summary["raw_positive_before"] = summary["raw_positive_after"] = positives
+        rate = float(positives / len(labels)) if len(labels) else None
+        summary["positive_rate_before"] = summary["positive_rate_after"] = rate
+        events = len(deduplicate_positive_events(labels))
+        summary["deduplicated_events_before"] = summary["deduplicated_events_after"] = events
+        return labels, summary
+
+    excluded = labels[excluded_mask]
+    primary = labels[~excluded_mask].copy()
+
+    events_before = len(deduplicate_positive_events(labels))
+    events_after = len(deduplicate_positive_events(primary))
+    positives_before = int(labels["target_20pct_20d"].sum())
+    positives_after = int(primary["target_20pct_20d"].sum())
+
+    summary = {
+        "excluded_row_count": int(len(excluded)),
+        "excluded_by_split": (
+            {str(k): int(v) for k, v in excluded["split"].value_counts().items()}
+            if "split" in excluded.columns
+            else {}
+        ),
+        "excluded_by_symbol": {str(k): int(v) for k, v in excluded["symbol"].value_counts().items()},
+        "observations_before": int(len(labels)),
+        "observations_after": int(len(primary)),
+        "raw_positive_before": positives_before,
+        "raw_positive_after": positives_after,
+        "positive_rate_before": float(positives_before / len(labels)) if len(labels) else None,
+        "positive_rate_after": float(positives_after / len(primary)) if len(primary) else None,
+        "deduplicated_events_before": events_before,
+        "deduplicated_events_after": events_after,
+    }
+    return primary, summary
+
+
 def run_audit_from_frames(
     labels: pd.DataFrame,
     eligibility: pd.DataFrame | None = None,
@@ -330,14 +405,18 @@ def run_audit_from_frames(
 
     labels_all = labels.copy()
     labels_with_splits = assign_temporal_splits(labels_all, config.splits) if not labels_all.empty else labels_all
-    events = deduplicate_positive_events(labels_with_splits)
+    primary_labels, gap_diagnostics = exclude_target_already_reached_at_entry(labels_with_splits)
+    if gap_diagnostics["excluded_row_count"]:
+        warnings.append("TARGET_ALREADY_REACHED_AT_ENTRY_EXCLUDED")
 
-    splits = split_summary(labels_with_splits)
-    events_info = event_summary(labels_with_splits, events)
-    decision = decide_trainability(labels_with_splits, splits, quality_counts, warnings=warnings)
+    events = deduplicate_positive_events(primary_labels)
 
-    date_range = _date_range(labels_with_splits)
-    label_summary = _label_summary(labels_with_splits) | events_info
+    splits = split_summary(primary_labels)
+    events_info = event_summary(primary_labels, events)
+    decision = decide_trainability(primary_labels, splits, quality_counts, warnings=warnings)
+
+    date_range = _date_range(primary_labels)
+    label_summary = _label_summary(primary_labels) | events_info
     quality = {
         "counts": quality_counts,
         "hard_blockers": decision.hard_blockers,
@@ -357,9 +436,10 @@ def run_audit_from_frames(
         universe=universe_summary(eligibility),
         labels=label_summary,
         splits=splits,
-        baseline=baseline_summary(labels_with_splits),
+        baseline=baseline_summary(primary_labels),
         quality=quality,
         data_quality_quarantine=quarantine_summary,
+        target_already_reached_at_entry=gap_diagnostics,
         decision=decision,
     )
 

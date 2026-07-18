@@ -77,7 +77,11 @@ def render_markdown(result: AuditResult) -> str:
             "",
             _quarantine_section(data.get("data_quality_quarantine", {})),
             "",
-            "## 13. Recommended Next Step",
+            "## 13. Target-Already-Reached-at-Entry Exclusion",
+            "",
+            _key_value_table(_gap_summary_keys(data.get("target_already_reached_at_entry", {}))),
+            "",
+            "## 14. Recommended Next Step",
             "",
             decision.get("recommended_next_step", ""),
             "",
@@ -175,4 +179,19 @@ def _quarantine_section(quarantine: dict[str, object]) -> str:
             + " |"
         )
     return summary_table + "\n\n" + "\n".join(rows)
+
+
+def _gap_summary_keys(gap: dict[str, object]) -> dict[str, object]:
+    keys = [
+        "excluded_row_count",
+        "observations_before",
+        "observations_after",
+        "raw_positive_before",
+        "raw_positive_after",
+        "positive_rate_before",
+        "positive_rate_after",
+        "deduplicated_events_before",
+        "deduplicated_events_after",
+    ]
+    return {key: gap.get(key) for key in keys}
 

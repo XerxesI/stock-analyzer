@@ -65,6 +65,39 @@ def test_fixed_stop_before_target_does_not_change_primary_target_label():
     assert result["target_before_fixed_stop"] is False
 
 
+def test_target_already_reached_at_entry_is_flagged_on_the_label():
+    df = _frame(
+        [
+            {"Open": 100, "High": 101, "Low": 99, "Close": 100, "Volume": 1000},
+            # Next-day Open (125) is already >=20% above signal-day Close (100).
+            {"Open": 125, "High": 126, "Low": 124, "Close": 125, "Volume": 1000},
+            {"Open": 125, "High": 126, "Low": 124, "Close": 125, "Volume": 1000},
+        ]
+    )
+
+    result, counts = label_at(df, 0, LabelConfig(horizon_days=2, target_return=0.20))
+
+    assert result is not None
+    assert result["target_already_reached_at_entry"] is True
+    assert counts["target_already_reached_at_entry_count"] == 1
+
+
+def test_ordinary_entry_is_not_flagged_as_target_already_reached():
+    df = _frame(
+        [
+            {"Open": 100, "High": 101, "Low": 99, "Close": 100, "Volume": 1000},
+            {"Open": 101, "High": 102, "Low": 100, "Close": 101, "Volume": 1000},
+            {"Open": 101, "High": 102, "Low": 100, "Close": 101, "Volume": 1000},
+        ]
+    )
+
+    result, counts = label_at(df, 0, LabelConfig(horizon_days=2, target_return=0.20))
+
+    assert result is not None
+    assert result["target_already_reached_at_entry"] is False
+    assert counts["target_already_reached_at_entry_count"] == 0
+
+
 def test_overlapping_positive_windows_form_one_economic_event():
     df = _frame(
         [

@@ -33,6 +33,7 @@ class AuditResult:
     baseline: dict[str, Any]
     quality: dict[str, Any]
     data_quality_quarantine: dict[str, Any]
+    target_already_reached_at_entry: dict[str, Any]
     decision: AuditDecision
 
     def to_dict(self) -> dict[str, Any]:

@@ -68,7 +68,10 @@ def label_at(
     target_price = entry_price * (1.0 + config.target_return)
     fixed_stop_price = entry_price * (1.0 + config.fixed_stop)
 
-    if pd.notna(signal_close) and float(entry_price) >= float(signal_close) * (1.0 + config.target_return):
+    target_already_reached_at_entry = pd.notna(signal_close) and float(entry_price) >= float(signal_close) * (
+        1.0 + config.target_return
+    )
+    if target_already_reached_at_entry:
         counts["target_already_reached_at_entry_count"] += 1
 
     future = df.iloc[entry_pos:horizon_end_exclusive]
@@ -124,6 +127,7 @@ def label_at(
         "target_before_fixed_stop": bool(target_before_fixed_stop),
         "fixed_stop_hit": bool(fixed_stop_hit),
         "fixed_stop_day": fixed_stop_day,
+        "target_already_reached_at_entry": bool(target_already_reached_at_entry),
         "large_gap_at_entry": (
             (entry_price - float(signal_close)) / float(signal_close)
             if pd.notna(signal_close) and float(signal_close) > 0
