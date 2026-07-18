@@ -485,6 +485,26 @@ reports:
 
 ## 19. Future extension points (explicitly not built in MVP 2)
 
+**Forward-use completion blocker (not a "nice to have" -- required before any forward
+paper-trading phase):** `HistoricalFeatureUniverseProvider` (Section 6,
+`candidate_service.py`) only supports replay from an existing frozen feature dataset.
+It cannot discover the live "today" eligible universe, fetch completed daily market
+data for a genuinely new date, or build Model 2 features for a date outside a frozen
+snapshot. This means MVP 2, as built, **cannot yet generate real daily 1-3 stock
+recommendations for a new trading day** -- it can only replay dates already present in
+a frozen dataset (see EXP-004). A `DailyPointInTimeUniverseProvider` (or equivalently
+named adapter) is needed that can: discover the eligible current universe; obtain
+completed daily market data while excluding the still-open/incomplete session; build
+Model 2 features using the frozen feature specification and train-fitted
+preprocessing (reusing, not duplicating, the existing feature builder); invoke the
+frozen Model 2 adapter; record the data cutoff and source snapshot; and fail closed on
+incomplete or stale data. Before it is used for any forward sandbox run, it must pass
+a parity test against a frozen historical snapshot (exact or tolerance-defined match
+on eligible symbols, feature values, ranking scores, and rank order). Not implemented
+in this MVP 2 cycle.
+
+Other extension points (lower priority, not blockers):
+
 - Stop-loss policy research.
 - Position sizing / capital allocation / portfolio-level risk limits.
 - Transaction-cost and slippage calibration.
