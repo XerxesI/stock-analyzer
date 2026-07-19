@@ -23,6 +23,7 @@ from datetime import date, datetime, timezone
 
 from stock_analyzer.sandbox.application.candidate_service import CandidateService, HistoricalFeatureUniverseProvider
 from stock_analyzer.sandbox.application.entry_service import EntryService
+from stock_analyzer.sandbox.application.market_data_provider import MarketDataProvider
 from stock_analyzer.sandbox.application.monitoring_service import MonitoringService
 from stock_analyzer.sandbox.application.replay_service import ReplayService
 from stock_analyzer.sandbox.config import SandboxConfig
@@ -60,6 +61,7 @@ def build_exp005_replay_services(
     conn: sqlite3.Connection,
     model_adapter,
     universe_provider: HistoricalFeatureUniverseProvider,
+    market_data_provider: MarketDataProvider,
     exp005_config: Exp005Config,
     replay_id: str,
     market_data_snapshot_id: str,
@@ -71,7 +73,13 @@ def build_exp005_replay_services(
     tests), already-fitted `Model2PredictionAdapter`-shaped object -- for Variant D
     it is wrapped in a `RankingControlAdapter` (Section 11.4) that reuses its
     fit_params/model_version/feature_names but replaces the ranking score;
-    Variant B uses it directly, unmodified (Section 12 item 4)."""
+    Variant B uses it directly, unmodified (Section 12 item 4).
+
+    `market_data_provider` is REQUIRED (no default) -- EXP-005 must never fall
+    back to a live Yahoo fetch. For any real run this must be a
+    `stock_analyzer.sandbox.exp005.infrastructure.frozen_market_data_provider.
+    FrozenSwing20MarketDataProvider`; tests may inject a synthetic fake, but the
+    signature itself makes a silent live-data fallback structurally impossible."""
 
     sandbox_config = sandbox_config or SandboxConfig()
     sandbox_repo = SandboxRepository(conn)
@@ -100,10 +108,15 @@ def build_exp005_replay_services(
     )
 
     candidate_service = CandidateService(
-        sandbox_repo, adapter, universe_provider, sandbox_config, admission_orchestrator=capacity_orchestrator,
+        sandbox_repo, adapter, universe_provider, sandbox_config,
+        admission_orchestrator=capacity_orchestrator, market_data_provider=market_data_provider,
     )
-    entry_service = EntryService(sandbox_repo, sandbox_config, accounting_seam=accounting_seam)
-    monitoring_service = MonitoringService(sandbox_repo, sandbox_config, accounting_seam=accounting_seam)
+    entry_service = EntryService(
+        sandbox_repo, sandbox_config, accounting_seam=accounting_seam, market_data_provider=market_data_provider,
+    )
+    monitoring_service = MonitoringService(
+        sandbox_repo, sandbox_config, accounting_seam=accounting_seam, market_data_provider=market_data_provider,
+    )
 
     def day_started_hook(as_of_date: date) -> None:
         if isinstance(adapter, RankingControlAdapter):

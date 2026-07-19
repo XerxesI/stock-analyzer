@@ -32,8 +32,14 @@ from stock_analyzer.sandbox.exp005.manifest import ExperimentManifest
 _REQUIRED_FIELDS = (
     "experiment_id",
     "code_commit_sha",
-    "feature_dataset_hash",
-    "ohlcv_hash",
+    "universe_hash",
+    "ohlc_hash",
+    "signal_hash",
+    "eligibility_hash",
+    "feature_hash",
+    "calendar_version",
+    "feature_snapshot_id",
+    "swing20_snapshot_id",
     "portfolio_configuration_hash",
 )
 

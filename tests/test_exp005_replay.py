@@ -2,6 +2,11 @@
 Stage 8, Section 13's synthetic integration tests): the full stack wired via
 build_exp005_replay_services, driven through the SAME ReplayService.run() path a
 non-EXP-005 replay uses.
+
+Market data is supplied via an INJECTED synthetic MarketDataProvider (Stage 10
+closure P1 review), never a global fetch_as_of monkeypatch -- this is what proves
+build_exp005_replay_services actually routes every OHLCV read through the injected
+provider rather than falling back to the live Yahoo adapter.
 """
 
 from __future__ import annotations
@@ -13,9 +18,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-import stock_analyzer.sandbox.application.candidate_service as candidate_service_module
-import stock_analyzer.sandbox.application.entry_service as entry_service_module
-import stock_analyzer.sandbox.application.monitoring_service as monitoring_service_module
 from stock_analyzer.sandbox.application.candidate_service import HistoricalFeatureUniverseProvider
 from stock_analyzer.sandbox.config import SandboxConfig
 from stock_analyzer.sandbox.domain.replay import DEVELOPMENT_HISTORICAL_REPLAY, ReplayMetadata
@@ -65,32 +67,34 @@ class FakeUniverseProvider:
         )
 
 
+class FakeMarketDataProvider:
+    """A synthetic, in-memory MarketDataProvider -- injected explicitly, never a
+    global fetch_as_of monkeypatch. Proves the replay entry point actually routes
+    every OHLCV read through the injected provider."""
+
+    def __init__(self, days: int = 30, close: float = 100.0) -> None:
+        self._days = days
+        self._close = close
+        self.call_count = 0
+
+    def fetch_as_of(self, symbol: str, as_of_date: date, period: str = "2y") -> pd.DataFrame:
+        self.call_count += 1
+        dates = pd.bdate_range(end=pd.Timestamp(as_of_date), periods=self._days)
+        closes = [self._close] * self._days  # flat -- never hits +20% target, so time exits dominate deterministically
+        return pd.DataFrame(
+            {
+                "Open": closes,
+                "High": [c * 1.005 for c in closes],
+                "Low": [c * 0.995 for c in closes],
+                "Close": closes,
+                "Volume": [1_000_000] * self._days,
+            },
+            index=dates,
+        )
+
+
 def _business_days(start: date, n: int) -> list[date]:
     return [d.date() for d in pd.bdate_range(start=start, periods=n)]
-
-
-def _synthetic_prices(as_of_date: date, days: int = 30, close: float = 100.0) -> pd.DataFrame:
-    dates = pd.bdate_range(end=pd.Timestamp(as_of_date), periods=days)
-    closes = [close] * days  # flat -- never hits +20% target, so time exits dominate deterministically
-    return pd.DataFrame(
-        {
-            "Open": closes,
-            "High": [c * 1.005 for c in closes],
-            "Low": [c * 0.995 for c in closes],
-            "Close": closes,
-            "Volume": [1_000_000] * days,
-        },
-        index=dates,
-    )
-
-
-def _patch_fetch_as_of(monkeypatch) -> None:
-    def fake_fetch_as_of(symbol: str, fetch_date: date, period: str = "2y") -> pd.DataFrame:
-        return _synthetic_prices(fetch_date)
-
-    monkeypatch.setattr(candidate_service_module, "fetch_as_of", fake_fetch_as_of)
-    monkeypatch.setattr(entry_service_module, "fetch_as_of", fake_fetch_as_of)
-    monkeypatch.setattr(monitoring_service_module, "fetch_as_of", fake_fetch_as_of)
 
 
 def _make_connection() -> sqlite3.Connection:
@@ -117,17 +121,21 @@ def _replay_metadata(replay_id: str, dates: list[date], signal_end: date) -> Rep
     )
 
 
-def _run_replay(replay_id: str, dates: list[date], variant_id: str, control_seed: int | None, monkeypatch):
-    _patch_fetch_as_of(monkeypatch)
+def _build_services(replay_id: str, dates: list[date], variant_id: str, control_seed: int | None):
     conn = _make_connection()
     scores = {sym: float(len(SYMBOLS) - i) for i, sym in enumerate(SYMBOLS)}
     model_adapter = FakeModelAdapter(scores)
     universe = FakeUniverseProvider(SYMBOLS, dates)
+    provider = FakeMarketDataProvider()
     exp005_config = Exp005Config(variant_id=variant_id, control_seed=control_seed, portfolio=PortfolioConfig())
-
     services = build_exp005_replay_services(
-        conn, model_adapter, universe, exp005_config, replay_id, market_data_snapshot_id="snap-1",
+        conn, model_adapter, universe, provider, exp005_config, replay_id, market_data_snapshot_id="snap-1",
     )
+    return conn, services, provider
+
+
+def _run_replay(replay_id: str, dates: list[date], variant_id: str, control_seed: int | None):
+    conn, services, provider = _build_services(replay_id, dates, variant_id, control_seed)
     replay = _replay_metadata(replay_id, dates, signal_end=dates[-1])
     result = services.replay_service.run(replay, dates)
     return conn, services, result
@@ -136,9 +144,9 @@ def _run_replay(replay_id: str, dates: list[date], variant_id: str, control_seed
 # --------------------------------------------------------------- daily snapshots
 
 
-def test_exactly_one_snapshot_per_processed_day(monkeypatch):
+def test_exactly_one_snapshot_per_processed_day():
     dates = _business_days(date(2026, 1, 5), 10)
-    conn, services, result = _run_replay("replay-b", dates, VARIANT_B, None, monkeypatch)
+    conn, services, result = _run_replay("replay-b", dates, VARIANT_B, None)
 
     snapshots = services.portfolio_repo.list_equity_snapshots("replay-b")
 
@@ -146,9 +154,9 @@ def test_exactly_one_snapshot_per_processed_day(monkeypatch):
     assert [s.as_of_date for s in snapshots] == dates
 
 
-def test_snapshot_reflects_post_admission_state_not_pre_admission(monkeypatch):
+def test_snapshot_reflects_post_admission_state_not_pre_admission():
     dates = _business_days(date(2026, 1, 5), 3)
-    conn, services, result = _run_replay("replay-b", dates, VARIANT_B, None, monkeypatch)
+    conn, services, result = _run_replay("replay-b", dates, VARIANT_B, None)
 
     # dates[0] is a signal day -- candidates are ranked and (up to 3) admitted on it.
     first_day_snapshot = services.portfolio_repo.get_equity_snapshot("replay-b", dates[0])
@@ -157,9 +165,9 @@ def test_snapshot_reflects_post_admission_state_not_pre_admission(monkeypatch):
     assert first_day_snapshot.cash_units < services.ledger._starting_capital_units  # cash debited
 
 
-def test_reconciliation_invariant_holds_every_day(monkeypatch):
+def test_reconciliation_invariant_holds_every_day():
     dates = _business_days(date(2026, 1, 5), 8)
-    conn, services, result = _run_replay("replay-b", dates, VARIANT_B, None, monkeypatch)
+    conn, services, result = _run_replay("replay-b", dates, VARIANT_B, None)
 
     for snapshot in services.portfolio_repo.list_equity_snapshots("replay-b"):
         assert (
@@ -168,12 +176,44 @@ def test_reconciliation_invariant_holds_every_day(monkeypatch):
         )
 
 
+# ---------------------------------------------------- frozen-data isolation (P1)
+
+
+def test_exp005_replay_never_calls_the_live_data_fetcher(monkeypatch):
+    """The confirmed P1: EXP-005 named itself "frozen-artifact replay" but every
+    service still called the live fetch_as_of internally. Proves that a full
+    EXP-005 replay run never reaches the live fetcher -- patch it to explode, and
+    confirm the run still completes using only the injected provider."""
+
+    def exploding_get_stock_data(*args, **kwargs):
+        raise AssertionError("EXP-005 replay must never call the live data fetcher")
+
+    import stock_analyzer.data.data_fetcher as data_fetcher_module
+
+    monkeypatch.setattr(data_fetcher_module, "get_stock_data", exploding_get_stock_data)
+
+    dates = _business_days(date(2026, 1, 5), 5)
+    conn, services, result = _run_replay("replay-frozen-check", dates, VARIANT_B, None)
+
+    assert len(result.dates_processed) == len(dates)
+
+
+def test_exp005_replay_routes_every_ohlcv_read_through_the_injected_provider():
+    dates = _business_days(date(2026, 1, 5), 5)
+    conn, services, provider = _build_services("replay-provider-check", dates, VARIANT_B, None)
+    replay = _replay_metadata("replay-provider-check", dates, signal_end=dates[-1])
+
+    assert provider.call_count == 0
+    services.replay_service.run(replay, dates)
+    assert provider.call_count > 0
+
+
 # ------------------------------------------------------------------- Variant D
 
 
-def test_variant_d_scores_vary_deterministically_by_date(monkeypatch):
+def test_variant_d_scores_vary_deterministically_by_date():
     dates = _business_days(date(2026, 1, 5), 5)
-    conn, services, result = _run_replay("replay-d", dates, VARIANT_D, control_seed=7, monkeypatch=monkeypatch)
+    conn, services, result = _run_replay("replay-d", dates, VARIANT_D, control_seed=7)
 
     admissions = services.portfolio_repo.list_admissions_for_session("replay-d", dates[0])
     assert len(admissions) > 0
@@ -184,10 +224,10 @@ def test_variant_d_scores_vary_deterministically_by_date(monkeypatch):
         assert expected_rank_order.index(admission.symbol) + 1 <= 5
 
 
-def test_variant_d_is_deterministic_and_reproducible(monkeypatch):
+def test_variant_d_is_deterministic_and_reproducible():
     dates = _business_days(date(2026, 1, 5), 6)
-    conn_a, services_a, _ = _run_replay("replay-d-a", dates, VARIANT_D, control_seed=3, monkeypatch=monkeypatch)
-    conn_b, services_b, _ = _run_replay("replay-d-b", dates, VARIANT_D, control_seed=3, monkeypatch=monkeypatch)
+    conn_a, services_a, _ = _run_replay("replay-d-a", dates, VARIANT_D, control_seed=3)
+    conn_b, services_b, _ = _run_replay("replay-d-b", dates, VARIANT_D, control_seed=3)
 
     admissions_a = [(a.candidate_id, a.decision, a.rank_at_admission) for a in services_a.portfolio_repo.list_admissions_for_session("replay-d-a", dates[0])]
     admissions_b = [(a.candidate_id, a.decision, a.rank_at_admission) for a in services_b.portfolio_repo.list_admissions_for_session("replay-d-b", dates[0])]
@@ -215,7 +255,7 @@ def _dump_exp005_state(conn: sqlite3.Connection) -> dict[str, list[dict]]:
     return dump
 
 
-def test_interrupted_replay_resumes_to_identical_final_state(monkeypatch):
+def test_interrupted_replay_resumes_to_identical_final_state():
     """Simulates a genuine crash-and-restart: the first few dates are processed
     through ReplayService._process_dates directly (which advances the resume
     watermark on success, exactly like a real crash after N dates completed --
@@ -229,24 +269,64 @@ def test_interrupted_replay_resumes_to_identical_final_state(monkeypatch):
     dates = _business_days(date(2026, 1, 5), 8)
 
     # uninterrupted run
-    conn_full, services_full, _ = _run_replay("replay-full", dates, VARIANT_B, None, monkeypatch)
+    conn_full, services_full, _ = _run_replay("replay-full", dates, VARIANT_B, None)
     full_dump = _dump_exp005_state(conn_full)
 
     # crashed-after-3-dates run, then resumed with the full original date list.
-    _patch_fetch_as_of(monkeypatch)
-    conn_resumed = _make_connection()
-    scores = {sym: float(len(SYMBOLS) - i) for i, sym in enumerate(SYMBOLS)}
-    model_adapter = FakeModelAdapter(scores)
-    universe = FakeUniverseProvider(SYMBOLS, dates)
-    exp005_config = Exp005Config(variant_id=VARIANT_B, portfolio=PortfolioConfig())
-    services_resumed = build_exp005_replay_services(
-        conn_resumed, model_adapter, universe, exp005_config, "replay-full", market_data_snapshot_id="snap-1",
-    )
+    conn_resumed, services_resumed, _ = _build_services("replay-full", dates, VARIANT_B, None)
     replay = _replay_metadata("replay-full", dates, signal_end=dates[-1])
     services_resumed.sandbox_repo.create_replay_metadata(replay)
     services_resumed.replay_service._process_dates(replay, dates[:3], progress_every=None)
     assert services_resumed.sandbox_repo.get_replay_metadata("replay-full").last_completed_date == dates[2]
 
+    services_resumed.replay_service.run(replay, dates)  # resume: full original list
+
+    resumed_dump = _dump_exp005_state(conn_resumed)
+
+    assert resumed_dump == full_dump
+
+
+def test_crash_between_snapshot_commit_and_watermark_advance_resumes_correctly(monkeypatch):
+    """Point 4 (Stage 10 closure): a crash landing precisely between
+    day_completed_hook's commit (the daily equity snapshot is ALREADY persisted)
+    and mark_date_completed's watermark advance is a narrower, specifically
+    dangerous window -- a naive resume could re-run the same day's admission/fill
+    logic against a database that already reflects that day's snapshot. Injects
+    the failure exactly there (inside mark_date_completed, for one specific date)
+    and proves resume still reaches the exact same final state as an
+    uninterrupted run."""
+
+    dates = _business_days(date(2026, 1, 5), 8)
+
+    # uninterrupted baseline
+    conn_full, services_full, _ = _run_replay("replay-boundary", dates, VARIANT_B, None)
+    full_dump = _dump_exp005_state(conn_full)
+
+    conn_resumed, services_resumed, _ = _build_services("replay-boundary", dates, VARIANT_B, None)
+    replay = _replay_metadata("replay-boundary", dates, signal_end=dates[-1])
+
+    crash_date = dates[2]
+    original_mark_date_completed = services_resumed.sandbox_repo.mark_date_completed
+
+    def exploding_mark_date_completed(replay_id: str, as_of_date: date):
+        if as_of_date == crash_date:
+            raise RuntimeError("simulated crash after snapshot commit, before watermark advance")
+        return original_mark_date_completed(replay_id, as_of_date)
+
+    monkeypatch.setattr(services_resumed.sandbox_repo, "mark_date_completed", exploding_mark_date_completed)
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        services_resumed.replay_service.run(replay, dates)
+
+    # the crash date's snapshot was already committed by day_completed_hook BEFORE
+    # mark_date_completed raised -- proves the crash genuinely landed after the
+    # commit, not before it.
+    assert services_resumed.portfolio_repo.get_equity_snapshot("replay-boundary", crash_date) is not None
+    # but the watermark never advanced to (or past) it
+    stored = services_resumed.sandbox_repo.get_replay_metadata("replay-boundary")
+    assert stored.last_completed_date == dates[1]
+
+    monkeypatch.setattr(services_resumed.sandbox_repo, "mark_date_completed", original_mark_date_completed)
     services_resumed.replay_service.run(replay, dates)  # resume: full original list
 
     resumed_dump = _dump_exp005_state(conn_resumed)

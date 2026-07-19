@@ -19,6 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from scripts.analyze_swing_20_context_target_mechanics import _apply_quantile_bucket  # noqa: E402
 from stock_analyzer.core.indicators import calculate_indicators
+from stock_analyzer.sandbox.application.market_data_provider import MarketDataProvider
 from stock_analyzer.sandbox.config import SandboxConfig, round_price
 from stock_analyzer.sandbox.domain.candidate import RankedCandidate
 from stock_analyzer.sandbox.domain.entry_order import EntryOrder
@@ -114,6 +115,16 @@ class DefaultAdmissionOrchestrator:
         return [self._create_entry_order_fn(as_of_date, candidate) for candidate in candidates]
 
 
+class _DefaultMarketDataProvider:
+    """Delegates to THIS module's own `fetch_as_of` name at call time (not bound
+    at construction) -- existing tests that monkeypatch
+    `candidate_service_module.fetch_as_of` continue to work completely
+    unchanged. See application/market_data_provider.py's module docstring."""
+
+    def fetch_as_of(self, symbol: str, as_of_date: date, period: str = "2y") -> pd.DataFrame:
+        return fetch_as_of(symbol, as_of_date, period)
+
+
 class HistoricalFeatureUniverseProvider:
     """Symbol universe + pre-computed Model 2 stock/context features for a given
     as-of date, read from an existing frozen feature dataset (e.g. the locked_test or
@@ -150,12 +161,14 @@ class CandidateService:
         universe_provider: HistoricalFeatureUniverseProvider,
         config: SandboxConfig | None = None,
         admission_orchestrator: AdmissionOrchestrator | None = None,
+        market_data_provider: MarketDataProvider | None = None,
     ) -> None:
         self._repo = repository
         self._adapter = prediction_adapter
         self._universe = universe_provider
         self._config = config or SandboxConfig()
         self._admission_orchestrator = admission_orchestrator or DefaultAdmissionOrchestrator(self._create_entry_order)
+        self._market_data = market_data_provider or _DefaultMarketDataProvider()
 
     def generate_candidates(self, as_of_date: date) -> CandidateGenerationResult:
         """Build all 10 shadow candidates and decide the final selection in memory
@@ -239,7 +252,7 @@ class CandidateService:
         feature_row: pd.Series,
         adv_quintile: str,
     ) -> RankedCandidate:
-        prices = fetch_as_of(symbol, as_of_date)
+        prices = self._market_data.fetch_as_of(symbol, as_of_date)
         signal_close: float | None = None
         atr14 = None
         exclusion_reason = None

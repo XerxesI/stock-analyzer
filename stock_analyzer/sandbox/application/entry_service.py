@@ -16,6 +16,7 @@ from datetime import date
 import pandas as pd
 
 from stock_analyzer.sandbox.application.accounting_seam import DefaultAccountingSeam, PortfolioAccountingSeam
+from stock_analyzer.sandbox.application.market_data_provider import MarketDataProvider
 from stock_analyzer.sandbox.config import SandboxConfig, round_money, round_price
 from stock_analyzer.sandbox.domain.entry_order import (
     EXPIRED,
@@ -49,16 +50,26 @@ class EntryProcessingOutcome:
     position_id: str | None = None
 
 
+class _DefaultMarketDataProvider:
+    """Delegates to THIS module's own `fetch_as_of` name at call time -- see
+    application/market_data_provider.py's module docstring."""
+
+    def fetch_as_of(self, symbol: str, as_of_date: date, period: str = "2y") -> pd.DataFrame:
+        return fetch_as_of(symbol, as_of_date, period)
+
+
 class EntryService:
     def __init__(
         self,
         repository: SandboxRepository,
         config: SandboxConfig | None = None,
         accounting_seam: PortfolioAccountingSeam | None = None,
+        market_data_provider: MarketDataProvider | None = None,
     ) -> None:
         self._repo = repository
         self._config = config or SandboxConfig()
         self._accounting_seam = accounting_seam or DefaultAccountingSeam(self._config)
+        self._market_data = market_data_provider or _DefaultMarketDataProvider()
 
     def process_entries(self, as_of_date: date) -> list[EntryProcessingOutcome]:
         outcomes: list[EntryProcessingOutcome] = []
@@ -78,7 +89,7 @@ class EntryService:
             if len(prior_attempts) >= self._config.entry_validity_sessions:
                 continue  # already resolved in a prior run; defensive, should not happen
 
-            prices = fetch_as_of(order.symbol, as_of_date)
+            prices = self._market_data.fetch_as_of(order.symbol, as_of_date)
             bar = session_bar(prices, as_of_date)
             if bar is None:
                 outcomes.append(EntryProcessingOutcome(order.order_id, order.symbol, "NO_SESSION_DATA"))

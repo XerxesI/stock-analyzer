@@ -7,7 +7,10 @@ executes.
 from __future__ import annotations
 
 import dataclasses
+import json
+from datetime import date
 
+import pandas as pd
 import pytest
 
 from stock_analyzer.sandbox.exp005.config import Exp005Config
@@ -16,27 +19,61 @@ from stock_analyzer.sandbox.exp005.freeze_validation import (
     missing_manifest_fields,
     validate_freeze,
 )
+from stock_analyzer.sandbox.exp005.infrastructure.frozen_artifacts import sha256_of_dataframe, sha256_of_file
 from stock_analyzer.sandbox.exp005.manifest import build_experiment_manifest
 
 
-@pytest.fixture
-def feature_file(tmp_path):
-    p = tmp_path / "features.parquet"
-    p.write_bytes(b"fake feature dataset bytes")
-    return p
+def _write_parquet(path, df: pd.DataFrame) -> None:
+    df.to_parquet(path)
+
+
+def _build_fixture_snapshots(tmp_path):
+    swing20_dir = tmp_path / "swing_20" / "snapshots" / "swing20_test"
+    swing20_dir.mkdir(parents=True)
+    prices_df = pd.DataFrame(
+        {
+            "symbol": ["AAA", "AAA", "AAA"],
+            "date": pd.to_datetime(["2026-01-05", "2026-01-06", "2026-01-07"]),
+            "Open": [10.0, 10.1, 10.2], "High": [10.5, 10.6, 10.7], "Low": [9.5, 9.6, 9.7],
+            "Close": [10.2, 10.3, 10.4], "Volume": [1000, 1100, 1200],
+        }
+    )
+    other_df = pd.DataFrame({"symbol": ["AAA"], "value": [1]})
+    artifact_dfs = {"universe": other_df, "prices": prices_df, "labels": other_df, "eligibility": other_df, "failures": other_df}
+    artifact_hashes, artifacts_paths = {}, {}
+    for name, df in artifact_dfs.items():
+        path = swing20_dir / f"{name}.parquet"
+        _write_parquet(path, df)
+        artifact_hashes[name] = sha256_of_file(path)
+        artifacts_paths[name] = str(path)
+    with open(swing20_dir / "manifest.json", "w", encoding="utf-8") as f:
+        json.dump({"dataset_version": "swing20_test", "artifacts": artifacts_paths, "artifact_hashes": artifact_hashes}, f)
+
+    feature_dir = tmp_path / "swing_20_features" / "snapshots" / "swing20_features_test"
+    feature_dir.mkdir(parents=True)
+    features_df = pd.DataFrame({"symbol": ["AAA"], "date": pd.to_datetime(["2026-01-05"]), "f1": [1.0]})
+    _write_parquet(feature_dir / "features.parquet", features_df)
+    with open(feature_dir / "manifest.json", "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "dataset_version": "swing20_features_test",
+                "source_swing20_snapshot_id": "swing20_test",
+                "source_swing20_snapshot_dir": str(swing20_dir),
+                "source_swing20_artifact_hashes": artifact_hashes,
+                "feature_dataset_hash": sha256_of_dataframe(features_df),
+            },
+            f,
+        )
+    return feature_dir
 
 
 @pytest.fixture
-def ohlcv_file(tmp_path):
-    p = tmp_path / "prices.parquet"
-    p.write_bytes(b"fake ohlcv bytes")
-    return p
-
-
-@pytest.fixture
-def complete_manifest(feature_file, ohlcv_file):
+def complete_manifest(tmp_path):
+    feature_dir = _build_fixture_snapshots(tmp_path)
     config = Exp005Config()
-    return build_experiment_manifest(config, str(feature_file), str(ohlcv_file), code_commit_sha="abc123")
+    return build_experiment_manifest(
+        config, feature_dir, period_start=date(2026, 1, 5), period_end=date(2026, 1, 7), code_commit_sha="abc123",
+    )
 
 
 def test_complete_manifest_passes_validation(complete_manifest):
@@ -54,8 +91,14 @@ def test_spy_benchmark_none_does_not_block_freeze(complete_manifest):
     [
         ("experiment_id", ""),
         ("code_commit_sha", ""),
-        ("feature_dataset_hash", ""),
-        ("ohlcv_hash", ""),
+        ("universe_hash", ""),
+        ("ohlc_hash", ""),
+        ("signal_hash", ""),
+        ("eligibility_hash", ""),
+        ("feature_hash", ""),
+        ("calendar_version", ""),
+        ("feature_snapshot_id", ""),
+        ("swing20_snapshot_id", ""),
         ("portfolio_configuration_hash", ""),
         ("schema_version", 0),
         ("decision_audit_schema_version", 0),
@@ -73,12 +116,12 @@ def test_each_missing_field_individually_blocks_freeze(complete_manifest, field,
 
 
 def test_multiple_missing_fields_are_all_named(complete_manifest):
-    broken = dataclasses.replace(complete_manifest, code_commit_sha="", feature_dataset_hash="")
+    broken = dataclasses.replace(complete_manifest, code_commit_sha="", universe_hash="")
 
     missing = missing_manifest_fields(broken)
 
     assert "code_commit_sha" in missing
-    assert "feature_dataset_hash" in missing
+    assert "universe_hash" in missing
     assert len(missing) == 2
 
 

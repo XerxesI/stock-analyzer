@@ -113,6 +113,21 @@ different names. This is a naming difference only, not a behavioral deviation.
 - [x] Stage 10 -- freeze validation gate (exp005/freeze_validation.py). **Stop
       point reached: no real EXP-005 run has occurred. Independent review
       required before any real Variant B / Variant D execution.**
+      Stage 9-10 closure (3 confirmed P1s from independent review, fixed):
+      (1) CandidateService/EntryService/MonitoringService now require an
+      injected MarketDataProvider seam (application/market_data_provider.py);
+      EXP-005 wires a FrozenSwing20MarketDataProvider with no live/network
+      fallback, hash-verified against its upstream SWING_20 snapshot at
+      construction (exp005/infrastructure/frozen_market_data_provider.py,
+      frozen_artifacts.py). (2) exp005/manifest.py rewritten: every hash
+      (universe/ohlc/signal/eligibility/feature) now comes from physically
+      re-verified snapshot lineage, not an arbitrary raw-file hash; added
+      calendar_version (derived from the frozen prices artifact's own session
+      dates); manifest now persists as a canonical, round-tripping JSON
+      artifact. (3) exp005/application/real_run.py is the one enforced
+      execution boundary (verify_real_run_preconditions/run_real_experiment):
+      commit/working-tree/schema/artifact-hash/config/seed/calendar checks all
+      run BEFORE any service is constructed or ReplayService.run is called.
 - [ ] Stage 11
 - [ ] Stage 12
 - [ ] Stage 13
