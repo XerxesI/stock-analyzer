@@ -303,4 +303,26 @@ different names. This is a naming difference only, not a behavioral deviation.
       test files, so this fixture verifies wiring/joins/filters rather than
       re-deriving arithmetic. Plus 4 new repository-method tests (3 in
       test_sandbox_persistence.py, 1 in test_exp005_repository.py).
-- [ ] Stage 15 (synthetic fixture + completion report)
+- [x] Stage 15 -- synthetic end-to-end fixture + completion report. See
+      docs/09_experiments/EXP-005_Stage15_Completion_Report.md for full detail.
+      tests/test_exp005_stage15_synthetic_end_to_end.py drives run_real_experiment
+      for real (only the model adapter and feature-universe provider are faked,
+      as in test_exp005_real_run.py's own integration test) against a small,
+      fully synthetic two-symbol frozen price history: real CandidateService
+      scoring/ranking/data-quality (the first test to exercise this with a
+      non-empty universe -- every prior real-run test used an empty one), real
+      capacity competition under max_slots=1 (AAA admitted, BBB NO_CAPACITY
+      twice), real ADR-007 fill, real target-exit via a deliberately ambiguous
+      intraday touch (exercising Section 20's exclusion rule through the whole
+      pipeline), real accounting, then the real Stage 11 diagnostics loading
+      boundary and Stage 12-14 diagnostics/report aggregation against the
+      actual persisted database -- not a fixture built to match expected
+      output. All predicted outcomes confirmed on the first corrected run (one
+      hand-count fix, not a code defect: the fill day's own same-day HOLD
+      snapshot was initially miscounted).
+
+      **Stages 0-15 complete. No real EXP-005 replay or P&L has been
+      produced.** Per the standing authorization, an independent review of
+      Stages 11-15 is required next; only after it passes may a final manifest
+      be generated for the commit with which a real Variant B or Variant D run
+      is actually executed.
