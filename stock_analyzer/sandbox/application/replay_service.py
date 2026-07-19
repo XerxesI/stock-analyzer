@@ -68,6 +68,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+from typing import Callable
 
 from stock_analyzer.sandbox.application.candidate_service import CandidateService
 from stock_analyzer.sandbox.application.entry_service import EntryService
@@ -156,12 +157,30 @@ class ReplayService:
         entry_service: EntryService,
         monitoring_service: MonitoringService,
         config: SandboxConfig | None = None,
+        day_started_hook: Callable[[date], None] | None = None,
+        day_completed_hook: Callable[[date], None] | None = None,
     ) -> None:
+        """`day_started_hook`, if given, is called once per processed date, BEFORE
+        that date's entries -> monitoring -> candidates sequence begins (e.g. so
+        EXP-005's Variant D control adapter can be told the date it should score
+        against -- CandidateService.generate_candidates never passes as_of_date to
+        the prediction adapter directly).
+
+        `day_completed_hook`, if given, is called once per processed date, after
+        that date's full entries -> monitoring -> candidates sequence and BEFORE
+        `mark_date_completed` advances the resume watermark (Section 8.5: the daily
+        portfolio equity snapshot is taken exactly here).
+
+        Both default to a no-op -- every non-EXP-005 caller's control flow and
+        output are unaffected."""
+
         self._repo = repository
         self._candidates = candidate_service
         self._entries = entry_service
         self._monitoring = monitoring_service
         self._config = config or SandboxConfig()
+        self._day_started_hook = day_started_hook or (lambda as_of_date: None)
+        self._day_completed_hook = day_completed_hook or (lambda as_of_date: None)
 
     def run(self, replay: ReplayMetadata, trading_dates: list[date], progress_every: int | None = None) -> ReplayRunResult:
         """`trading_dates` must be sorted ascending, unique, and fall within
@@ -241,6 +260,7 @@ class ReplayService:
 
         day_results: list[ReplayDayResult] = []
         for position, as_of_date in enumerate(dates_to_process, start=1):
+            self._day_started_hook(as_of_date)
             entry_outcomes = self._entries.process_entries(as_of_date)
             monitoring_outcomes = self._monitoring.monitor(as_of_date)
 
@@ -260,6 +280,7 @@ class ReplayService:
                     n_shadow_candidates=n_shadow,
                 )
             )
+            self._day_completed_hook(as_of_date)
             self._repo.mark_date_completed(replay.replay_id, as_of_date)
 
             if progress_every and (position % progress_every == 0 or position == len(dates_to_process)):
