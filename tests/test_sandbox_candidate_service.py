@@ -337,6 +337,52 @@ def test_actionable_candidate_creates_pending_entry_order(repo: SandboxRepositor
         assert order.valid_until > as_of
 
 
+# ------------------------------------------------------- admission orchestrator seam
+
+
+class _RecordingOrchestrator:
+    """Test double proving generate_candidates actually delegates Phase 4 to an
+    injected AdmissionOrchestrator (Section 11.2) instead of always using the
+    default list-comprehension path."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[list, date]] = []
+
+    def admit_and_create_orders(self, candidates, as_of_date):
+        self.calls.append((candidates, as_of_date))
+        return []  # deliberately creates no orders, to prove the default path was bypassed
+
+
+def test_generate_candidates_delegates_to_injected_admission_orchestrator(monkeypatch):
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    init_db(conn)
+    repo = SandboxRepository(conn)
+
+    as_of = date(2026, 6, 15)
+    symbols = ["SYM0", "SYM1"]
+    scores = {"SYM0": 1.0, "SYM1": 0.5}
+    orchestrator = _RecordingOrchestrator()
+
+    def fake_fetch_as_of(symbol: str, fetch_date: date, period: str = "2y") -> pd.DataFrame:
+        return _synthetic_prices(fetch_date)
+
+    monkeypatch.setattr(candidate_service_module, "fetch_as_of", fake_fetch_as_of)
+    universe = FakeUniverseProvider({as_of: _universe_frame(symbols)})
+    adapter = FakePredictionAdapter(scores)
+    service = CandidateService(repo, adapter, universe, CONFIG, admission_orchestrator=orchestrator)
+
+    result = service.generate_candidates(as_of)
+
+    assert len(orchestrator.calls) == 1
+    called_candidates, called_as_of = orchestrator.calls[0]
+    assert called_as_of == as_of
+    assert {c.symbol for c in called_candidates} == set(symbols)
+    # the injected orchestrator returned [] -- proves the default path never ran
+    assert result.entry_orders == []
+
+
 # --------------------------------------------------------------- frozen model protection
 
 

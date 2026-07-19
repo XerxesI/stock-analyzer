@@ -8,6 +8,7 @@ import sys
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from pathlib import Path
+from typing import Callable, Protocol
 
 import numpy as np
 import pandas as pd
@@ -65,6 +66,54 @@ def compute_max_entry_price(signal_close: float | None, atr14: float | None, con
     return round_price(min(close_cap, atr_cap))
 
 
+def build_entry_order(as_of_date: date, candidate: RankedCandidate, entry_validity_sessions: int) -> EntryOrder:
+    """Pure construction only -- no persistence, no recommendation. Factored out of
+    `CandidateService._create_entry_order` (Section 11.2) so both the default path
+    (which still builds-then-persists-then-records-a-recommendation in one step,
+    exactly as before) and an injected `AdmissionOrchestrator` (which must build an
+    order to pass into its own atomic admission transaction BEFORE anything is
+    persisted) share the identical order-construction logic. Called only once the
+    candidate itself is already persisted (its candidate_id is entry_orders' foreign
+    key target)."""
+
+    valid_until = add_trading_sessions(as_of_date, entry_validity_sessions)
+    return EntryOrder(
+        order_id=EntryOrder.make_id(candidate.candidate_id),
+        candidate_id=candidate.candidate_id,
+        symbol=candidate.symbol,
+        signal_date=as_of_date,
+        created_date=as_of_date,
+        valid_until=valid_until,
+        max_entry_price=candidate.max_entry_price,
+        status=ORDER_PENDING,
+    )
+
+
+class AdmissionOrchestrator(Protocol):
+    def admit_and_create_orders(self, candidates: list[RankedCandidate], as_of_date: date) -> list[EntryOrder]:
+        """Section 11.2's seam: replaces Phase 4's former one-line list
+        comprehension. `candidates` is the actionable (already rank-limited,
+        already-open/pending-excluded) selection, in rank order (Section 8.4).
+        Returns the orders actually created -- for a capacity-aware
+        implementation, a NO_CAPACITY candidate contributes no order."""
+        ...
+
+
+class DefaultAdmissionOrchestrator:
+    """Section 11.2 point 4: touches portfolio_admissions/slot_reservations NOT AT
+    ALL. Its body is exactly today's list comprehension -- delegates to the SAME
+    build-persist-and-record-a-recommendation callback CandidateService has always
+    used (`_create_entry_order`), so with this as the default, generate_candidates's
+    control flow, database writes, and output are completely unchanged from before
+    this seam existed."""
+
+    def __init__(self, create_entry_order_fn: Callable[[date, RankedCandidate], EntryOrder]) -> None:
+        self._create_entry_order_fn = create_entry_order_fn
+
+    def admit_and_create_orders(self, candidates: list[RankedCandidate], as_of_date: date) -> list[EntryOrder]:
+        return [self._create_entry_order_fn(as_of_date, candidate) for candidate in candidates]
+
+
 class HistoricalFeatureUniverseProvider:
     """Symbol universe + pre-computed Model 2 stock/context features for a given
     as-of date, read from an existing frozen feature dataset (e.g. the locked_test or
@@ -100,11 +149,13 @@ class CandidateService:
         prediction_adapter: Model2PredictionAdapter,
         universe_provider: HistoricalFeatureUniverseProvider,
         config: SandboxConfig | None = None,
+        admission_orchestrator: AdmissionOrchestrator | None = None,
     ) -> None:
         self._repo = repository
         self._adapter = prediction_adapter
         self._universe = universe_provider
         self._config = config or SandboxConfig()
+        self._admission_orchestrator = admission_orchestrator or DefaultAdmissionOrchestrator(self._create_entry_order)
 
     def generate_candidates(self, as_of_date: date) -> CandidateGenerationResult:
         """Build all 10 shadow candidates and decide the final selection in memory
@@ -170,8 +221,10 @@ class CandidateService:
             self._repo.insert_ranked_candidate(candidate)
 
         # Phase 4: now that the candidate rows exist, create entry orders (and
-        # BUY_PENDING recommendations) for the selected symbols only.
-        orders = [self._create_entry_order(as_of_date, candidate) for candidate in actionable]
+        # BUY_PENDING recommendations) for the selected symbols only -- via the
+        # admission orchestrator seam (Section 11.2). With the default orchestrator
+        # this is exactly today's behavior.
+        orders = self._admission_orchestrator.admit_and_create_orders(actionable, as_of_date)
 
         self._repo.complete_run(run_id, datetime.now(timezone.utc))
         return CandidateGenerationResult(run_id, as_of_date, final_candidates, actionable, orders)
@@ -291,19 +344,10 @@ class CandidateService:
 
     def _create_entry_order(self, as_of_date: date, candidate: RankedCandidate) -> EntryOrder:
         """Called only after `candidate` has already been persisted (its candidate_id
-        is entry_orders' foreign key target)."""
+        is entry_orders' foreign key target). The default admission orchestrator's
+        callback -- builds, persists, and records a BUY_PENDING recommendation."""
 
-        valid_until = add_trading_sessions(as_of_date, self._config.entry_validity_sessions)
-        order = EntryOrder(
-            order_id=EntryOrder.make_id(candidate.candidate_id),
-            candidate_id=candidate.candidate_id,
-            symbol=candidate.symbol,
-            signal_date=as_of_date,
-            created_date=as_of_date,
-            valid_until=valid_until,
-            max_entry_price=candidate.max_entry_price,
-            status=ORDER_PENDING,
-        )
+        order = build_entry_order(as_of_date, candidate, self._config.entry_validity_sessions)
         order, _created = self._repo.create_entry_order(order)
 
         self._repo.insert_recommendation(

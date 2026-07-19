@@ -107,7 +107,7 @@ different names. This is a naming difference only, not a behavioral deviation.
 - [x] Stage 4 -- atomic admission transaction + orphan check
 - [x] Stage 5 -- execution accounting
 - [x] Stage 6 -- portfolio ledger, equity snapshots, aligned dual-accounting sizing seam
-- [ ] Stage 7
+- [x] Stage 7 -- admission orchestrator seam (CandidateService), RankingControlAdapter (Variant D), CapacityAdmissionOrchestrator
 - [ ] Stage 8
 - [ ] Stage 9
 - [ ] Stage 10 (stop point -- no real run until this passes)
