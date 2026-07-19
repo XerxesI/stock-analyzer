@@ -181,7 +181,16 @@ different names. This is a naming difference only, not a behavioral deviation.
       connection before anything else, reads back both recorded versions,
       requires them to equal the manifest, and requires PRAGMA foreign_keys=ON
       (checked, never silently enabled).
-- [ ] Stage 11
+
+      **Stage 9-10 independently reviewed and locked (2026-07-19), 4 closure
+      cycles.** No real EXP-005 replay or P&L has been produced. The final
+      manifest commit that actually runs a real replay may only be generated
+      after Stage 15 completes and passes its own independent review.
+- [x] Stage 11 -- diagnostics package skeleton (exp005/diagnostics/diagnostics.py:
+      DiagnosticsContext, load_diagnostics_context -- Section 30's pure-function
+      loading boundary, re-verifies the frozen prices artifact against the
+      manifest) + import-isolation test (statically walks the import graph of
+      every decision-time module, direct and transitive, per Section 26)
 - [ ] Stage 12
 - [ ] Stage 13
 - [ ] Stage 14

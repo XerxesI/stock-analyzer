@@ -1,0 +1,134 @@
+"""Tests for EXP-005's diagnostics mediated loading boundary (Stage 11):
+load_diagnostics_context re-verifies the frozen prices artifact against the
+manifest before handing back a DiagnosticsContext -- Section 30's pure-function
+contract enforced at the loading step, not just documented.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import json
+import sqlite3
+from datetime import date
+
+import pandas as pd
+import pytest
+
+from stock_analyzer.sandbox.exp005.config import Exp005Config
+from stock_analyzer.sandbox.exp005.diagnostics.diagnostics import (
+    DiagnosticsProvenanceError,
+    load_diagnostics_context,
+)
+from stock_analyzer.sandbox.exp005.infrastructure.frozen_artifacts import sha256_of_dataframe, sha256_of_file
+from stock_analyzer.sandbox.exp005.infrastructure.schema import init_exp005_schema
+from stock_analyzer.sandbox.exp005.manifest import build_experiment_manifest
+from stock_analyzer.sandbox.infrastructure.schema import init_db
+
+SIGNAL_START = date(2026, 1, 5)
+SIGNAL_END = date(2026, 1, 6)
+OUTCOME_END = date(2026, 1, 7)
+REPLAY_ID = "replay-diag-1"
+
+
+def _write_parquet(path, df: pd.DataFrame) -> None:
+    df.to_parquet(path)
+
+
+def _build_fixture_snapshots(tmp_path):
+    swing20_dir = tmp_path / "swing_20" / "snapshots" / "swing20_test"
+    swing20_dir.mkdir(parents=True)
+    prices_df = pd.DataFrame(
+        {
+            "symbol": ["AAA", "AAA", "AAA"],
+            "date": pd.to_datetime(["2026-01-05", "2026-01-06", "2026-01-07"]),
+            "Open": [10.0, 10.1, 10.2], "High": [10.5, 10.6, 10.7], "Low": [9.5, 9.6, 9.7],
+            "Close": [10.2, 10.3, 10.4], "Volume": [1000, 1100, 1200],
+        }
+    )
+    other_df = pd.DataFrame({"symbol": ["AAA"], "value": [1]})
+    artifact_dfs = {"universe": other_df, "prices": prices_df, "labels": other_df, "eligibility": other_df, "failures": other_df}
+    artifact_hashes, artifacts_paths = {}, {}
+    for name, df in artifact_dfs.items():
+        path = swing20_dir / f"{name}.parquet"
+        _write_parquet(path, df)
+        artifact_hashes[name] = sha256_of_file(path)
+        artifacts_paths[name] = str(path)
+    with open(swing20_dir / "manifest.json", "w", encoding="utf-8") as f:
+        json.dump({"dataset_version": "swing20_test", "artifacts": artifacts_paths, "artifact_hashes": artifact_hashes}, f)
+
+    feature_dir = tmp_path / "swing_20_features" / "snapshots" / "swing20_features_test"
+    feature_dir.mkdir(parents=True)
+    features_df = pd.DataFrame({"symbol": ["AAA"], "date": pd.to_datetime(["2026-01-05"]), "f1": [1.0]})
+    _write_parquet(feature_dir / "features.parquet", features_df)
+    with open(feature_dir / "manifest.json", "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "dataset_version": "swing20_features_test",
+                "source_swing20_snapshot_id": "swing20_test",
+                "source_swing20_snapshot_dir": str(swing20_dir),
+                "source_swing20_artifact_hashes": artifact_hashes,
+                "feature_dataset_hash": sha256_of_dataframe(features_df),
+            },
+            f,
+        )
+    return feature_dir
+
+
+def _make_connection() -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    init_db(conn)
+    init_exp005_schema(conn)
+    return conn
+
+
+def test_load_diagnostics_context_succeeds_for_consistent_manifest(tmp_path):
+    feature_dir = _build_fixture_snapshots(tmp_path)
+    config = Exp005Config()
+    manifest = build_experiment_manifest(config, feature_dir, SIGNAL_START, SIGNAL_END, OUTCOME_END, code_commit_sha="abc123")
+    conn = _make_connection()
+
+    context = load_diagnostics_context(conn, manifest, feature_dir, REPLAY_ID)
+
+    assert context.manifest == manifest
+    assert context.replay_id == REPLAY_ID
+    assert not context.prices_df.empty
+    assert context.portfolio_repo is not None
+    assert context.sandbox_repo is not None
+
+
+def test_load_diagnostics_context_rejects_mismatched_ohlc_hash(tmp_path):
+    feature_dir = _build_fixture_snapshots(tmp_path)
+    config = Exp005Config()
+    manifest = build_experiment_manifest(config, feature_dir, SIGNAL_START, SIGNAL_END, OUTCOME_END, code_commit_sha="abc123")
+    wrong_manifest = dataclasses.replace(manifest, ohlc_hash="0" * 64)
+    conn = _make_connection()
+
+    with pytest.raises(DiagnosticsProvenanceError, match="ohlc_hash|prices hash"):
+        load_diagnostics_context(conn, wrong_manifest, feature_dir, REPLAY_ID)
+
+
+def test_load_diagnostics_context_rejects_mismatched_feature_snapshot_id(tmp_path):
+    feature_dir = _build_fixture_snapshots(tmp_path)
+    config = Exp005Config()
+    manifest = build_experiment_manifest(config, feature_dir, SIGNAL_START, SIGNAL_END, OUTCOME_END, code_commit_sha="abc123")
+    wrong_manifest = dataclasses.replace(manifest, feature_snapshot_id="some-other-snapshot")
+    conn = _make_connection()
+
+    with pytest.raises(DiagnosticsProvenanceError, match="feature_snapshot_id"):
+        load_diagnostics_context(conn, wrong_manifest, feature_dir, REPLAY_ID)
+
+
+def test_load_diagnostics_context_rejects_tampered_prices_file(tmp_path):
+    feature_dir = _build_fixture_snapshots(tmp_path)
+    config = Exp005Config()
+    manifest = build_experiment_manifest(config, feature_dir, SIGNAL_START, SIGNAL_END, OUTCOME_END, code_commit_sha="abc123")
+    conn = _make_connection()
+
+    swing20_dir = tmp_path / "swing_20" / "snapshots" / "swing20_test"
+    tampered = pd.DataFrame({"symbol": ["ZZZ"], "date": pd.to_datetime(["2026-01-05"]), "Open": [1.0], "High": [1.0], "Low": [1.0], "Close": [1.0], "Volume": [1]})
+    tampered.to_parquet(swing20_dir / "prices.parquet")
+
+    with pytest.raises(Exception):  # FrozenArtifactVerificationError, from re-verifying lineage
+        load_diagnostics_context(conn, manifest, feature_dir, REPLAY_ID)
