@@ -85,11 +85,11 @@ stock_analyzer/sandbox/exp005/
 ## Status
 
 - [x] Stage 0 -- this checklist
-- [ ] Stage 1
-- [ ] Stage 2
-- [ ] Stage 3
-- [ ] Stage 4
-- [ ] Stage 5
+- [x] Stage 1 -- typed config + canonical hashing (fixed to exact/lossless serialization)
+- [x] Stage 2 -- four new tables, FK-cycle fixed
+- [x] Stage 3 -- repository layer
+- [x] Stage 4 -- atomic admission transaction + orphan check
+- [x] Stage 5 -- execution accounting
 - [ ] Stage 6
 - [ ] Stage 7
 - [ ] Stage 8
