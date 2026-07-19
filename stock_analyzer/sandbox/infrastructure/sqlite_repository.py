@@ -247,6 +247,19 @@ class SandboxRepository:
         existing = self.get_entry_order(order.order_id)
         if existing is not None:
             return existing, False
+        self._insert_entry_order_row(order)
+        self._conn.commit()
+        return order, True
+
+    def _insert_entry_order_row(self, order: EntryOrder) -> None:
+        """The INSERT body factored out of create_entry_order, WITHOUT a commit --
+        exists so a caller that owns a larger, multi-table transaction (EXP-005's
+        atomic admission/reservation/order write, Revision 5 Section 8.2) can include
+        this insert inside its own BEGIN/COMMIT without create_entry_order's own
+        commit prematurely closing that transaction. create_entry_order's public
+        behavior (existence check, commit, return value) is unchanged -- this is a
+        pure extraction, not a rewrite."""
+
         now = datetime.now(timezone.utc).isoformat()
         self._conn.execute(
             "INSERT INTO entry_orders "
@@ -270,8 +283,6 @@ class SandboxRepository:
                 now,
             ),
         )
-        self._conn.commit()
-        return order, True
 
     def get_entry_order(self, order_id: str) -> EntryOrder | None:
         row = self._conn.execute("SELECT * FROM entry_orders WHERE order_id = ?", (order_id,)).fetchone()
