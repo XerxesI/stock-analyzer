@@ -419,10 +419,12 @@ portfolio policy changed):
    recorded `schema_version` and, if it is `1`, runs an explicit, transactional
    migration (`_migrate_v1_to_v2` in `infrastructure/schema.py`): rebuilds
    `ranked_candidates` with `signal_close` nullable (SQLite cannot `ALTER` a `NOT
-   NULL` constraint in place), adds `replay_metadata.last_completed_date`, and
-   verifies `PRAGMA foreign_key_check` before committing. Any failure rolls back
-   completely and leaves the database labelled `v1`, matching its true physical
-   schema -- never silently relabelled.
+   NULL` constraint in place), and verifies `PRAGMA foreign_key_check` before
+   committing. Any failure rolls back completely and leaves the database labelled
+   `v1`, matching its true physical schema -- never silently relabelled. **(This
+   step's original description here also said it added
+   `replay_metadata.last_completed_date` -- that turned out to itself be a version-
+   reuse bug, corrected below on 2026-07-19.)**
 
 New tests (`tests/test_sandbox_replay_service.py`,
 `tests/test_sandbox_schema_migration.py`):
@@ -436,6 +438,77 @@ uninterrupted replay and a realistically interrupted-then-resumed one),
 `test_repeated_init_after_migration_is_idempotent`,
 `test_migration_rolls_back_and_does_not_relabel_on_failure`. All 66 sandbox tests
 pass (`tests/test_sandbox_*.py`).
+
+## Post-hoc fix: honest v1/v2/v3 schema versioning + fail-closed legacy resume (2026-07-19)
+
+A third independent audit round found the above fix had itself introduced two
+further P1 compatibility defects, both stemming from the same root cause: `SCHEMA_VERSION`
+was reused. Commit db067d4/68b0c6f had already published `SCHEMA_VERSION = 2` meaning
+"`ranked_candidates.signal_close` nullable, no watermark." The round-2 fix above bumped
+`SCHEMA_VERSION` to `2` *again* to also mean "plus `replay_metadata.last_completed_date`"
+-- reusing a version number that had already been shipped for a physically different
+schema. Any real database created by the originally-published v2 code (nullable
+`signal_close`, no watermark) would be seen by the round-2 code as `schema_version=2`,
+already at the target version, and never migrated -- leaving `last_completed_date`
+referenced by `ReplayService`/`SandboxRepository` but physically absent from that
+database.
+
+**Fix 1 -- honest, non-reused versioning.** `infrastructure/schema.py` now defines
+three permanent, physically distinct versions and never renumbers one after the fact:
+  - **v1** (original): `ranked_candidates.signal_close NOT NULL`, no watermark.
+  - **v2** (published in db067d4/68b0c6f, permanently frozen at this meaning):
+    `signal_close` nullable, still no watermark.
+  - **v3** (current, `SCHEMA_VERSION = 3`): adds `replay_metadata.last_completed_date`.
+
+`_migrate_v1_to_v2` now touches only `ranked_candidates` (matching exactly what v2
+originally shipped); a new `_migrate_v2_to_v3` adds only the watermark column via
+`ALTER TABLE ... ADD COLUMN`. `init_db()` chains whichever steps are needed (v1 runs
+both; a real, published v2 database runs only the second) and refuses outright
+(`UnsupportedSchemaVersionError`) to open a database recorded at a version newer than
+the running code understands, rather than silently operating on an unknown physical
+schema.
+
+**Fix 2 -- fail-closed resume for a legacy watermark.** Migrating a v1 or v2 database
+to v3 adds `last_completed_date` as `NULL` for any pre-existing `replay_metadata` row
+(`ALTER TABLE ADD COLUMN`'s default for existing rows). `ReplayService.run()`
+previously (round 2) treated a `NULL` watermark as simply "nothing completed yet" and
+reprocessed the full date list -- safe for a genuinely fresh `RUNNING` replay, but
+NOT safe for a migrated `RUNNING`/`FAILED` replay that already has real, partially
+persisted domain state: reprocessing history reopens exactly the point-in-time
+contamination risk the watermark exists to prevent (see the round-2 comparison test
+above), and guessing a watermark from e.g. `MAX(as_of_date)` cannot be proven safe --
+that date might itself be a partially-processed boundary day, not a fully committed
+one. The policy adopted (documented in full in `replay_service.py`'s module
+docstring):
+  - `COMPLETED` replay: rejected outright regardless of watermark (`ReplayAlreadyCompletedError`)
+    -- a completed replay is never resumed, so the watermark is irrelevant.
+  - `RUNNING`/`FAILED` replay, `NULL` watermark, **no** persisted domain state
+    (`SandboxRepository.has_any_domain_state()` is `False`): safe to resume from the
+    beginning -- this is the ordinary "died before finishing its first date" case.
+  - `RUNNING`/`FAILED` replay, `NULL` watermark, **existing** persisted domain state:
+    rejected outright with a new, specific `UntrustworthyResumeWatermarkError` --
+    raised before the `try`/`except` around `_process_dates`, so the rejection itself
+    never calls `fail_replay()` or otherwise mutates the replay's stored status. The
+    only correct recovery is a new `replay_id` under a fresh isolated database.
+
+New tests (`tests/test_sandbox_schema_migration.py`,
+`tests/test_sandbox_replay_service.py`):
+`test_v1_migrates_through_v2_to_v3_and_preserves_data`,
+`test_v2_migrates_to_v3_and_preserves_data` (built from a LITERAL fixture matching
+the actually-published v2 schema, not just a claim of being v2),
+`test_v2_migration_rolls_back_and_does_not_relabel_on_failure`,
+`test_unsupported_future_schema_version_is_refused`,
+`test_fresh_database_is_created_directly_at_v3`,
+`test_repeated_init_from_published_v2_is_idempotent`,
+`test_resume_is_rejected_when_watermark_is_null_but_domain_state_exists`,
+`test_migrated_completed_legacy_replay_rerun_still_rejected`,
+`test_migrated_running_legacy_replay_with_no_domain_state_resumes_from_start`,
+`test_migrated_failed_legacy_replay_with_domain_state_rejects_resume` (the last three
+built from a real migrated v1-database file, not a fresh v3 database with the
+watermark manually nulled). All 75 sandbox tests pass; EXP-004's own database
+(untouched by any of this work) still reads `schema_meta.schema_version = '1'` and
+its SHA-256 checksum is unchanged:
+`9f4d579df1c39f436ca28a35f768d201d89005fca36b43db3872fbf658c28882`.
 
 ## Remaining blockers before `FORWARD_PAPER_EVALUATION`
 
