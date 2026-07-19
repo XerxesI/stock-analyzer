@@ -272,5 +272,35 @@ different names. This is a naming difference only, not a behavioral deviation.
       test_exp005_opportunity_cost.py (6), plus one new
       test_exp005_repository.py case for list_reservations_for_experiment --
       31 new tests, every numeric scenario hand-computed.
-- [ ] Stage 14
+- [x] Stage 14 -- report generation (exp005/diagnostics/report_generator.py).
+      Two-tier design: compute_run_summary aggregates ONE completed replay
+      database (one variant/seed) into BuyQualitySummary/HoldQualitySummary/
+      SellQualitySummary/CapacityQualitySummary (Section 25's first four report
+      sections), reducing the Stage 12-13 per-item diagnostic results (never
+      re-deriving a decision) to means/rates/distributions/horizon-keyed dicts.
+      compute_selection_quality (Section 25's fifth section) composes
+      already-computed RunQualitySummary objects -- one for Variant B, one per
+      Variant D seed, each necessarily its own isolated replay database since
+      virtual_positions/friends have no replay_id column -- and reports Variant
+      B's point value against percentile_rank(b_value, d_distribution) rather
+      than a bare point comparison, mirroring Section 10's own
+      control_percentile_threshold discipline. Compares 6 named metrics: entry
+      gap, MFE captured at exit, realized return, exit efficiency, target-hit
+      rate, and NO_CAPACITY hypothetical-fill rate.
+      New read-only reporting queries added (all additive, no existing method
+      changed): SandboxRepository.list_filled_orders/list_expired_orders/
+      list_all_positions/list_hold_snapshots (infrastructure/
+      sqlite_repository.py); PortfolioRepository.list_admissions_for_experiment
+      (exp005/infrastructure/repository.py) -- mirroring the existing
+      list_executions_for_experiment precedent.
+      tests: test_exp005_report_generator.py (5) -- percentile_rank and
+      compute_selection_quality get exact hand-computed unit tests (pure
+      functions); compute_run_summary is exercised end-to-end against a real,
+      FK-enforced SQLite fixture (a filled+closed position via an ambiguous
+      intraday-touch SELL_TARGET exit, an expired order, a NO_CAPACITY
+      admission, and equity snapshots) checking counts/rates/means -- the
+      exhaustive per-horizon numeric coverage already lives in the Stage 12-13
+      test files, so this fixture verifies wiring/joins/filters rather than
+      re-deriving arithmetic. Plus 4 new repository-method tests (3 in
+      test_sandbox_persistence.py, 1 in test_exp005_repository.py).
 - [ ] Stage 15 (synthetic fixture + completion report)

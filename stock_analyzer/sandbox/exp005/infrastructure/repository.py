@@ -168,6 +168,17 @@ class PortfolioRepository:
         ).fetchone()
         return self._row_to_admission(row) if row else None
 
+    def list_admissions_for_experiment(self, replay_id: str) -> list[PortfolioAdmission]:
+        """Every admission decision ever made for this replay, across all dates --
+        used by post-hoc report generation (Section 25), unlike
+        list_admissions_for_session's single-day scope."""
+
+        rows = self._conn.execute(
+            "SELECT * FROM portfolio_admissions WHERE replay_id = ? ORDER BY as_of_date ASC, rank_at_admission ASC",
+            (replay_id,),
+        ).fetchall()
+        return [self._row_to_admission(r) for r in rows]
+
     def list_admissions_for_session(self, replay_id: str, as_of_date: date) -> list[PortfolioAdmission]:
         rows = self._conn.execute(
             "SELECT * FROM portfolio_admissions WHERE replay_id = ? AND as_of_date = ? "

@@ -203,6 +203,18 @@ def test_list_admissions_for_session_orders_by_rank_regardless_of_insert_order(r
     assert [a.rank_at_admission for a in result] == [1, 2, 3, 4, 5]
 
 
+def test_list_admissions_for_experiment_spans_all_dates_ordered(repo: PortfolioRepository):
+    day1 = [_admission("c0", "AAA", 1), _admission("c1", "BBB", 2, decision=NO_CAPACITY)]
+    day2 = [replace(_admission("c2", "CCC", 1), as_of_date=date(2026, 1, 6))]
+    for a in day2 + day1:  # inserted out of chronological order
+        repo.insert_admission(a)
+
+    result = repo.list_admissions_for_experiment("replay-1")
+
+    assert [a.candidate_id for a in result] == ["c0", "c1", "c2"]
+    assert [a.as_of_date for a in result] == [date(2026, 1, 5), date(2026, 1, 5), date(2026, 1, 6)]
+
+
 def test_no_capacity_admission_round_trips_with_null_slot_budget(repo: PortfolioRepository):
     admission = _admission("c0", "AAA", 1, decision=NO_CAPACITY)
     repo.insert_admission(admission)

@@ -364,3 +364,106 @@ def test_unique_symbol_entry_date_constraint_on_positions(repo: SandboxRepositor
     )
     with pytest.raises(sqlite3.IntegrityError):
         repo.create_position(position_2)
+
+
+# ------------------------------------------------- experiment-wide reporting queries
+
+
+def test_list_filled_and_expired_orders_span_all_dates(repo: SandboxRepository):
+    as_of = date(2026, 6, 15)
+    _ensure_run(repo, as_of)
+    filled_candidate = _make_candidate(as_of, symbol="AAA")
+    expired_candidate = _make_candidate(as_of, symbol="BBB", rank=2)
+    pending_candidate = _make_candidate(as_of, symbol="CCC", rank=3)
+    for c in (filled_candidate, expired_candidate, pending_candidate):
+        repo.insert_ranked_candidate(c)
+
+    filled_order = EntryOrder(
+        order_id=EntryOrder.make_id(filled_candidate.candidate_id), candidate_id=filled_candidate.candidate_id,
+        symbol="AAA", signal_date=as_of, created_date=as_of, valid_until=date(2026, 6, 17),
+        max_entry_price=10.2, status="FILLED", fill_date=date(2026, 6, 16), fill_price=10.1,
+        fill_reason="FILLED_AT_OPEN",
+    )
+    expired_order = EntryOrder(
+        order_id=EntryOrder.make_id(expired_candidate.candidate_id), candidate_id=expired_candidate.candidate_id,
+        symbol="BBB", signal_date=as_of, created_date=as_of, valid_until=date(2026, 6, 17),
+        max_entry_price=10.2, status="EXPIRED", no_fill_reason="entire_session_above_ceiling",
+    )
+    pending_order = EntryOrder(
+        order_id=EntryOrder.make_id(pending_candidate.candidate_id), candidate_id=pending_candidate.candidate_id,
+        symbol="CCC", signal_date=as_of, created_date=as_of, valid_until=date(2026, 6, 17),
+        max_entry_price=10.2, status="PENDING",
+    )
+    for o in (filled_order, expired_order, pending_order):
+        repo.create_entry_order(o)
+
+    filled = repo.list_filled_orders()
+    expired = repo.list_expired_orders()
+
+    assert [o.order_id for o in filled] == [filled_order.order_id]
+    assert [o.order_id for o in expired] == [expired_order.order_id]
+
+
+def test_list_all_positions_returns_open_and_closed(repo: SandboxRepository):
+    as_of = date(2026, 6, 15)
+    _ensure_run(repo, as_of)
+    candidate = _make_candidate(as_of, symbol="AAA")
+    repo.insert_ranked_candidate(candidate)
+    order = EntryOrder(
+        order_id=EntryOrder.make_id(candidate.candidate_id), candidate_id=candidate.candidate_id, symbol="AAA",
+        signal_date=as_of, created_date=as_of, valid_until=date(2026, 6, 17), max_entry_price=10.2, status="FILLED",
+    )
+    repo.create_entry_order(order)
+
+    open_position = VirtualPosition(
+        position_id=VirtualPosition.make_id("AAA", date(2026, 6, 16)), symbol="AAA", candidate_id=candidate.candidate_id,
+        order_id=order.order_id, signal_date=as_of, entry_date=date(2026, 6, 16), entry_price=10.1, quantity=99.0,
+        initial_rank=1, initial_model_score=0.5, signal_close=10.0, max_entry_price=10.2,
+        initial_adv_quintile="adv_q1", initial_market_regime="Bull_Normal", target_price=12.12,
+        planned_time_exit_date=date(2026, 7, 15),
+    )
+    repo.create_position(open_position)
+    repo.close_position(
+        open_position.position_id, exit_date=date(2026, 6, 20), exit_price=11.0, exit_reason="SELL_TARGET",
+        realized_return=0.089, final_holding_day_count=3, final_mfe=0.1, final_mae=-0.02,
+    )
+
+    result = repo.list_all_positions()
+    assert [p.position_id for p in result] == [open_position.position_id]
+    assert result[0].status == "CLOSED"
+
+
+def test_list_hold_snapshots_excludes_non_hold_recommendations(repo: SandboxRepository):
+    as_of = date(2026, 6, 15)
+    _ensure_run(repo, as_of)
+    candidate = _make_candidate(as_of, symbol="AAA")
+    repo.insert_ranked_candidate(candidate)
+    order = EntryOrder(
+        order_id=EntryOrder.make_id(candidate.candidate_id), candidate_id=candidate.candidate_id, symbol="AAA",
+        signal_date=as_of, created_date=as_of, valid_until=date(2026, 6, 17), max_entry_price=10.2, status="FILLED",
+    )
+    repo.create_entry_order(order)
+    position = VirtualPosition(
+        position_id=VirtualPosition.make_id("AAA", date(2026, 6, 16)), symbol="AAA", candidate_id=candidate.candidate_id,
+        order_id=order.order_id, signal_date=as_of, entry_date=date(2026, 6, 16), entry_price=10.1, quantity=99.0,
+        initial_rank=1, initial_model_score=0.5, signal_close=10.0, max_entry_price=10.2,
+        initial_adv_quintile="adv_q1", initial_market_regime="Bull_Normal", target_price=12.12,
+        planned_time_exit_date=date(2026, 7, 15),
+    )
+    repo.create_position(position)
+
+    def _snap(d: date, recommendation: str) -> PositionSnapshot:
+        return PositionSnapshot(
+            snapshot_id=PositionSnapshot.make_id(position.position_id, d), position_id=position.position_id,
+            symbol="AAA", as_of_date=d, close_price=10.5, daily_return=None, cumulative_unrealized_return=0.04,
+            holding_day_count=1, mfe=0.05, mae=-0.01, distance_to_target=0.15, current_rank=1, current_model_score=0.5,
+            rank_change_from_entry=0, current_adv_quintile="adv_q1", current_market_regime="Bull_Normal",
+            data_quality_status="OK", recommendation=recommendation,
+        )
+
+    repo.insert_position_snapshot(_snap(date(2026, 6, 16), BUY_FILLED))
+    repo.insert_position_snapshot(_snap(date(2026, 6, 17), HOLD))
+    repo.insert_position_snapshot(_snap(date(2026, 6, 18), SELL_TARGET))
+
+    result = repo.list_hold_snapshots()
+    assert [s.as_of_date for s in result] == [date(2026, 6, 17)]
