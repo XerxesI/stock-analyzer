@@ -510,6 +510,56 @@ watermark manually nulled). All 75 sandbox tests pass; EXP-004's own database
 its SHA-256 checksum is unchanged:
 `9f4d579df1c39f436ca28a35f768d201d89005fca36b43db3872fbf658c28882`.
 
+## Post-hoc fix: detect physically-mislabeled-v2 databases before migrating (2026-07-19)
+
+A fourth independent audit round found one more P1 gap in the round-3 fix: `init_db()`
+trusted a recorded `schema_meta.schema_version = 2` at face value to mean "correct
+physical v2" (nullable `signal_close`, no watermark) and ran only `_migrate_v2_to_v3`
+for it. But the version-reuse bug fixed in round 3 was itself a *live* bug for a
+window of published commits (between 68b0c6f and the round-3 fix): during that
+window, `init_db()` would blindly overwrite `schema_meta.schema_version` to `2` on
+**any** existing database it opened -- including a genuinely physical v1 database it
+never actually migrated. So a database recorded as `schema_version=2` could
+legitimately be either state:
+  1. correct physical v2 (`signal_close` nullable, no watermark), or
+  2. a physically-v1 database that was only ever relabeled `2`, never migrated
+     (`signal_close` still `NOT NULL`, no watermark).
+
+Running only `_migrate_v2_to_v3` against state 2 would add the watermark column and
+label the database `v3` while leaving `signal_close NOT NULL` -- a database that
+*claims* to be fully migrated but is not. Reproduced independently with a fixture
+matching exactly `schema_meta=2` + `signal_close NOT NULL` + no watermark.
+
+**Fix.** `init_db()` no longer trusts `schema_meta=2` alone: for `current_version ==
+2`, it inspects the ACTUAL physical schema before choosing a path.
+`ranked_candidates.signal_close`'s real nullability (via `PRAGMA table_info`)
+distinguishes state 1 from state 2 -- state 2 runs the same `_migrate_v1_to_v2`
+physical repair (safe to call regardless of the stored label, since that function
+operates purely on physical structure) before proceeding to `_migrate_v2_to_v3`. A
+database that already has the watermark column while still labelled `2` (consistent
+with neither known state) fails closed with a new `SchemaIntegrityError` rather than
+guessing. Both migration functions also now explicitly verify their target version's
+physical invariants (`_verify_v2_invariants` / `_verify_v3_invariants` --
+`signal_close` nullability, required indexes/uniqueness, and for v3 the watermark
+column) immediately before writing the new version label, so a migration that ran
+without raising but somehow didn't achieve its physical goal is still caught before
+the database is marked as reaching that version.
+
+New tests (`tests/test_sandbox_schema_migration.py`), built from the exact reported
+reproduction (`schema_meta=2`, `signal_close NOT NULL`, no watermark):
+`test_mislabeled_v2_database_is_physically_repaired_and_reaches_v3` (all 8 required
+checks: reaches a physically valid v3, `signal_close` nullable, watermark present,
+existing rows/counts unchanged, indexes/uniqueness survive, FK integrity passes, a
+NULL `signal_close` can subsequently be inserted, repeated init is idempotent),
+`test_mislabeled_v2_repair_rolls_back_without_false_v3_label_on_failure` (a forced FK
+failure during the repair rolls back completely, staying labelled `2` -- not falsely
+`v3`, not left mid-repair), and
+`test_v2_labeled_database_with_watermark_column_is_refused` (the "matches neither
+known state" case fails closed with `SchemaIntegrityError`). All 78 sandbox tests
+pass; EXP-004's own database remains untouched (`schema_meta.schema_version` still
+`'1'`, SHA-256 unchanged:
+`9f4d579df1c39f436ca28a35f768d201d89005fca36b43db3872fbf658c28882`).
+
 ## Remaining blockers before `FORWARD_PAPER_EVALUATION`
 
 1. **`DailyPointInTimeUniverseProvider`** (MVP 2 spec Section 19) -- not implemented.

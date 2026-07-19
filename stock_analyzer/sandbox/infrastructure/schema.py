@@ -44,6 +44,20 @@ the originally published code (nullable signal_close, no watermark) would then b
 mistaken for a fully up-to-date v3-equivalent database and never migrated, leaving
 `replay_metadata.last_completed_date` referenced by code but physically absent. This
 file now treats "v2" as permanently meaning exactly what commit 68b0c6f shipped.
+
+A second, related trap: the version-reuse bug above also existed as a live bug for a
+window of published commits (between 68b0c6f and the fix for the trap above) whose
+`init_db()` would blindly overwrite `schema_meta.schema_version` to `2` on ANY
+existing database it opened -- including a genuinely physical v1 database it never
+actually migrated (`ranked_candidates.signal_close` still `NOT NULL`). That means a
+database recorded as `schema_version=2` is NOT reliably "correct physical v2": it
+could equally be a physically-v1 database that was only ever relabeled, never
+migrated. `init_db` therefore never trusts the recorded version 2 at face value --
+it inspects `ranked_candidates.signal_close`'s actual nullability to decide whether a
+"v2"-labeled database needs the v1->v2 physical repair before proceeding to v3 (see
+init_db's handling of current_version == 2). A database whose physical structure
+matches neither known state at a given recorded version fails closed with
+SchemaIntegrityError rather than guessing.
 """
 
 from __future__ import annotations
@@ -56,6 +70,17 @@ class UnsupportedSchemaVersionError(RuntimeError):
     SCHEMA_VERSION -- i.e. the database was written by newer code than is currently
     running. Operating on it anyway could silently misinterpret or corrupt a physical
     schema this code has never seen."""
+
+
+class SchemaIntegrityError(RuntimeError):
+    """Raised when a database's physical structure does not match any state this
+    code knows how to migrate from, for its recorded schema_version -- e.g. a
+    "v2"-labeled database whose ranked_candidates.signal_close is neither the
+    original v1 shape (NOT NULL) nor the genuine v2 shape (nullable), or one that
+    already has replay_metadata.last_completed_date despite being labeled v2 (which
+    should never exist before v3). Never trust schema_meta's label alone when a
+    historical code path is known to have written an incorrect one -- inspect the
+    physical schema and fail closed rather than guess a migration path."""
 
 
 SCHEMA_VERSION = 3
@@ -268,6 +293,60 @@ def _set_schema_version(conn: sqlite3.Connection, version: int) -> None:
     )
 
 
+def _ranked_candidates_signal_close_is_nullable(conn: sqlite3.Connection) -> bool:
+    for col in conn.execute("PRAGMA table_info(ranked_candidates)").fetchall():
+        if col[1] == "signal_close":  # (cid, name, type, notnull, dflt_value, pk)
+            return col[3] == 0
+    raise SchemaIntegrityError(
+        "ranked_candidates.signal_close column not found -- corrupt or unrecognized schema."
+    )
+
+
+def _replay_metadata_has_watermark_column(conn: sqlite3.Connection) -> bool:
+    return any(
+        col[1] == "last_completed_date"
+        for col in conn.execute("PRAGMA table_info(replay_metadata)").fetchall()
+    )
+
+
+def _verify_ranked_candidates_indexes(conn: sqlite3.Connection) -> None:
+    indexes = conn.execute("PRAGMA index_list(ranked_candidates)").fetchall()
+    index_names = {row[1] for row in indexes}  # (seq, name, unique, origin, partial)
+    if "idx_ranked_candidates_as_of_date" not in index_names:
+        raise SchemaIntegrityError(
+            "Post-migration check failed: idx_ranked_candidates_as_of_date index is missing "
+            "from ranked_candidates."
+        )
+    if not any(row[2] for row in indexes):
+        raise SchemaIntegrityError(
+            "Post-migration check failed: UNIQUE(symbol, as_of_date) constraint is missing "
+            "from ranked_candidates."
+        )
+
+
+def _verify_v2_invariants(conn: sqlite3.Connection) -> None:
+    """Checked before every commit that would label a database v2 (or v3, which
+    implies v2): ranked_candidates.signal_close must actually be nullable and its
+    indexes/uniqueness constraint must actually exist -- never just assumed because
+    the migration ran without raising."""
+
+    if not _ranked_candidates_signal_close_is_nullable(conn):
+        raise SchemaIntegrityError(
+            "Post-migration check failed: ranked_candidates.signal_close is still NOT NULL."
+        )
+    _verify_ranked_candidates_indexes(conn)
+
+
+def _verify_v3_invariants(conn: sqlite3.Connection) -> None:
+    """Checked before every commit that would label a database v3."""
+
+    _verify_v2_invariants(conn)
+    if not _replay_metadata_has_watermark_column(conn):
+        raise SchemaIntegrityError(
+            "Post-migration check failed: replay_metadata.last_completed_date is missing."
+        )
+
+
 _RANKED_CANDIDATES_V2_COLUMNS = (
     "candidate_id",
     "run_id",
@@ -352,6 +431,10 @@ def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
         if fk_errors:
             raise RuntimeError(f"v1->v2 migration would violate foreign key integrity: {fk_errors}")
 
+        # Never label this database v2 because the rebuild ran without raising --
+        # verify the physical result actually has the v2 shape first.
+        _verify_v2_invariants(conn)
+
         _set_schema_version(conn, 2)
         conn.execute("COMMIT")
     except Exception:
@@ -389,6 +472,13 @@ def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
         if fk_errors:
             raise RuntimeError(f"v2->v3 migration would violate foreign key integrity: {fk_errors}")
 
+        # Never label this database v3 without verifying BOTH v3 invariants -- the
+        # watermark column just added, AND signal_close's nullability (this function
+        # assumes its caller already ensured that, but a database's ranked_candidates
+        # could in principle be in an unexpected state; fail closed rather than trust
+        # the caller silently).
+        _verify_v3_invariants(conn)
+
         _set_schema_version(conn, 3)
         conn.execute("COMMIT")
     except Exception:
@@ -408,7 +498,16 @@ def init_db(conn: sqlite3.Connection) -> None:
     _migrate_v2_to_v3) based on its ACTUAL recorded schema_version -- never by
     blindly overwriting schema_meta to SCHEMA_VERSION, which would just relabel an
     unmigrated database without changing its physical schema. A database recorded as
-    NEWER than SCHEMA_VERSION is refused outright rather than silently operated on."""
+    NEWER than SCHEMA_VERSION is refused outright rather than silently operated on.
+
+    A recorded schema_version of 2 is NOT trusted at face value: a published bug (see
+    this module's docstring) could relabel a genuinely physical v1 database as '2'
+    without ever migrating ranked_candidates.signal_close to nullable. So for
+    current_version == 2, the ACTUAL physical shape of ranked_candidates is inspected
+    before choosing a migration path -- correct physical v2 (nullable already) only
+    needs _migrate_v2_to_v3; mislabeled physical v1 (still NOT NULL) needs the
+    v1->v2 physical repair first. A database whose physical shape matches neither
+    known state at that recorded version fails closed with SchemaIntegrityError."""
 
     conn.executescript(_DDL)
 
@@ -416,6 +515,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     if current_version is None:
         # Brand-new database: the DDL above already created every table at the
         # current (v3) schema, so there is nothing to migrate -- just record it.
+        _verify_v3_invariants(conn)
         _set_schema_version(conn, SCHEMA_VERSION)
         conn.commit()
         return
@@ -431,7 +531,23 @@ def init_db(conn: sqlite3.Connection) -> None:
         _migrate_v1_to_v2(conn)
         current_version = 2
 
-    if current_version < 3:
+    if current_version == 2:
+        if _replay_metadata_has_watermark_column(conn):
+            # Should never happen at a genuine v1 or v2 database -- the watermark
+            # column was only ever introduced by v2->v3. Refuse to guess.
+            raise SchemaIntegrityError(
+                "Database recorded as schema_version=2 already has "
+                "replay_metadata.last_completed_date, which is inconsistent with any "
+                "known v1 or v2 physical state. Refusing to guess a migration path."
+            )
+        if not _ranked_candidates_signal_close_is_nullable(conn):
+            # Mislabeled: a known historical bug in an earlier init_db() could write
+            # schema_version=2 onto a database whose ranked_candidates was never
+            # actually migrated. Repair by running the exact same v1->v2 physical
+            # migration (safe: it operates purely on physical structure and does not
+            # read or trust the currently-stored version), which brings schema_meta
+            # back in sync with physical reality before proceeding to v3.
+            _migrate_v1_to_v2(conn)
         _migrate_v2_to_v3(conn)
         current_version = 3
 

@@ -32,6 +32,7 @@ from stock_analyzer.sandbox.domain.candidate import RankedCandidate
 from stock_analyzer.sandbox.domain.run import SandboxRun
 from stock_analyzer.sandbox.infrastructure.schema import (
     SCHEMA_VERSION,
+    SchemaIntegrityError,
     UnsupportedSchemaVersionError,
     connect,
     init_db,
@@ -315,6 +316,21 @@ def _build_v1_fixture(db_path: str) -> None:
     conn = sqlite3.connect(db_path)
     conn.executescript(_V1_DDL)
     conn.execute("INSERT INTO schema_meta(key, value) VALUES ('schema_version', '1')")
+    _insert_representative_v1_rows(conn)
+    conn.commit()
+    conn.close()
+
+
+def _build_mislabeled_v2_fixture(db_path: str) -> None:
+    """Reproduces the historical bug: a genuinely physical v1 database (the LITERAL
+    v1 DDL -- signal_close NOT NULL, no last_completed_date) whose schema_meta was
+    overwritten to '2' by the buggy init_db() that existed between commit
+    68b0c6f and the fix for it, WITHOUT the physical v1->v2 migration ever actually
+    running. schema_meta says 2; the physical table says v1."""
+
+    conn = sqlite3.connect(db_path)
+    conn.executescript(_V1_DDL)
+    conn.execute("INSERT INTO schema_meta(key, value) VALUES ('schema_version', '2')")
     _insert_representative_v1_rows(conn)
     conn.commit()
     conn.close()
@@ -711,4 +727,167 @@ def test_migration_rolls_back_and_does_not_relabel_on_failure(tmp_path):
     replay_cols = {r["name"] for r in conn.execute("PRAGMA table_info(replay_metadata)").fetchall()}
     assert "last_completed_date" not in replay_cols  # ADD COLUMN was rolled back too
 
+    conn.close()
+
+
+def test_mislabeled_v2_database_is_physically_repaired_and_reaches_v3(tmp_path):
+    """Reproduces the confirmed defect: a genuinely physical v1 database (signal_close
+    NOT NULL, no watermark) whose schema_meta was overwritten to '2' by the buggy
+    init_db() that existed between commit 68b0c6f and the fix for it -- WITHOUT the
+    physical v1->v2 migration ever running. init_db() must not trust the '2' label at
+    face value; it must inspect the physical schema, detect the mismatch, run the
+    missing v1->v2 repair, then proceed to v3 -- ending at a database that is
+    ACTUALLY v3-shaped, not just labelled so."""
+
+    db_path = str(tmp_path / "mislabeled_v2_fixture.db")
+    _build_mislabeled_v2_fixture(db_path)
+
+    # Confirm the fixture reproduces exactly the reported broken state before fixing it.
+    pre_conn = sqlite3.connect(db_path)
+    pre_conn.row_factory = sqlite3.Row
+    assert _schema_version(pre_conn) == "2"
+    pre_cols = {r["name"]: r for r in pre_conn.execute("PRAGMA table_info(ranked_candidates)").fetchall()}
+    assert pre_cols["signal_close"]["notnull"] == 1
+    pre_replay_cols = {r["name"] for r in pre_conn.execute("PRAGMA table_info(replay_metadata)").fetchall()}
+    assert "last_completed_date" not in pre_replay_cols
+    pre_conn.close()
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    init_db(conn)
+
+    # 1 & 2: physically valid v3 database -- signal_close is now actually nullable.
+    assert _schema_version(conn) == str(SCHEMA_VERSION) == "3"
+    cols = {r["name"]: r for r in conn.execute("PRAGMA table_info(ranked_candidates)").fetchall()}
+    assert cols["signal_close"]["notnull"] == 0
+
+    # 3: watermark column exists.
+    replay_cols = {r["name"] for r in conn.execute("PRAGMA table_info(replay_metadata)").fetchall()}
+    assert "last_completed_date" in replay_cols
+
+    # 4: existing rows/counts unchanged.
+    row = conn.execute(
+        "SELECT * FROM ranked_candidates WHERE candidate_id = ?", ("2026-01-05:AAA",)
+    ).fetchone()
+    assert row is not None
+    assert row["signal_close"] == 100.0
+    assert conn.execute("SELECT COUNT(*) FROM ranked_candidates").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM entry_orders").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM virtual_positions").fetchone()[0] == 1
+    stored_replay = conn.execute(
+        "SELECT * FROM replay_metadata WHERE replay_id = 'replay-old'"
+    ).fetchone()
+    assert stored_replay["status"] == "COMPLETED"
+    assert stored_replay["last_completed_date"] is None
+
+    # 5: indexes/uniqueness constraints survived the rebuild.
+    indexes = conn.execute("PRAGMA index_list(ranked_candidates)").fetchall()
+    assert "idx_ranked_candidates_as_of_date" in {r["name"] for r in indexes}
+    assert any(r["unique"] for r in indexes)
+
+    # 6: foreign-key integrity passes.
+    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+
+    # 7: NULL signal_close can subsequently be inserted.
+    repo = SandboxRepository(conn)
+    run = SandboxRun(
+        run_id="run-repair-check", as_of_date=date(2026, 1, 6), command="generate-candidates",
+        started_at=datetime.now(timezone.utc), configuration_hash="hash2", model_version="v1",
+    )
+    repo.create_run(run)
+    candidate = RankedCandidate(
+        candidate_id=RankedCandidate.make_id(date(2026, 1, 6), "ZZZ"), run_id=run.run_id,
+        as_of_date=date(2026, 1, 6), symbol="ZZZ", daily_rank=1, model_score=1.0,
+        signal_close=None, atr14=None, max_entry_price=None, shadow_top10=True,
+        actionable=False, exclusion_reason="MISSING_MARKET_DATA", adv_quintile=None,
+        market_regime=None,
+    )
+    assert repo.insert_ranked_candidate(candidate) is True
+    assert repo.get_candidate(candidate.candidate_id).signal_close is None
+
+    # 8: repeated initialization is idempotent.
+    init_db(conn)
+    init_db(conn)
+    assert _schema_version(conn) == "3"
+    assert conn.execute("SELECT COUNT(*) FROM ranked_candidates").fetchone()[0] == 2
+
+    conn.close()
+
+
+def test_mislabeled_v2_repair_rolls_back_without_false_v3_label_on_failure(tmp_path):
+    """9: a forced failure during the repair of a mislabeled-v2 database must roll
+    back completely -- not leave a partially migrated table, and not leave the
+    database falsely labelled v3 (or even v2, since the repair never completed)."""
+
+    db_path = str(tmp_path / "mislabeled_v2_broken_fixture.db")
+    conn = sqlite3.connect(db_path)
+    conn.executescript(_V1_DDL)
+    conn.execute("INSERT INTO schema_meta(key, value) VALUES ('schema_version', '2')")
+    conn.execute(
+        "INSERT INTO sandbox_runs (run_id, as_of_date, command, started_at, completed_at, status, "
+        " model_version, data_snapshot_id, code_commit_sha, configuration_hash, error_message) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        ("run-1", "2026-01-05", "generate-candidates", "2026-01-05T00:00:00+00:00", None, "COMPLETED",
+         "v1", None, None, "hash", None),
+    )
+    conn.execute(
+        "INSERT INTO ranked_candidates (candidate_id, run_id, as_of_date, symbol, daily_rank, "
+        " model_score, signal_close, atr14, max_entry_price, shadow_top10, actionable, "
+        " exclusion_reason, adv_quintile, market_regime, created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("2026-01-05:AAA", "run-1", "2026-01-05", "AAA", 1, 5.0, 100.0, 2.0, 101.0, 1, 1,
+         None, "adv_q3", "Bull_Normal", "2026-01-05T00:00:00+00:00"),
+    )
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute(
+        "INSERT INTO entry_orders (order_id, candidate_id, symbol, signal_date, created_date, "
+        " valid_until, max_entry_price, status, fill_date, fill_price, fill_reason, no_fill_reason, "
+        " created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("order-broken", "2026-01-05:DOES_NOT_EXIST", "ZZZ", "2026-01-05", "2026-01-05",
+         "2026-01-07", 101.0, "PENDING", None, None, None, None,
+         "2026-01-05T00:00:00+00:00", "2026-01-05T00:00:00+00:00"),
+    )
+    conn.commit()
+    conn.close()
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+
+    with pytest.raises(RuntimeError, match="foreign key"):
+        init_db(conn)
+
+    assert _schema_version(conn) == "2"  # not falsely relabelled v3 (nor left mid-repair)
+    cols = {r["name"]: r for r in conn.execute("PRAGMA table_info(ranked_candidates)").fetchall()}
+    assert cols["signal_close"]["notnull"] == 1  # still physically v1-shaped -- repair rolled back
+    assert conn.execute("SELECT COUNT(*) FROM ranked_candidates").fetchone()[0] == 1
+    replay_cols = {r["name"] for r in conn.execute("PRAGMA table_info(replay_metadata)").fetchall()}
+    assert "last_completed_date" not in replay_cols
+
+    conn.close()
+
+
+def test_v2_labeled_database_with_watermark_column_is_refused(tmp_path):
+    """A database recorded as schema_version=2 that ALREADY has
+    replay_metadata.last_completed_date is inconsistent with any known v1 or v2
+    physical state (the watermark only ever came from v2->v3) -- must fail closed
+    with SchemaIntegrityError rather than silently accepted or guessed at."""
+
+    db_path = str(tmp_path / "impossible_v2_fixture.db")
+    conn = sqlite3.connect(db_path)
+    conn.executescript(_V2_DDL)
+    conn.execute("ALTER TABLE replay_metadata ADD COLUMN last_completed_date TEXT")
+    conn.execute("INSERT INTO schema_meta(key, value) VALUES ('schema_version', '2')")
+    conn.commit()
+    conn.close()
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+
+    with pytest.raises(SchemaIntegrityError, match="last_completed_date"):
+        init_db(conn)
+
+    assert _schema_version(conn) == "2"  # left untouched
     conn.close()
