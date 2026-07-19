@@ -68,8 +68,9 @@ from stock_analyzer.sandbox.exp005.manifest import (
     compute_frozen_calendar,
     read_manifest_artifact,
 )
+from stock_analyzer.sandbox.exp005.infrastructure.schema import _get_decision_audit_schema_version, init_exp005_schema
 from stock_analyzer.sandbox.infrastructure.model2_prediction_adapter import Model2PredictionAdapter
-from stock_analyzer.sandbox.infrastructure.schema import SCHEMA_VERSION
+from stock_analyzer.sandbox.infrastructure.schema import SCHEMA_VERSION, _get_schema_version, init_db
 
 
 class RealRunGateError(RuntimeError):
@@ -92,6 +93,44 @@ def _working_tree_is_clean(repo_root: str | Path | None = None) -> bool:
         ["git", "status", "--porcelain"], cwd=repo_root, capture_output=True, text=True, check=True,
     )
     return result.stdout.strip() == ""
+
+
+def verify_database_schema_matches_manifest(conn: sqlite3.Connection, manifest: ExperimentManifest) -> None:
+    """The gate owns the database boundary too -- it must not assume an
+    undocumented caller initialization sequence. Runs the EXISTING idempotent
+    core (`init_db`) and EXP-005 (`init_exp005_schema`) schema initialization/
+    physical-verification functions against the actual connection about to be
+    used (a fresh, empty database is initialized safely; an incompatible or
+    corrupted existing database fails closed via those functions' own physical
+    verification -- never re-implemented here), then reads back both recorded
+    versions and requires them to equal the manifest's. `PRAGMA foreign_keys`
+    must already be ON -- checked, never silently enabled, since silently fixing
+    a caller's forgotten pragma would mask exactly the kind of undocumented-setup
+    assumption this function exists to remove."""
+
+    fk_status = conn.execute("PRAGMA foreign_keys").fetchone()[0]
+    if fk_status != 1:
+        raise RealRunGateError(
+            "PRAGMA foreign_keys must already be ON on the supplied connection before a real "
+            "EXP-005 run -- this is a caller setup requirement, never silently enabled here."
+        )
+
+    init_db(conn)
+    init_exp005_schema(conn)
+
+    actual_schema_version = _get_schema_version(conn)
+    if actual_schema_version != manifest.schema_version:
+        raise RealRunGateError(
+            f"the connection's actual recorded core schema_version ({actual_schema_version}) does "
+            f"not match the manifest's recorded schema_version ({manifest.schema_version})."
+        )
+    actual_decision_audit_version = _get_decision_audit_schema_version(conn)
+    if actual_decision_audit_version != manifest.decision_audit_schema_version:
+        raise RealRunGateError(
+            f"the connection's actual recorded decision_audit_schema_version "
+            f"({actual_decision_audit_version}) does not match the manifest's recorded "
+            f"decision_audit_schema_version ({manifest.decision_audit_schema_version})."
+        )
 
 
 def _configuration_identity(
@@ -292,10 +331,18 @@ def run_real_experiment(
     that was actually frozen to disk. `replay_id` is taken solely from
     `replay_metadata_template.replay_id`; the model adapter and feature-universe
     provider are constructed internally from the verified feature snapshot, never
-    supplied by the caller."""
+    supplied by the caller. Every OTHER provenance field on the persisted
+    ReplayMetadata (code_commit_sha, model_version, feature_snapshot_id,
+    market_data_snapshot_id, signal_start_date, signal_end_date,
+    outcome_data_end_date) is likewise overwritten from the verified manifest,
+    never left as whatever the caller's template happened to carry -- only
+    replay_id, classification, and started_at are caller-owned run-instance
+    fields."""
 
     manifest = read_manifest_artifact(manifest_artifact_path)
     manifest_artifact_hash = sha256_of_file(manifest_artifact_path)
+
+    verify_database_schema_matches_manifest(conn, manifest)
 
     lineage = verify_real_run_preconditions(
         manifest, exp005_config, feature_snapshot_dir, trading_dates, replay_metadata_template,
@@ -303,7 +350,16 @@ def run_real_experiment(
 
     configuration_json, configuration_hash = _configuration_identity(exp005_config, manifest, manifest_artifact_hash)
     replay_metadata = dataclasses.replace(
-        replay_metadata_template, configuration_json=configuration_json, configuration_hash=configuration_hash,
+        replay_metadata_template,
+        code_commit_sha=manifest.code_commit_sha,
+        model_version=manifest.model_version,
+        feature_snapshot_id=manifest.feature_snapshot_id,
+        market_data_snapshot_id=manifest.ohlc_hash,
+        signal_start_date=manifest.signal_start_date,
+        signal_end_date=manifest.signal_end_date,
+        outcome_data_end_date=manifest.outcome_data_end_date,
+        configuration_json=configuration_json,
+        configuration_hash=configuration_hash,
     )
 
     features_path = str(lineage.feature_snapshot_dir / "features.parquet")

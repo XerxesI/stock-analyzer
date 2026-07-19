@@ -158,6 +158,29 @@ different names. This is a naming difference only, not a behavioral deviation.
       public override parameters were removed entirely (Point 4) -- production
       always reads real git state; tests monkeypatch the private
       _current_code_commit_sha/_working_tree_is_clean functions directly.
+
+      Third Stage 9-10 closure (1 confirmed P1 provenance defect + 1 schema-
+      boundary gap, fixed): (1) run_real_experiment previously overwrote only
+      configuration_json/configuration_hash on the final ReplayMetadata,
+      leaving code_commit_sha/model_version/feature_snapshot_id/
+      market_data_snapshot_id/signal_start_date/signal_end_date/
+      outcome_data_end_date as whatever the caller's template carried (often
+      None) -- a correctly-gated real run would still persist a replay row
+      with empty primary provenance fields. Now every one of those fields is
+      unconditionally overwritten from the verified manifest; only replay_id/
+      classification/started_at remain caller-owned. Verified against both
+      the in-memory object reaching ReplayService.run and the actually
+      persisted replay_metadata row (an integration-level test lets
+      build_exp005_replay_services construct for real). (2) the gate compared
+      manifest schema versions only against code constants, never against the
+      SUPPLIED CONNECTION's actual schema_meta/decision-audit physical shape
+      -- a malformed or uninitialized connection would only fail later,
+      ungracefully, deep inside construction. verify_database_schema_matches_
+      manifest now runs the existing idempotent init_db/init_exp005_schema
+      (physical verification, not label-trusting) against the actual
+      connection before anything else, reads back both recorded versions,
+      requires them to equal the manifest, and requires PRAGMA foreign_keys=ON
+      (checked, never silently enabled).
 - [ ] Stage 11
 - [ ] Stage 12
 - [ ] Stage 13

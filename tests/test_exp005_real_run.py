@@ -20,6 +20,7 @@ from stock_analyzer.sandbox.domain.replay import DEVELOPMENT_HISTORICAL_REPLAY, 
 from stock_analyzer.sandbox.exp005.application.real_run import (
     RealRunGateError,
     run_real_experiment,
+    verify_database_schema_matches_manifest,
     verify_real_run_preconditions,
 )
 from stock_analyzer.sandbox.exp005.config import VARIANT_B, VARIANT_D, Exp005Config
@@ -562,3 +563,168 @@ def test_replay_configuration_identity_is_derived_from_manifest_artifact_file(tm
     assert captured["configuration_hash"] != "placeholder-must-be-overridden"
     assert manifest.code_commit_sha in captured["configuration_json"]
     assert "manifest_artifact_hash" in captured["configuration_json"]
+
+
+# ------------------------------------------------ replay provenance binding (closure 3, point 1)
+
+
+def _template_with_wrong_provenance() -> ReplayMetadata:
+    """A template deliberately carrying WRONG values for all four provenance
+    fields the manifest must overwrite -- proves they get overwritten, not
+    merely validated-if-present."""
+
+    template = _replay_metadata_template()
+    return dataclasses.replace(
+        template,
+        code_commit_sha="WRONG-COMMIT",
+        model_version="WRONG-MODEL-VERSION",
+        feature_snapshot_id="WRONG-SNAPSHOT-ID",
+        market_data_snapshot_id="WRONG-MARKET-DATA-ID",
+    )
+
+
+def test_replay_metadata_provenance_is_overwritten_from_manifest_not_the_caller_template(tmp_path, monkeypatch):
+    captured = {}
+
+    class _CapturingSpyReplayService:
+        def run(self, replay_metadata, trading_dates, progress_every=None):
+            captured["replay_metadata"] = replay_metadata
+            return "SPY_RESULT"
+
+    class _CapturingSpyServices:
+        def __init__(self):
+            self.replay_service = _CapturingSpyReplayService()
+
+    _patch_internal_constructors(monkeypatch, spy_services_factory=lambda *a, **kw: _CapturingSpyServices())
+    feature_dir, swing20_dir, config, manifest, manifest_path = _build_valid_setup(tmp_path)
+    conn = _make_connection()
+
+    run_real_experiment(conn, manifest_path, feature_dir, config, _template_with_wrong_provenance(), TRADING_DATES)
+
+    persisted = captured["replay_metadata"]
+    assert persisted.code_commit_sha == manifest.code_commit_sha
+    assert persisted.model_version == manifest.model_version
+    assert persisted.feature_snapshot_id == manifest.feature_snapshot_id
+    assert persisted.market_data_snapshot_id == manifest.ohlc_hash
+    assert persisted.signal_start_date == manifest.signal_start_date
+    assert persisted.signal_end_date == manifest.signal_end_date
+    assert persisted.outcome_data_end_date == manifest.outcome_data_end_date
+    # caller-owned fields are preserved
+    assert persisted.replay_id == REPLAY_ID
+
+
+def test_replay_metadata_provenance_is_persisted_and_used_for_resume_identity(tmp_path, monkeypatch):
+    """Integration-level: lets build_exp005_replay_services run for real (only
+    the model/universe constructors are faked, since a real Model2
+    PredictionAdapter fit needs real training data) and confirms the ACTUAL
+    persisted replay_metadata row -- not just the in-memory object passed to
+    ReplayService.run -- carries the manifest-derived provenance, and that
+    configuration_hash (what ReplayService's own resume path compares) is
+    derived from the verified manifest+config+artifact, not the caller's
+    placeholder."""
+
+    monkeypatch.setattr(real_run_module, "Model2PredictionAdapter", lambda path: _FakeModelAdapter())
+    monkeypatch.setattr(real_run_module, "HistoricalFeatureUniverseProvider", lambda path: _FakeUniverseProvider())
+    feature_dir, swing20_dir, config, manifest, manifest_path = _build_valid_setup(tmp_path)
+    conn = _make_connection()
+
+    run_real_experiment(conn, manifest_path, feature_dir, config, _template_with_wrong_provenance(), TRADING_DATES)
+
+    from stock_analyzer.sandbox.infrastructure.sqlite_repository import SandboxRepository
+
+    stored = SandboxRepository(conn).get_replay_metadata(REPLAY_ID)
+    assert stored is not None
+    assert stored.code_commit_sha == manifest.code_commit_sha
+    assert stored.model_version == manifest.model_version
+    assert stored.feature_snapshot_id == manifest.feature_snapshot_id
+    assert stored.market_data_snapshot_id == manifest.ohlc_hash
+    assert stored.signal_start_date == manifest.signal_start_date
+    assert stored.signal_end_date == manifest.signal_end_date
+    assert stored.outcome_data_end_date == manifest.outcome_data_end_date
+    assert stored.configuration_hash != "placeholder-must-be-overridden"
+
+
+# --------------------------------------------- database schema verification (closure 3, point 2)
+
+
+def test_fresh_connection_initializes_successfully(tmp_path):
+    feature_dir, swing20_dir, config, manifest, manifest_path = _build_valid_setup(tmp_path)
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+
+    verify_database_schema_matches_manifest(conn, manifest)  # must not raise
+
+
+def test_actual_core_schema_mismatch_blocks(tmp_path):
+    feature_dir, swing20_dir, config, manifest, manifest_path = _build_valid_setup(tmp_path)
+    wrong = dataclasses.replace(manifest, schema_version=999)
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+
+    with pytest.raises(RealRunGateError, match="schema_version"):
+        verify_database_schema_matches_manifest(conn, wrong)
+
+
+def test_actual_decision_audit_schema_mismatch_blocks(tmp_path):
+    feature_dir, swing20_dir, config, manifest, manifest_path = _build_valid_setup(tmp_path)
+    wrong = dataclasses.replace(manifest, decision_audit_schema_version=999)
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+
+    with pytest.raises(RealRunGateError, match="decision_audit_schema_version"):
+        verify_database_schema_matches_manifest(conn, wrong)
+
+
+def test_malformed_physical_decision_audit_table_blocks(tmp_path):
+    feature_dir, swing20_dir, config, manifest, manifest_path = _build_valid_setup(tmp_path)
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    init_db(conn)
+    # A pre-corrective-cycle float-based physical shape, mislabeled as v1 -- same
+    # fixture pattern as test_exp005_schema.py's own malformed-fixture tests.
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE portfolio_admissions (admission_id TEXT PRIMARY KEY, replay_id TEXT, as_of_date TEXT);
+        CREATE TABLE slot_reservations (reservation_id TEXT PRIMARY KEY, replay_id TEXT, status TEXT, created_at TEXT);
+        CREATE TABLE portfolio_equity_snapshots (snapshot_id TEXT PRIMARY KEY, as_of_date TEXT);
+        CREATE TABLE executions (
+            execution_id TEXT PRIMARY KEY, order_id TEXT, position_id TEXT, candidate_id TEXT,
+            replay_id TEXT, execution_date TEXT, raw_market_fill_price REAL
+        );
+        """
+    )
+    conn.execute("INSERT INTO schema_meta(key, value) VALUES ('decision_audit_schema_version', '1')")
+    conn.commit()
+
+    with pytest.raises(Exception):
+        verify_database_schema_matches_manifest(conn, manifest)
+
+
+def test_foreign_keys_disabled_blocks(tmp_path):
+    feature_dir, swing20_dir, config, manifest, manifest_path = _build_valid_setup(tmp_path)
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    # PRAGMA foreign_keys deliberately left OFF (SQLite's own default).
+
+    with pytest.raises(RealRunGateError, match="foreign_keys"):
+        verify_database_schema_matches_manifest(conn, manifest)
+
+
+def test_no_domain_rows_written_when_schema_rejected(tmp_path, monkeypatch):
+    _patch_internal_constructors(monkeypatch)
+    feature_dir, swing20_dir, config, manifest, manifest_path = _build_valid_setup(tmp_path)
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    # foreign_keys left OFF -- guaranteed rejection before anything else runs.
+
+    with pytest.raises(RealRunGateError):
+        run_real_experiment(conn, manifest_path, feature_dir, config, _replay_metadata_template(), TRADING_DATES)
+
+    tables = {row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    assert "replay_metadata" not in tables  # init_db never even ran
+    assert "portfolio_admissions" not in tables
