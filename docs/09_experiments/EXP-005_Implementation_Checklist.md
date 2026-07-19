@@ -74,7 +74,7 @@ different names. This is a naming difference only, not a behavioral deviation.
 | Report generation | `exp005/diagnostics/report_generator.py` (Stage 14) |
 | Import-boundary enforcement | test: `tests/test_exp005_diagnostics_import_boundary.py` (Stage 11) |
 | Deterministic-output validation | tests in Stage 8 (replay), Stage 9 (manifest), Stage 14 (reports) |
-| Censoring | `exp005/diagnostics/mfe_mae.py` + shared censoring helper (Stage 12), applied consistently across Stages 12-13 |
+| Censoring | `exp005/diagnostics/_shared.py::compute_forward_horizon` (Stage 13), applied consistently to every fixed-horizon post-hoc outcome in Sections 21-24 (Section 20's MFE/MAE complete path is not fixed-horizon and is not censored the same way -- see mfe_mae.py's module docstring) |
 | Orphan detection | `exp005/infrastructure/repository.py::PortfolioRepository.check_admission_integrity` (Stage 4) |
 | Accounting reconciliation | `exp005/infrastructure/repository.py` reconciliation helper + tests (Stage 5) |
 
@@ -215,6 +215,62 @@ different names. This is a naming difference only, not a behavioral deviation.
       MfeMaeComputationError; exit_efficiency=None at mfe_pct==0; missing
       BUY/SELL execution errors), all pass with exact hand-computed
       MFE/MAE/session-count values.
-- [ ] Stage 13
+- [x] Stage 13 -- remaining decision-quality diagnostics. A new shared module,
+      exp005/diagnostics/_shared.py, factors out symbol_sessions/next_session/
+      previous_session (originally private to mfe_mae.py, Stage 12) plus
+      Section 27's censoring primitive: full_market_calendar (the sorted union
+      of session dates across every symbol in the frozen prices artifact) and
+      compute_forward_horizon, which classifies every fixed-horizon post-hoc
+      outcome (Sections 21-24) as not censored, MISSING_MARKET_DATA (a genuine
+      gap in this symbol's own data within an otherwise in-window horizon --
+      takes priority when both conditions hold), or END_OF_EXPERIMENT (the
+      horizon's nominal sessions run past outcome_data_end_date or the
+      calendar's own end). mfe_mae.py now imports these instead of its own
+      private copies (10/10 tests unchanged after the refactor).
+      - exp005/diagnostics/sell_quality.py (Section 21): compute_sell_quality
+        for closed positions, 1/5/10/20-session forward horizons from the exit
+        session -- close-to-close return, max High/min Low excursion (price +
+        pct), target-reachability, is_censored, all relative to EXP-005's own
+        effective_exit_price (executions ledger, never core's raw exit_price).
+      - exp005/diagnostics/hold_quality.py (Section 22): compute_hold_quality
+        for HOLD position_snapshots, 1/5/10-session horizons from the
+        snapshot's own as_of_date/close_price, plus a per-snapshot
+        eventual_outcome (PROFITABLE/ADVERSE from EXP-005's own effective
+        entry/exit prices when the position later closed, UNRESOLVED when it
+        never did within the frozen replay -- distinct from a genuinely
+        adverse outcome). compute_hold_quality_for_position batches over one
+        position's own HOLD snapshots.
+      - exp005/diagnostics/entry_timing.py (Section 23): the largest module --
+        compute_entry_timing_for_filled_order (signal-close entry gap against
+        the next session's own open, independent of which session actually
+        filled; raw/effective fill price and slippage from executions; fill
+        percentile within the fill session's own range via
+        entry_order_attempts; forward return/MFE/MAE at 1/5/10/20 sessions
+        applying Section 20's entry-session-ambiguity rule to the horizon
+        window itself, not just the complete-path case; whether the +20%
+        target was reached within the position's actual holding horizon) and
+        compute_entry_timing_for_expired_order (ceiling distance from
+        entry_order_attempts; hypothetical MFE/MAE tracked forward from the
+        order's own expiry date using the ceiling price as reference).
+      - exp005/diagnostics/opportunity_cost.py (Section 24):
+        compute_opportunity_cost for NO_CAPACITY portfolio_admissions rows --
+        capacity state at rejection from that day's portfolio_equity_snapshots
+        row; which reservations occupied a slot that day, reconstructed from
+        slot_reservations' own created_at/resolved_at timestamps (its status
+        column is current-only and cannot answer a question about a past
+        date -- see the new PortfolioRepository.list_reservations_for_experiment,
+        exp005/infrastructure/repository.py); subsequent 1/5/10/20-session
+        returns/MFE/MAE from signal close; a read-only hypothetical ADR-007
+        fill-rule replay. The hypothetical-fill check DUPLICATES (never
+        imports) EntryService._evaluate_execution's rule, since importing a
+        decision-time module from diagnostics would violate Section 26's
+        import-isolation invariant (test_exp005_diagnostics_import_boundary.py).
+        Never calls any repository write method -- strictly observational, no
+        virtual_positions/slot_reservations/cash-ledger writes.
+      tests: test_exp005_diagnostics_shared.py (7), test_exp005_sell_quality.py
+      (5), test_exp005_hold_quality.py (5), test_exp005_entry_timing.py (7),
+      test_exp005_opportunity_cost.py (6), plus one new
+      test_exp005_repository.py case for list_reservations_for_experiment --
+      31 new tests, every numeric scenario hand-computed.
 - [ ] Stage 14
 - [ ] Stage 15 (synthetic fixture + completion report)

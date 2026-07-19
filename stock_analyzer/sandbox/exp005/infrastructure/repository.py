@@ -234,6 +234,21 @@ class PortfolioRepository:
         ).fetchall()
         return [self._row_to_reservation(r) for r in rows]
 
+    def list_reservations_for_experiment(self, replay_id: str) -> list[SlotReservation]:
+        """Every reservation ever created for this replay, regardless of its
+        current (mutable) status -- unlike list_active_reservations. Used by
+        post-hoc diagnostics (Section 24) to reconstruct which reservations
+        occupied a slot on a PAST date, via each row's own created_at/resolved_at
+        timestamps rather than its current status (which only reflects the final
+        outcome, since slot_reservations is a mutable current-state table -- see
+        the module docstring)."""
+
+        rows = self._conn.execute(
+            "SELECT * FROM slot_reservations WHERE replay_id = ? ORDER BY created_at ASC, reservation_id ASC",
+            (replay_id,),
+        ).fetchall()
+        return [self._row_to_reservation(r) for r in rows]
+
     def _update_reservation_status_row(self, reservation_id: str, status: str, resolved_at: datetime) -> str:
         """Non-committing -- see update_reservation_status."""
 

@@ -248,6 +248,19 @@ def test_list_active_reservations_returns_only_reserved_in_deterministic_order(r
     assert [r.candidate_id for r in active] == ["c0", "c2"]
 
 
+def test_list_reservations_for_experiment_returns_all_regardless_of_status(repo: PortfolioRepository):
+    ids = ["c0", "c1", "c2"]
+    for i, cid in enumerate(ids):
+        repo.insert_admission(_admission(cid, ["AAA", "BBB", "CCC"][i], i + 1))
+        repo.insert_reservation(_reservation(cid, cid, ["AAA", "BBB", "CCC"][i]))
+    repo.update_reservation_status("c1:reservation", RELEASED, NOW)
+    repo.update_reservation_status("c2:reservation", CONVERTED, NOW)
+
+    all_reservations = repo.list_reservations_for_experiment("replay-1")
+    assert [r.candidate_id for r in all_reservations] == ["c0", "c1", "c2"]
+    assert [r.status for r in all_reservations] == [RESERVED, RELEASED, CONVERTED]
+
+
 # ----------------------------------------------- reservation transition conflict-safety
 
 

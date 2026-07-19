@@ -50,6 +50,9 @@ import pandas as pd
 from stock_analyzer.sandbox.domain.entry_order import FILLED_AT_CEILING, FILLED_AT_OPEN
 from stock_analyzer.sandbox.domain.position import CLOSED, VirtualPosition
 from stock_analyzer.sandbox.domain.recommendation import SELL_TARGET, SELL_TIME
+from stock_analyzer.sandbox.exp005.diagnostics._shared import next_session as _next_session
+from stock_analyzer.sandbox.exp005.diagnostics._shared import previous_session as _previous_session
+from stock_analyzer.sandbox.exp005.diagnostics._shared import symbol_sessions as _symbol_sessions
 from stock_analyzer.sandbox.exp005.diagnostics.diagnostics import DiagnosticsContext
 from stock_analyzer.sandbox.exp005.domain.execution import BUY
 from stock_analyzer.sandbox.exp005.domain.units import price_units_to_float
@@ -83,25 +86,6 @@ class MfeMaeResult:
     realized_or_mtm_return_pct: float
     peak_to_exit_giveback_pct: float
     exit_efficiency: float | None  # None when mfe_pct == 0 (undefined, not infinite)
-
-
-def _symbol_sessions(prices_df: pd.DataFrame, symbol: str) -> pd.DataFrame:
-    """Sorted, deduplicated OHLCV rows for one symbol, indexed by date."""
-
-    rows = prices_df[prices_df["symbol"] == symbol].copy()
-    rows["date"] = pd.to_datetime(rows["date"]).dt.date
-    rows = rows.sort_values("date").drop_duplicates(subset="date", keep="last")
-    return rows.set_index("date")[["Open", "High", "Low", "Close"]]
-
-
-def _next_session(sessions: pd.DataFrame, after: date) -> date | None:
-    later = sessions.index[sessions.index > after]
-    return later.min() if len(later) else None
-
-
-def _previous_session(sessions: pd.DataFrame, before: date) -> date | None:
-    earlier = sessions.index[sessions.index < before]
-    return earlier.max() if len(earlier) else None
 
 
 def _is_target_exit_unambiguous(sessions: pd.DataFrame, exit_date: date, target_price: float) -> bool:
