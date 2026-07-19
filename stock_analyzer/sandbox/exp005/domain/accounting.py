@@ -1,57 +1,78 @@
 """Execution accounting: the one, centralized place EXP-005's sign conventions and
-reconciliation formulas are computed (Revision 5, Section 18, Stage 5). No other
-module -- execution service, portfolio ledger, or report -- recomputes these
-independently; they call into this module.
+reconciliation formulas are computed (Revision 5, Section 18, Stage 5 corrective
+cycle). No other module -- execution service, portfolio ledger, or report --
+recomputes these independently; they call into this module.
 
-Sign convention (frozen here, referenced everywhere else): `quantity`,
-`gross_notional`, `commission`, `slippage_cost` are always non-negative MAGNITUDES.
-Direction is carried entirely by `side` and by the signed `net_cash_flow` (negative
-for BUY -- cash leaves the portfolio; positive for SELL -- cash enters it). This
-matches the CHECK constraints already enforced at the schema level
-(infrastructure/schema.py).
+**Exact integer arithmetic throughout** (domain/units.py) -- no float, no tolerance.
+The corrective-cycle fix: the prior design computed high-precision Decimal
+intermediates and rounded gross_notional/net_cash_flow *independently* from those
+intermediates, so `reconcile_execution` (which recomputes from the *persisted,
+already-rounded* fields) could disagree with the value `compute_buy_accounting`
+itself had produced -- a genuine, confirmed round-trip defect. The fix is a single,
+explicit calculation order where EVERY step consumes the PREVIOUS step's
+already-rounded, already-persisted value, never a pre-rounding high-precision one:
 
-Both `raw_market_fill_price` (ADR-007's unadjusted simulated price -- what decides
-whether an order is fillable at all, Section 6) and `effective_fill_price`
-(slippage-adjusted -- what cash accounting actually uses) are always computed;
-neither is derived from or overwrites the other after the fact. Adverse slippage:
-BUY effective price >= raw price; SELL effective price <= raw price.
+    1. raw price, in exact price units
+    2/3. exact slippage arithmetic -> ROUNDED effective price (persisted)
+    4/5. quantity derived from the budget using the PERSISTED effective price ->
+         ROUNDED quantity (persisted) -- rounded DOWN for BUY specifically, so
+         `security cost + commission` can never exceed the slot budget
+    6. gross notional = PERSISTED quantity x PERSISTED effective price -> rounded
+    7. net cash flow = PERSISTED gross notional +/- commission
+    8. (BUY only) any unspent slot remainder is computed and returned explicitly,
+       never silently absorbed
 
-Rounding: all arithmetic is performed in `Decimal`, each input converted via
-`Decimal(str(x))` (Stage 1's lesson -- this recovers the exact intended decimal value
-of a float literal, not an approximation) to avoid binary-float error accumulating
-across multiple computation steps. Results are rounded ONLY at the final monetary
-boundary, reusing this project's existing `round_price` (4 decimals)/`round_money`
-(2 decimals) helpers (`stock_analyzer.sandbox.config`) -- Python's round-half-to-even,
-the same convention every other sandbox module already uses, not a new one
-introduced here.
+`_compute_from_quantity` is the single shared implementation of steps 2-3 and 6-7,
+used by BOTH `compute_sell_accounting` (forward) and `reconcile_execution`
+(recomputation from a persisted row) -- so a persisted execution and its
+reconciliation can never independently diverge; they are, by construction, the same
+code path.
+
+Sign convention: `quantity_units`, `gross_notional_units`, `commission_units`,
+`slippage_cost_units` are always non-negative MAGNITUDES. Direction is carried
+entirely by `side` and by the signed `net_cash_flow_units` (negative for BUY,
+positive for SELL) -- matching the CHECK constraints already enforced at the schema
+level (infrastructure/schema.py). Adverse slippage: BUY effective price >= raw
+price; SELL effective price <= raw price.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import ROUND_DOWN
 
-from stock_analyzer.sandbox.config import round_money, round_price
 from stock_analyzer.sandbox.exp005.domain.execution import BUY, SELL, Execution
+from stock_analyzer.sandbox.exp005.domain.units import (
+    money_units_to_decimal,
+    price_units_to_decimal,
+    quantity_units_to_decimal,
+    rate_units_to_decimal,
+    to_money_units,
+    to_price_units,
+    to_quantity_units,
+    to_rate_units,
+)
 
 
 class InvalidExecutionInputError(ValueError):
     """Raised for a non-positive price/quantity/budget, an out-of-range slippage
-    rate, or an unrecognized side -- fails fast rather than silently producing a
-    nonsensical execution."""
+    rate, an unrecognized side, or a computed result that would violate the slot-
+    budget invariant -- fails fast rather than silently producing a nonsensical or
+    over-budget execution."""
 
 
 @dataclass(frozen=True)
 class ExecutionAccounting:
-    """The computed, mutually-reconciled fields for one execution -- returned
-    together so a caller can never accidentally persist a subset that doesn't
-    reconcile with the rest."""
+    """The computed, mutually-reconciled fields for one execution, in exact integer
+    units -- returned together so a caller can never accidentally persist a subset
+    that doesn't reconcile with the rest."""
 
-    effective_fill_price: float
-    quantity: float
-    gross_notional: float
-    slippage_cost: float
-    net_cash_flow: float
+    effective_fill_price_units: int
+    quantity_units: int
+    gross_notional_units: int
+    slippage_cost_units: int
+    net_cash_flow_units: int
+    slot_remainder_units: int  # BUY: unspent budget retained as cash. SELL: always 0.
 
 
 def _validate_common(raw_fill_price: float, commission: float, slippage_rate: float) -> None:
@@ -63,14 +84,49 @@ def _validate_common(raw_fill_price: float, commission: float, slippage_rate: fl
         raise InvalidExecutionInputError(f"slippage_rate must be in [0, 1], got {slippage_rate!r}")
 
 
+def _compute_from_quantity(
+    raw_price_units: int, quantity_units: int, commission_units: int, rate_units: int, side: str
+) -> tuple[int, int, int, int]:
+    """The single shared formula (steps 2-3 and 6-7 of the module docstring's
+    calculation order): given raw price/quantity/commission/rate/side, returns
+    (effective_price_units, gross_notional_units, slippage_cost_units,
+    net_cash_flow_units). Used by BOTH compute_sell_accounting (forward) and
+    reconcile_execution (recomputation from a persisted row) -- the one place this
+    arithmetic exists."""
+
+    if side not in (BUY, SELL):
+        raise InvalidExecutionInputError(f"unrecognized side {side!r}")
+
+    raw = price_units_to_decimal(raw_price_units)
+    rate = rate_units_to_decimal(rate_units)
+    quantity = quantity_units_to_decimal(quantity_units)
+
+    effective_exact = raw * (1 + rate) if side == BUY else raw * (1 - rate)
+    effective_units = to_price_units(effective_exact)
+    effective = price_units_to_decimal(effective_units)
+
+    gross_notional_units = to_money_units(quantity * effective)
+    gross = money_units_to_decimal(gross_notional_units)
+
+    if side == BUY:
+        slippage_cost_units = to_money_units(quantity * (effective - raw))
+        net_cash_flow_units = -(gross_notional_units + commission_units)
+    else:
+        slippage_cost_units = to_money_units(quantity * (raw - effective))
+        net_cash_flow_units = gross_notional_units - commission_units
+
+    return effective_units, gross_notional_units, slippage_cost_units, net_cash_flow_units
+
+
 def compute_buy_accounting(
     raw_fill_price: float, slot_budget: float, commission: float, slippage_rate: float
 ) -> ExecutionAccounting:
-    """Quantity is sized to spend the ENTIRE slot budget (net of commission) at the
-    slippage-adjusted effective price: `security cost (quantity * effective price) +
-    commission == slot_budget`, exactly (Revision 5, Section 8.3's quantity
-    formula) -- fractional shares make exact budget consumption possible, no
-    leftover reservation dust."""
+    """Quantity is DERIVED (steps 4-5): sized from the slot budget net of
+    commission, using the already-rounded effective price, rounded DOWN to
+    quantity-scale so `security cost + commission <= slot budget` always holds. The
+    remainder (slot_budget - security_cost - commission), typically a few
+    hundredths of a cent, is returned explicitly as `slot_remainder_units` -- never
+    silently absorbed into either side of the ledger."""
 
     _validate_common(raw_fill_price, commission, slippage_rate)
     if slot_budget <= 0:
@@ -78,91 +134,108 @@ def compute_buy_accounting(
     if commission >= slot_budget:
         raise InvalidExecutionInputError(f"commission ({commission}) must be less than slot_budget ({slot_budget})")
 
-    raw = Decimal(str(raw_fill_price))
-    budget = Decimal(str(slot_budget))
-    comm = Decimal(str(commission))
-    rate = Decimal(str(slippage_rate))
+    raw_units = to_price_units(raw_fill_price)
+    slot_budget_units = to_money_units(slot_budget)
+    commission_units = to_money_units(commission)
+    rate_units = to_rate_units(slippage_rate)
 
-    effective = raw * (1 + rate)  # adverse for the buyer: effective >= raw
-    quantity = (budget - comm) / effective
-    gross_notional = quantity * effective
-    slippage_cost = quantity * (effective - raw)
-    net_cash_flow = -(gross_notional + comm)
+    # Steps 1-3: rounded effective price, persisted immediately.
+    raw = price_units_to_decimal(raw_units)
+    rate = rate_units_to_decimal(rate_units)
+    effective_exact = raw * (1 + rate)
+    effective_units = to_price_units(effective_exact)
+    effective = price_units_to_decimal(effective_units)
+
+    # Steps 4-5: quantity derived from the PERSISTED effective price, rounded DOWN.
+    available_units = slot_budget_units - commission_units
+    available = money_units_to_decimal(available_units)
+    quantity_exact = available / effective
+    quantity_units = to_quantity_units(quantity_exact, rounding=ROUND_DOWN)
+    if quantity_units <= 0:
+        raise InvalidExecutionInputError(
+            f"slot_budget ({slot_budget}) net of commission ({commission}) cannot buy a positive "
+            f"quantity at effective price {price_units_to_decimal(effective_units)}"
+        )
+
+    # Steps 6-7: gross notional and net cash flow, via the SAME shared formula
+    # reconcile_execution uses -- guarantees this function's own output is exactly
+    # what independent reconciliation will recompute.
+    effective_units_check, gross_notional_units, slippage_cost_units, net_cash_flow_units = _compute_from_quantity(
+        raw_units, quantity_units, commission_units, rate_units, BUY
+    )
+    assert effective_units_check == effective_units  # deterministic given identical inputs
+
+    # Step 8: explicit remainder -- must never be negative (would mean the slot
+    # budget was oversubscribed by rounding, which ROUND_DOWN on quantity exists
+    # specifically to prevent).
+    slot_remainder_units = slot_budget_units - gross_notional_units - commission_units
+    if slot_remainder_units < 0:
+        raise InvalidExecutionInputError(
+            f"internal invariant violated: security cost + commission "
+            f"({gross_notional_units + commission_units}) exceeds slot budget ({slot_budget_units})"
+        )
 
     return ExecutionAccounting(
-        effective_fill_price=round_price(float(effective)),
-        quantity=round_price(float(quantity)),
-        gross_notional=round_money(float(gross_notional)),
-        slippage_cost=round_money(float(slippage_cost)),
-        net_cash_flow=round_money(float(net_cash_flow)),
+        effective_fill_price_units=effective_units,
+        quantity_units=quantity_units,
+        gross_notional_units=gross_notional_units,
+        slippage_cost_units=slippage_cost_units,
+        net_cash_flow_units=net_cash_flow_units,
+        slot_remainder_units=slot_remainder_units,
     )
 
 
 def compute_sell_accounting(
     raw_fill_price: float, quantity: float, commission: float, slippage_rate: float
 ) -> ExecutionAccounting:
-    """Quantity is fixed (the position's existing share count, set at entry) --
-    proceeds return to cash net of commission and adverse slippage."""
+    """Quantity is GIVEN (the position's existing share count, fixed at entry) --
+    proceeds return to cash net of commission and adverse slippage. No remainder
+    concept applies (nothing is being sized against a budget)."""
 
     _validate_common(raw_fill_price, commission, slippage_rate)
     if quantity <= 0:
         raise InvalidExecutionInputError(f"quantity must be positive, got {quantity!r}")
 
-    raw = Decimal(str(raw_fill_price))
-    qty = Decimal(str(quantity))
-    comm = Decimal(str(commission))
-    rate = Decimal(str(slippage_rate))
+    raw_units = to_price_units(raw_fill_price)
+    quantity_units = to_quantity_units(quantity)
+    commission_units = to_money_units(commission)
+    rate_units = to_rate_units(slippage_rate)
 
-    effective = raw * (1 - rate)  # adverse for the seller: effective <= raw
-    gross_notional = qty * effective
-    slippage_cost = qty * (raw - effective)
-    net_cash_flow = gross_notional - comm
+    effective_units, gross_notional_units, slippage_cost_units, net_cash_flow_units = _compute_from_quantity(
+        raw_units, quantity_units, commission_units, rate_units, SELL
+    )
 
     return ExecutionAccounting(
-        effective_fill_price=round_price(float(effective)),
-        quantity=round_price(float(qty)),
-        gross_notional=round_money(float(gross_notional)),
-        slippage_cost=round_money(float(slippage_cost)),
-        net_cash_flow=round_money(float(net_cash_flow)),
+        effective_fill_price_units=effective_units,
+        quantity_units=quantity_units,
+        gross_notional_units=gross_notional_units,
+        slippage_cost_units=slippage_cost_units,
+        net_cash_flow_units=net_cash_flow_units,
+        slot_remainder_units=0,
     )
 
 
 def reconcile_execution(execution: Execution) -> bool:
-    """Recomputes every derived field from the execution's own raw inputs
-    (raw_market_fill_price, quantity, commission, slippage_rate, side) using exact
-    Decimal arithmetic and compares each against the persisted value for EXACT
-    equality -- valid specifically because both sides go through the identical
-    rounding boundary (round_price/round_money). Checks, in order: effective price
-    vs. raw price + slippage + side; gross notional vs. quantity * effective price;
-    net cash flow vs. gross notional + commission + side.
+    """Recomputes effective price, gross notional, slippage cost, and net cash flow
+    from the execution's own persisted raw inputs (raw price, quantity, commission,
+    slippage rate, side) via `_compute_from_quantity` -- the SAME code path
+    `compute_sell_accounting` and `compute_buy_accounting`'s final steps use -- and
+    compares each for EXACT integer equality. Never repairs a mismatch; a caller
+    that finds `False` must treat it as a data-integrity failure to investigate."""
 
-    Never "fixes" an inconsistent execution -- a caller that finds a mismatch must
-    treat it as a data-integrity failure to investigate, not something to silently
-    repair on read (Stage 5 review)."""
-
-    raw = Decimal(str(execution.raw_market_fill_price))
-    rate = Decimal(str(execution.slippage_rate))
-    quantity = Decimal(str(execution.quantity))
-    comm = Decimal(str(execution.commission))
-
-    if execution.side == BUY:
-        expected_effective = raw * (1 + rate)
-    elif execution.side == SELL:
-        expected_effective = raw * (1 - rate)
-    else:
-        raise InvalidExecutionInputError(f"unrecognized side {execution.side!r}")
-
-    if round_price(float(expected_effective)) != execution.effective_fill_price:
-        return False
-
-    effective = Decimal(str(execution.effective_fill_price))
-    expected_gross = quantity * effective
-    if round_money(float(expected_gross)) != execution.gross_notional:
-        return False
-
-    gross = Decimal(str(execution.gross_notional))
-    expected_cash_flow = -(gross + comm) if execution.side == BUY else gross - comm
-    return round_money(float(expected_cash_flow)) == execution.net_cash_flow
+    effective_units, gross_units, slippage_units, cash_flow_units = _compute_from_quantity(
+        execution.raw_market_fill_price_units,
+        execution.quantity_units,
+        execution.commission_units,
+        execution.slippage_rate_units,
+        execution.side,
+    )
+    return (
+        effective_units == execution.effective_fill_price_units
+        and gross_units == execution.gross_notional_units
+        and slippage_units == execution.slippage_cost_units
+        and cash_flow_units == execution.net_cash_flow_units
+    )
 
 
 def reconcile_executions_for_order(executions: list[Execution]) -> bool:
