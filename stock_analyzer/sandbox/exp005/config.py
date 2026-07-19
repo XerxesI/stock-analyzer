@@ -9,19 +9,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass, field
+from decimal import Decimal
 
 VARIANT_B = "B"
 VARIANT_D = "D"
 SUPPORTED_VARIANTS = (VARIANT_B, VARIANT_D)
-
-# Decimal precision used when building the canonical (hashable) representation of
-# any float field -- chosen so two configurations that are equal in value, however
-# constructed, always serialize byte-identically (Stage 1 requirement). Money and
-# rate fields use different precision because a rate (e.g. 0.0005) needs more decimal
-# places than a dollar amount to round-trip without loss.
-MONEY_DECIMALS = 2
-RATE_DECIMALS = 6
 
 # Section 28/29 -- version marker for the four wholly new, additive tables
 # (portfolio_admissions, slot_reservations, portfolio_equity_snapshots, executions).
@@ -51,12 +45,36 @@ class UnsupportedVariantError(ValueError):
     silently accept anything else."""
 
 
-def _round_money(value: float) -> float:
-    return round(float(value), MONEY_DECIMALS)
+def _exact_decimal(value: float, field_name: str) -> Decimal:
+    """Converts a float configuration value to its exact decimal identity via
+    Python's shortest round-trip string representation. `str(float)` has been
+    guaranteed, since Python 3.1, to produce the SHORTEST decimal string that parses
+    back to that exact same float -- deterministic and platform-independent, not an
+    approximation and not an arbitrary rounding. This is the opposite of the earlier
+    (rejected) approach of pre-rounding to a fixed number of decimal places before
+    hashing, which would silently collapse any two values closer together than the
+    rounding boundary into one canonical identity, discarding real information no
+    matter how the boundary was chosen.
+
+    Rejects NaN/Infinity outright (never valid configuration values) and normalizes
+    -0.0 to 0.0 -- they compare equal (`-0.0 == 0.0`) but `str(-0.0) != str(0.0)`,
+    which would otherwise split one semantic value into two different canonical
+    identities purely by construction accident.
+    """
+
+    if not math.isfinite(value):
+        raise ValueError(f"{field_name} must be a finite number, got {value!r}")
+    if value == 0.0:
+        value = 0.0
+    return Decimal(str(value))
 
 
-def _round_rate(value: float) -> float:
-    return round(float(value), RATE_DECIMALS)
+def _decimal_str(value: float, field_name: str) -> str:
+    """The canonical form of a float configuration value: an exact decimal STRING,
+    never a bare JSON number -- so no downstream float re-parsing can ever
+    reintroduce the ambiguity this function exists to remove."""
+
+    return str(_exact_decimal(value, field_name))
 
 
 def canonical_json(obj: dict) -> str:
@@ -85,6 +103,10 @@ class PortfolioConfig:
     slippage_rate: float = 0.0005  # 5 bps, both sides, Section 9
 
     def __post_init__(self) -> None:
+        for name in ("starting_capital", "slot_budget", "entry_commission", "exit_commission", "slippage_rate"):
+            value = getattr(self, name)
+            if not math.isfinite(value):
+                raise ValueError(f"{name} must be a finite number, got {value!r}")
         if self.max_slots <= 0:
             raise ValueError("max_slots must be positive")
         if self.slot_budget * self.max_slots > self.starting_capital + 1e-6:
@@ -95,12 +117,12 @@ class PortfolioConfig:
 
     def canonical(self) -> dict:
         return {
-            "starting_capital": _round_money(self.starting_capital),
+            "starting_capital": _decimal_str(self.starting_capital, "starting_capital"),
             "max_slots": self.max_slots,
-            "slot_budget": _round_money(self.slot_budget),
-            "entry_commission": _round_money(self.entry_commission),
-            "exit_commission": _round_money(self.exit_commission),
-            "slippage_rate": _round_rate(self.slippage_rate),
+            "slot_budget": _decimal_str(self.slot_budget, "slot_budget"),
+            "entry_commission": _decimal_str(self.entry_commission, "entry_commission"),
+            "exit_commission": _decimal_str(self.exit_commission, "exit_commission"),
+            "slippage_rate": _decimal_str(self.slippage_rate, "slippage_rate"),
         }
 
 
@@ -141,14 +163,27 @@ class FeasibilityCriteria:
     control_percentile_threshold: float = 80.0
     min_profit_factor: float = 1.0
 
+    def __post_init__(self) -> None:
+        for name in (
+            "max_drawdown_threshold",
+            "largest_win_pct_of_net_profit_threshold",
+            "control_percentile_threshold",
+            "min_profit_factor",
+        ):
+            value = getattr(self, name)
+            if not math.isfinite(value):
+                raise ValueError(f"{name} must be a finite number, got {value!r}")
+
     def canonical(self) -> dict:
         return {
-            "max_drawdown_threshold": _round_rate(self.max_drawdown_threshold),
-            "largest_win_pct_of_net_profit_threshold": _round_rate(
-                self.largest_win_pct_of_net_profit_threshold
+            "max_drawdown_threshold": _decimal_str(self.max_drawdown_threshold, "max_drawdown_threshold"),
+            "largest_win_pct_of_net_profit_threshold": _decimal_str(
+                self.largest_win_pct_of_net_profit_threshold, "largest_win_pct_of_net_profit_threshold"
             ),
-            "control_percentile_threshold": _round_rate(self.control_percentile_threshold),
-            "min_profit_factor": _round_rate(self.min_profit_factor),
+            "control_percentile_threshold": _decimal_str(
+                self.control_percentile_threshold, "control_percentile_threshold"
+            ),
+            "min_profit_factor": _decimal_str(self.min_profit_factor, "min_profit_factor"),
         }
 
 

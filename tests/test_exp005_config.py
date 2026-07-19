@@ -49,13 +49,79 @@ def test_canonical_json_is_independent_of_input_key_order():
     assert canonical_json(d1) == canonical_json(d2)
 
 
-def test_float_representation_is_stable_at_defined_precision():
-    # Values that are numerically equal once rounded to the frozen precision must
-    # produce identical canonical output, even if constructed via slightly different
-    # float literals.
+def test_canonical_serialization_is_exact_not_rounded():
+    # A prior implementation pre-rounded floats to a fixed number of decimal places
+    # before hashing -- lossy, and unsound in principle even though these specific
+    # values happened not to collide under that scheme. The canonical form must be
+    # an exact decimal string, so two values this close together remain
+    # distinguishable, however small the difference.
     a = PortfolioConfig(slippage_rate=0.0005)
     b = PortfolioConfig(slippage_rate=0.00050000001)
+    assert a.canonical()["slippage_rate"] != b.canonical()["slippage_rate"]
+    assert a.canonical() != b.canonical()
+
+
+def test_materially_different_rates_serialize_differently():
+    a = PortfolioConfig(slippage_rate=0.001)
+    b = PortfolioConfig(slippage_rate=0.0014)
+    assert a.canonical()["slippage_rate"] != b.canonical()["slippage_rate"]
+
+
+def test_semantically_identical_values_serialize_identically_regardless_of_literal():
+    # 0.0005 and 5e-4 are the exact same float value, written two different ways in
+    # source code -- their canonical form must be byte-identical.
+    a = PortfolioConfig(slippage_rate=0.0005)
+    b = PortfolioConfig(slippage_rate=5e-4)
     assert a.canonical() == b.canonical()
+    assert a.canonical()["slippage_rate"] == "0.0005"
+
+
+def test_canonical_decimal_strings_are_exact_not_rounded_json_numbers():
+    config = PortfolioConfig()
+    canonical = config.canonical()
+    # Every float-derived field must serialize as a decimal STRING (never a bare
+    # JSON number, which would route back through float re-parsing ambiguity).
+    for key in ("starting_capital", "slot_budget", "entry_commission", "exit_commission", "slippage_rate"):
+        assert isinstance(canonical[key], str)
+
+
+def test_nan_and_infinity_are_rejected():
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError, match="finite"):
+            PortfolioConfig(slippage_rate=bad)
+        with pytest.raises(ValueError, match="finite"):
+            FeasibilityCriteria(max_drawdown_threshold=bad)
+
+
+def test_negative_zero_does_not_create_a_separate_identity():
+    a = PortfolioConfig(slippage_rate=0.0)
+    b = PortfolioConfig(slippage_rate=-0.0)
+    assert a.canonical() == b.canonical()
+    assert a.canonical()["slippage_rate"] == "0.0" == b.canonical()["slippage_rate"]
+
+
+def test_locale_does_not_affect_serialization():
+    import locale
+
+    config = PortfolioConfig(slippage_rate=0.0005, starting_capital=100_000.0)
+    baseline = canonical_json(config.canonical())
+    original = locale.setlocale(locale.LC_ALL)
+    try:
+        # Some locales (e.g. de_DE) use ',' as the decimal separator in %f-style
+        # formatting -- str(float)/Decimal(str(...)) must not be affected by this at
+        # all, since neither consults locale. Skip gracefully if the locale isn't
+        # installed on this machine rather than failing on an environment gap.
+        for candidate in ("de_DE.UTF-8", "de_DE", "German_Germany.1252"):
+            try:
+                locale.setlocale(locale.LC_ALL, candidate)
+                break
+            except locale.Error:
+                continue
+        else:
+            pytest.skip("no alternate decimal-comma locale available on this machine")
+        assert canonical_json(config.canonical()) == baseline
+    finally:
+        locale.setlocale(locale.LC_ALL, original)
 
 
 def test_different_slippage_rate_changes_config_hash():
@@ -109,6 +175,22 @@ def test_variant_d_with_seed_is_valid_and_distinguishable_by_seed():
     d1 = Exp005Config(variant_id=VARIANT_D, control_seed=1)
     d2 = Exp005Config(variant_id=VARIANT_D, control_seed=2)
     assert d1.config_hash() != d2.config_hash()
+
+
+def test_variant_b_and_variant_d_have_different_config_identity():
+    b = Exp005Config(variant_id=VARIANT_B)
+    d = Exp005Config(variant_id=VARIANT_D, control_seed=1)
+    assert b.config_hash() != d.config_hash()
+    # Both use the same default portfolio mechanics -- Section 3: D differs from B
+    # ONLY in ranking, never in portfolio/admission/execution config.
+    assert b.portfolio_configuration_hash() == d.portfolio_configuration_hash()
+
+
+def test_control_seed_changes_config_hash_but_not_portfolio_configuration_hash():
+    d1 = Exp005Config(variant_id=VARIANT_D, control_seed=1)
+    d2 = Exp005Config(variant_id=VARIANT_D, control_seed=2)
+    assert d1.config_hash() != d2.config_hash()
+    assert d1.portfolio_configuration_hash() == d2.portfolio_configuration_hash()
 
 
 def test_portfolio_config_rejects_overallocated_slots():
