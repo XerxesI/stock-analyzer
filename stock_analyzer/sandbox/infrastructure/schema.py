@@ -10,25 +10,55 @@ Two categories of table:
 
 Schema versioning: `init_db` compares the CURRENT physical schema_version (read from
 schema_meta, not assumed) against SCHEMA_VERSION and runs an explicit, transactional
-migration for any gap -- see _migrate_v1_to_v2. A brand-new database is created
-directly at the latest schema by the DDL below and simply has its version recorded;
-schema_meta is never blindly overwritten to SCHEMA_VERSION without either creating a
-fresh database or completing a real migration.
+migration for any gap, one version at a time -- see _migrate_v1_to_v2 and
+_migrate_v2_to_v3. A brand-new database is created directly at the latest schema by
+the DDL below and simply has its version recorded; schema_meta is never blindly
+overwritten to SCHEMA_VERSION without either creating a fresh database or completing
+every intervening real migration. A schema_version recorded HIGHER than
+SCHEMA_VERSION (a database written by newer code than is currently running) is
+refused outright -- see UnsupportedSchemaVersionError.
+
+Version history (each version number denotes an ACTUAL, distinct physical schema that
+was published at some point -- never reused, even when a later fix needs "one more"
+change than the previous bump anticipated):
+  v1: original schema -- ranked_candidates.signal_close NOT NULL, no
+      replay_metadata.last_completed_date.
+  v2: published in commit db067d4/68b0c6f -- ranked_candidates.signal_close nullable
+      (a MISSING_MARKET_DATA candidate has no signal close by definition; the v1 NOT
+      NULL constraint was silently swallowing that row via INSERT OR IGNORE -- see
+      candidate_service.py). Still no last_completed_date: a v2 database predates the
+      resume watermark entirely.
+  v3: current -- adds replay_metadata.last_completed_date, the replay resume
+      watermark so ReplayService only ever reprocesses the one date that may have
+      been partially done when a process died, never already-completed history (see
+      application/replay_service.py). A v1 or v2 database migrated to v3 gets this
+      column added as NULL for any existing replay_metadata rows -- see
+      application/replay_service.py's UntrustworthyResumeWatermarkError for how a
+      RUNNING/FAILED replay with a NULL watermark AND already-persisted domain state
+      is handled (resume is refused outright rather than guessed at).
+
+An earlier version of this module bumped SCHEMA_VERSION to 2 a second time to mean
+"nullable signal_close AND the watermark column" -- reusing a version number that had
+already been published for a physically different schema. Any v2 database created by
+the originally published code (nullable signal_close, no watermark) would then be
+mistaken for a fully up-to-date v3-equivalent database and never migrated, leaving
+`replay_metadata.last_completed_date` referenced by code but physically absent. This
+file now treats "v2" as permanently meaning exactly what commit 68b0c6f shipped.
 """
 
 from __future__ import annotations
 
 import sqlite3
 
-# v2 changes (see _migrate_v1_to_v2 for the physical migration of an existing v1 db):
-#   - ranked_candidates.signal_close is now nullable (a MISSING_MARKET_DATA candidate
-#     has no signal close by definition; the v1 NOT NULL constraint was silently
-#     swallowing that row via INSERT OR IGNORE -- see candidate_service.py).
-#   - replay_metadata.last_completed_date (new column) -- a resume watermark so
-#     ReplayService only ever reprocesses the one date that may have been partially
-#     done when a process died, never already-completed history (see
-#     application/replay_service.py).
-SCHEMA_VERSION = 2
+
+class UnsupportedSchemaVersionError(RuntimeError):
+    """Raised when a database's recorded schema_version is HIGHER than this code's
+    SCHEMA_VERSION -- i.e. the database was written by newer code than is currently
+    running. Operating on it anyway could silently misinterpret or corrupt a physical
+    schema this code has never seen."""
+
+
+SCHEMA_VERSION = 3
 
 _DDL = """
 PRAGMA foreign_keys = ON;
@@ -258,20 +288,20 @@ _RANKED_CANDIDATES_V2_COLUMNS = (
 
 
 def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
-    """Physically migrates an existing v1 database to v2:
-      - ranked_candidates.signal_close NOT NULL -> nullable. SQLite cannot ALTER a
-        column's NOT NULL constraint in place, so this rebuilds the table (SQLite's
-        documented pattern for this kind of change): create a new table with the
-        corrected schema, copy every existing row across unchanged, drop the old
-        table, rename the new one into place, then verify referential integrity.
-      - replay_metadata gains last_completed_date (ADD COLUMN is a normal, safe
-        SQLite operation -- no rebuild needed for a new nullable column).
+    """Physically migrates an existing v1 database to v2 -- exactly what commit
+    db067d4/68b0c6f published: ranked_candidates.signal_close NOT NULL -> nullable.
+    SQLite cannot ALTER a column's NOT NULL constraint in place, so this rebuilds the
+    table (SQLite's documented pattern for this kind of change): create a new table
+    with the corrected schema, copy every existing row across unchanged, drop the old
+    table, rename the new one into place, then verify referential integrity. Does NOT
+    touch replay_metadata -- a v2 database predates the resume watermark entirely
+    (see _migrate_v2_to_v3).
 
-    The whole migration runs inside one explicit transaction (BEGIN is issued before
-    any DDL, since relying on sqlite3's implicit-transaction behavior does not cover
-    DDL statements): any failure -- including a failed foreign_key_check -- rolls
-    back completely, and schema_meta.schema_version is only written to '2' after
-    every step, including the integrity check, has succeeded. A database that fails
+    Runs inside one explicit transaction (BEGIN is issued before any DDL, since
+    relying on sqlite3's implicit-transaction behavior does not cover DDL
+    statements): any failure -- including a failed foreign_key_check -- rolls back
+    completely, and schema_meta.schema_version is only written to '2' after every
+    step, including the integrity check, has succeeded. A database that fails
     migration is left exactly as it was: physically v1, still labelled v1.
     """
 
@@ -318,8 +348,6 @@ def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
             "CREATE INDEX IF NOT EXISTS idx_ranked_candidates_as_of_date ON ranked_candidates(as_of_date)"
         )
 
-        conn.execute("ALTER TABLE replay_metadata ADD COLUMN last_completed_date TEXT")
-
         fk_errors = conn.execute("PRAGMA foreign_key_check").fetchall()
         if fk_errors:
             raise RuntimeError(f"v1->v2 migration would violate foreign key integrity: {fk_errors}")
@@ -333,30 +361,79 @@ def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
         conn.execute("PRAGMA foreign_keys = ON")
 
 
+def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
+    """Physically migrates an existing v2 database to v3: replay_metadata gains
+    last_completed_date, the replay resume watermark (see
+    application/replay_service.py). A v2 database's ranked_candidates.signal_close is
+    ALREADY nullable (that was v1->v2's job, see _migrate_v1_to_v2) -- this step only
+    adds the new column, which ADD COLUMN handles safely without a table rebuild.
+
+    Existing replay_metadata rows get last_completed_date = NULL (SQLite's default
+    for a new column on pre-existing rows) -- meaning "unknown," not "nothing
+    completed yet." ReplayService.run() treats a NULL watermark on a RUNNING/FAILED
+    replay that already has persisted domain state as untrustworthy and refuses to
+    resume it (UntrustworthyResumeWatermarkError) rather than guessing.
+
+    Runs inside its own explicit transaction, exactly like _migrate_v1_to_v2: any
+    failure rolls back completely and the database stays labelled v2, matching its
+    true physical state.
+    """
+
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+
+        conn.execute("ALTER TABLE replay_metadata ADD COLUMN last_completed_date TEXT")
+
+        fk_errors = conn.execute("PRAGMA foreign_key_check").fetchall()
+        if fk_errors:
+            raise RuntimeError(f"v2->v3 migration would violate foreign key integrity: {fk_errors}")
+
+        _set_schema_version(conn, 3)
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+
+
 def init_db(conn: sqlite3.Connection) -> None:
     """Create all sandbox tables if they do not already exist, and migrate an
-    existing older database up to SCHEMA_VERSION. Idempotent -- safe to call on every
-    CLI invocation.
+    existing older database up to SCHEMA_VERSION, one version at a time. Idempotent
+    -- safe to call on every CLI invocation.
 
     CREATE TABLE IF NOT EXISTS never alters an existing table's physical schema, so a
-    pre-existing database is migrated explicitly (see _migrate_v1_to_v2) based on its
-    ACTUAL recorded schema_version -- never by blindly overwriting schema_meta to
-    SCHEMA_VERSION, which would just relabel an unmigrated database without changing
-    its physical schema."""
+    pre-existing database is migrated explicitly (see _migrate_v1_to_v2,
+    _migrate_v2_to_v3) based on its ACTUAL recorded schema_version -- never by
+    blindly overwriting schema_meta to SCHEMA_VERSION, which would just relabel an
+    unmigrated database without changing its physical schema. A database recorded as
+    NEWER than SCHEMA_VERSION is refused outright rather than silently operated on."""
 
     conn.executescript(_DDL)
 
     current_version = _get_schema_version(conn)
     if current_version is None:
         # Brand-new database: the DDL above already created every table at the
-        # current (v2) schema, so there is nothing to migrate -- just record it.
+        # current (v3) schema, so there is nothing to migrate -- just record it.
         _set_schema_version(conn, SCHEMA_VERSION)
         conn.commit()
         return
 
+    if current_version > SCHEMA_VERSION:
+        raise UnsupportedSchemaVersionError(
+            f"Database schema_version={current_version} is newer than this code "
+            f"understands (SCHEMA_VERSION={SCHEMA_VERSION}). Refusing to open it -- "
+            "upgrade the code before opening this database."
+        )
+
     if current_version < 2:
         _migrate_v1_to_v2(conn)
         current_version = 2
+
+    if current_version < 3:
+        _migrate_v2_to_v3(conn)
+        current_version = 3
 
     conn.commit()
 
