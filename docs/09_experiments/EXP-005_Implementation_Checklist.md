@@ -128,6 +128,36 @@ different names. This is a naming difference only, not a behavioral deviation.
       execution boundary (verify_real_run_preconditions/run_real_experiment):
       commit/working-tree/schema/artifact-hash/config/seed/calendar checks all
       run BEFORE any service is constructed or ReplayService.run is called.
+
+      Second Stage 9-10 closure (3 further confirmed P1 identity/gate bypasses,
+      fixed): (1) trading_dates were only checked against calendar_version's
+      endpoints, so an internal session could be silently omitted -- the
+      manifest now freezes signal_start_date/signal_end_date/
+      outcome_data_end_date/calendar_session_count, and the gate recomputes the
+      exact ordered session sequence from the re-verified frozen prices artifact
+      (manifest.compute_frozen_calendar) and requires trading_dates to equal it
+      element-for-element. Calendar-identity naming corrected
+      (FROZEN_SWING20_PRICES_SESSION_CALENDAR, not a separately-sourced SPY
+      series -- see manifest.py's module docstring for the documented
+      clarification). (2) the gate only checked control_seed_list/
+      feasibility_criteria/diagnostic_definitions were non-empty, so a manifest
+      with invented-but-non-empty values passed -- now checked by exact equality
+      against DEFAULT_CONTROL_SEEDS / exp005_config.feasibility_criteria.
+      canonical() / manifest.build_canonical_diagnostic_definitions (the ONE
+      function both the manifest builder and the gate use, so they cannot
+      drift). (3) run_real_experiment accepted an arbitrary caller-supplied
+      model_adapter/universe_provider and a separate replay_id argument that
+      could disagree with replay_metadata_template -- both removed; the model
+      adapter and feature-universe provider are now constructed internally from
+      the verified feature snapshot's own features.parquet, manifest.
+      model_version is checked against the running MODEL_VERSION constant, and
+      replay_id is derived solely from replay_metadata_template. The manifest is
+      now loaded from a persisted artifact file (read_manifest_artifact), never
+      an in-memory object, and the replay's configuration identity incorporates
+      that artifact file's own hash. code_commit_sha/working_tree_is_clean_fn
+      public override parameters were removed entirely (Point 4) -- production
+      always reads real git state; tests monkeypatch the private
+      _current_code_commit_sha/_working_tree_is_clean functions directly.
 - [ ] Stage 11
 - [ ] Stage 12
 - [ ] Stage 13

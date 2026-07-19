@@ -32,6 +32,7 @@ from stock_analyzer.sandbox.exp005.manifest import ExperimentManifest
 _REQUIRED_FIELDS = (
     "experiment_id",
     "code_commit_sha",
+    "model_version",
     "universe_hash",
     "ohlc_hash",
     "signal_hash",
@@ -60,6 +61,8 @@ def missing_manifest_fields(manifest: ExperimentManifest) -> list[str]:
         missing.append("schema_version")
     if manifest.decision_audit_schema_version <= 0:
         missing.append("decision_audit_schema_version")
+    if manifest.calendar_session_count <= 0:
+        missing.append("calendar_session_count")
     if not manifest.control_seed_list:
         missing.append("control_seed_list")
     if not manifest.feasibility_criteria:

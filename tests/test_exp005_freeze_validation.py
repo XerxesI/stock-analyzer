@@ -22,6 +22,10 @@ from stock_analyzer.sandbox.exp005.freeze_validation import (
 from stock_analyzer.sandbox.exp005.infrastructure.frozen_artifacts import sha256_of_dataframe, sha256_of_file
 from stock_analyzer.sandbox.exp005.manifest import build_experiment_manifest
 
+SIGNAL_START = date(2026, 1, 5)
+SIGNAL_END = date(2026, 1, 6)
+OUTCOME_END = date(2026, 1, 7)
+
 
 def _write_parquet(path, df: pd.DataFrame) -> None:
     df.to_parquet(path)
@@ -72,7 +76,7 @@ def complete_manifest(tmp_path):
     feature_dir = _build_fixture_snapshots(tmp_path)
     config = Exp005Config()
     return build_experiment_manifest(
-        config, feature_dir, period_start=date(2026, 1, 5), period_end=date(2026, 1, 7), code_commit_sha="abc123",
+        config, feature_dir, SIGNAL_START, SIGNAL_END, OUTCOME_END, code_commit_sha="abc123",
     )
 
 
@@ -91,6 +95,7 @@ def test_spy_benchmark_none_does_not_block_freeze(complete_manifest):
     [
         ("experiment_id", ""),
         ("code_commit_sha", ""),
+        ("model_version", ""),
         ("universe_hash", ""),
         ("ohlc_hash", ""),
         ("signal_hash", ""),
@@ -102,6 +107,7 @@ def test_spy_benchmark_none_does_not_block_freeze(complete_manifest):
         ("portfolio_configuration_hash", ""),
         ("schema_version", 0),
         ("decision_audit_schema_version", 0),
+        ("calendar_session_count", 0),
         ("control_seed_list", ()),
         ("feasibility_criteria", {}),
         ("diagnostic_definitions", {}),

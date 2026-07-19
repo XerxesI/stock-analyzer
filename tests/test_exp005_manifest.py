@@ -1,6 +1,8 @@
 """Tests for EXP-005's Experiment Manifest generator (Revision 5, Section 29,
-Stage 9, rewritten during Stage 10 closure to use real, physically-verified
-frozen-artifact lineage instead of an arbitrary raw-file hash).
+Stage 9, twice-rewritten during Stage 10 closure: first to use real, physically-
+verified frozen-artifact lineage instead of an arbitrary raw-file hash; second to
+freeze the exact trading-date sequence -- not just its endpoints -- and bind
+model_version/signal-outcome dates.
 """
 
 from __future__ import annotations
@@ -11,15 +13,20 @@ from datetime import date, datetime, timezone
 import pandas as pd
 import pytest
 
+from stock_analyzer.sandbox.config import MODEL_VERSION
 from stock_analyzer.sandbox.exp005.config import DEFAULT_CONTROL_SEEDS, Exp005Config
 from stock_analyzer.sandbox.exp005.infrastructure.frozen_artifacts import sha256_of_dataframe, sha256_of_file
 from stock_analyzer.sandbox.exp005.manifest import (
-    ExperimentManifest,
+    build_canonical_diagnostic_definitions,
     build_experiment_manifest,
-    compute_calendar_version,
+    compute_frozen_calendar,
     read_manifest_artifact,
     write_manifest_artifact,
 )
+
+SIGNAL_START = date(2026, 1, 5)
+SIGNAL_END = date(2026, 1, 6)
+OUTCOME_END = date(2026, 1, 7)
 
 
 def _write_parquet(path, df: pd.DataFrame) -> None:
@@ -83,25 +90,34 @@ def _build_fixture_snapshots(tmp_path, prices_df: pd.DataFrame | None = None):
     return feature_dir, swing20_dir, artifact_hashes
 
 
-# --------------------------------------------------------------- calendar_version
+# ------------------------------------------------------------ compute_frozen_calendar
 
 
-def test_compute_calendar_version_is_deterministic_and_period_scoped():
+def test_compute_frozen_calendar_returns_exact_sorted_sequence():
+    prices_df = pd.DataFrame(
+        {"date": pd.to_datetime(["2026-01-07", "2026-01-05", "2026-01-06", "2026-01-06"]), "symbol": ["AAA"] * 4}
+    )
+    dates, version = compute_frozen_calendar(prices_df, date(2026, 1, 5), date(2026, 1, 7))
+    assert dates == (date(2026, 1, 5), date(2026, 1, 6), date(2026, 1, 7))
+    assert version
+
+
+def test_compute_frozen_calendar_is_deterministic_and_period_scoped():
     prices_df = pd.DataFrame(
         {"date": pd.to_datetime(["2026-01-05", "2026-01-06", "2026-01-07", "2026-01-08"]), "symbol": ["AAA"] * 4}
     )
-    v1 = compute_calendar_version(prices_df, date(2026, 1, 5), date(2026, 1, 7))
-    v2 = compute_calendar_version(prices_df, date(2026, 1, 5), date(2026, 1, 7))
-    v3 = compute_calendar_version(prices_df, date(2026, 1, 5), date(2026, 1, 8))  # wider period
+    v1 = compute_frozen_calendar(prices_df, date(2026, 1, 5), date(2026, 1, 7))[1]
+    v2 = compute_frozen_calendar(prices_df, date(2026, 1, 5), date(2026, 1, 7))[1]
+    v3 = compute_frozen_calendar(prices_df, date(2026, 1, 5), date(2026, 1, 8))[1]  # wider period
 
     assert v1 == v2
     assert v1 != v3
 
 
-def test_compute_calendar_version_raises_when_no_dates_in_period():
+def test_compute_frozen_calendar_raises_when_no_dates_in_period():
     prices_df = pd.DataFrame({"date": pd.to_datetime(["2026-01-05"]), "symbol": ["AAA"]})
     with pytest.raises(ValueError):
-        compute_calendar_version(prices_df, date(2030, 1, 1), date(2030, 1, 2))
+        compute_frozen_calendar(prices_df, date(2030, 1, 1), date(2030, 1, 2))
 
 
 # ------------------------------------------------------------------- manifest build
@@ -113,26 +129,30 @@ def test_manifest_assembles_every_field_from_verified_lineage(tmp_path):
     generated_at = datetime(2026, 7, 19, tzinfo=timezone.utc)
 
     manifest = build_experiment_manifest(
-        config, feature_dir, period_start=date(2026, 1, 5), period_end=date(2026, 1, 7),
-        code_commit_sha="abc123", generated_at=generated_at,
+        config, feature_dir, SIGNAL_START, SIGNAL_END, OUTCOME_END, code_commit_sha="abc123", generated_at=generated_at,
     )
 
     assert manifest.experiment_id == "EXP-005"
     assert manifest.code_commit_sha == "abc123"
     assert manifest.schema_version == 3
     assert manifest.decision_audit_schema_version == config.decision_audit_schema_version
+    assert manifest.model_version == MODEL_VERSION
     assert manifest.universe_hash == artifact_hashes["universe"]
     assert manifest.ohlc_hash == artifact_hashes["prices"]
     assert manifest.signal_hash == artifact_hashes["labels"]
     assert manifest.eligibility_hash == artifact_hashes["eligibility"]
-    assert manifest.feature_hash  # semantic hash, verified against the feature manifest
+    assert manifest.feature_hash
     assert manifest.feature_snapshot_id == "swing20_features_test"
     assert manifest.swing20_snapshot_id == "swing20_test"
+    assert manifest.signal_start_date == SIGNAL_START
+    assert manifest.signal_end_date == SIGNAL_END
+    assert manifest.outcome_data_end_date == OUTCOME_END
+    assert manifest.calendar_session_count == 3  # Jan 5, 6, 7 -- across both symbols, deduplicated
     assert manifest.calendar_version
     assert manifest.portfolio_configuration_hash == config.portfolio_configuration_hash()
     assert manifest.control_seed_list == DEFAULT_CONTROL_SEEDS
     assert manifest.feasibility_criteria == config.feasibility_criteria.canonical()
-    assert manifest.diagnostic_definitions["horizons"] == config.diagnostic_horizons.canonical()
+    assert manifest.diagnostic_definitions == build_canonical_diagnostic_definitions(config)
     assert manifest.spy_benchmark_snapshot_id is None
     assert manifest.generated_at == generated_at
 
@@ -146,24 +166,20 @@ def test_manifest_build_fails_closed_on_tampered_upstream_artifact(tmp_path):
     from stock_analyzer.sandbox.exp005.infrastructure.frozen_artifacts import FrozenArtifactVerificationError
 
     with pytest.raises(FrozenArtifactVerificationError):
-        build_experiment_manifest(config, feature_dir, period_start=date(2026, 1, 5), period_end=date(2026, 1, 7), code_commit_sha="abc123")
+        build_experiment_manifest(config, feature_dir, SIGNAL_START, SIGNAL_END, OUTCOME_END, code_commit_sha="abc123")
 
 
 def test_manifest_is_complete_when_all_fields_populated(tmp_path):
     feature_dir, _, _ = _build_fixture_snapshots(tmp_path)
     config = Exp005Config()
-    manifest = build_experiment_manifest(
-        config, feature_dir, period_start=date(2026, 1, 5), period_end=date(2026, 1, 7), code_commit_sha="abc123",
-    )
+    manifest = build_experiment_manifest(config, feature_dir, SIGNAL_START, SIGNAL_END, OUTCOME_END, code_commit_sha="abc123")
     assert manifest.is_complete() is True
 
 
 def test_manifest_incomplete_when_a_required_field_is_empty(tmp_path):
     feature_dir, _, _ = _build_fixture_snapshots(tmp_path)
     config = Exp005Config()
-    manifest = build_experiment_manifest(
-        config, feature_dir, period_start=date(2026, 1, 5), period_end=date(2026, 1, 7), code_commit_sha="abc123",
-    )
+    manifest = build_experiment_manifest(config, feature_dir, SIGNAL_START, SIGNAL_END, OUTCOME_END, code_commit_sha="abc123")
     import dataclasses
 
     broken = dataclasses.replace(manifest, universe_hash="")
@@ -172,10 +188,8 @@ def test_manifest_incomplete_when_a_required_field_is_empty(tmp_path):
 
 def test_spy_benchmark_snapshot_id_none_does_not_block_completeness(tmp_path):
     feature_dir, _, _ = _build_fixture_snapshots(tmp_path)
-    config = Exp005Config()  # spy_benchmark defaults to all-None
-    manifest = build_experiment_manifest(
-        config, feature_dir, period_start=date(2026, 1, 5), period_end=date(2026, 1, 7), code_commit_sha="abc123",
-    )
+    config = Exp005Config()
+    manifest = build_experiment_manifest(config, feature_dir, SIGNAL_START, SIGNAL_END, OUTCOME_END, code_commit_sha="abc123")
     assert manifest.spy_benchmark_snapshot_id is None
     assert manifest.is_complete() is True
 
@@ -193,7 +207,7 @@ def test_manifest_round_trips_through_the_persisted_json_artifact(tmp_path):
     feature_dir, _, _ = _build_fixture_snapshots(tmp_path)
     config = Exp005Config()
     manifest = build_experiment_manifest(
-        config, feature_dir, period_start=date(2026, 1, 5), period_end=date(2026, 1, 7),
+        config, feature_dir, SIGNAL_START, SIGNAL_END, OUTCOME_END,
         code_commit_sha="abc123", generated_at=datetime(2026, 7, 19, tzinfo=timezone.utc),
     )
     artifact_path = tmp_path / "experiment_manifest.json"
@@ -208,9 +222,7 @@ def test_manifest_round_trips_through_the_persisted_json_artifact(tmp_path):
 def test_manifest_artifact_file_is_canonical_json(tmp_path):
     feature_dir, _, _ = _build_fixture_snapshots(tmp_path)
     config = Exp005Config()
-    manifest = build_experiment_manifest(
-        config, feature_dir, period_start=date(2026, 1, 5), period_end=date(2026, 1, 7), code_commit_sha="abc123",
-    )
+    manifest = build_experiment_manifest(config, feature_dir, SIGNAL_START, SIGNAL_END, OUTCOME_END, code_commit_sha="abc123")
     artifact_path = tmp_path / "experiment_manifest.json"
     write_manifest_artifact(manifest, artifact_path)
 
@@ -219,3 +231,13 @@ def test_manifest_artifact_file_is_canonical_json(tmp_path):
     assert raw == manifest.canonical_dict()
     text = artifact_path.read_text(encoding="utf-8")
     assert list(json.loads(text).keys()) == sorted(json.loads(text).keys())  # sort_keys=True was honored
+
+
+# ------------------------------------------------------- canonical diagnostic defs
+
+
+def test_build_canonical_diagnostic_definitions_is_deterministic():
+    config = Exp005Config()
+    d1 = build_canonical_diagnostic_definitions(config)
+    d2 = build_canonical_diagnostic_definitions(config)
+    assert d1 == d2
