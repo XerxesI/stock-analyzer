@@ -15,6 +15,7 @@ from datetime import date
 
 import pandas as pd
 
+from stock_analyzer.sandbox.application.accounting_seam import DefaultAccountingSeam, PortfolioAccountingSeam
 from stock_analyzer.sandbox.config import SandboxConfig, round_money, round_price
 from stock_analyzer.sandbox.domain.entry_order import (
     EXPIRED,
@@ -49,9 +50,15 @@ class EntryProcessingOutcome:
 
 
 class EntryService:
-    def __init__(self, repository: SandboxRepository, config: SandboxConfig | None = None) -> None:
+    def __init__(
+        self,
+        repository: SandboxRepository,
+        config: SandboxConfig | None = None,
+        accounting_seam: PortfolioAccountingSeam | None = None,
+    ) -> None:
         self._repo = repository
         self._config = config or SandboxConfig()
+        self._accounting_seam = accounting_seam or DefaultAccountingSeam(self._config)
 
     def process_entries(self, as_of_date: date) -> list[EntryProcessingOutcome]:
         outcomes: list[EntryProcessingOutcome] = []
@@ -100,7 +107,7 @@ class EntryService:
                 position = self._fill_order(order, as_of_date, fill_price, outcome)
                 outcomes.append(EntryProcessingOutcome(order.order_id, order.symbol, "FILLED", fill_price, position.position_id))
             elif attempt_number >= self._config.entry_validity_sessions:
-                self._repo.update_order_status(order.order_id, EXPIRED, no_fill_reason=reason)
+                self._expire_order(order, as_of_date, reason)
                 self._repo.insert_recommendation(
                     Recommendation(
                         recommendation_id=Recommendation.make_id(ENTITY_CANDIDATE, order.candidate_id, as_of_date),
@@ -142,12 +149,15 @@ class EntryService:
         return NO_FILL, None, "entire_session_above_ceiling"
 
     def _fill_order(self, order: EntryOrder, fill_date: date, fill_price: float, fill_reason: str) -> VirtualPosition:
-        self._repo.update_order_status(
-            order.order_id, FILLED, fill_date=fill_date, fill_price=fill_price, fill_reason=fill_reason
-        )
+        # Sizing is the one seam-controlled step (accounting_seam.py) -- fillability
+        # and fill_price above are already decided and unaffected by which seam is
+        # injected. Called BEFORE the transaction opens: an EXP-005 seam's
+        # implementation performs its own (read-only at this point) accounting
+        # computation here and caches it, keyed by order.order_id, for on_filled to
+        # reuse without recomputation.
+        quantity = self._accounting_seam.size_buy(order, fill_price, fill_date)
 
         candidate = self._repo.get_candidate(order.candidate_id)
-        quantity = self._config.virtual_notional / fill_price
         target_price = round_price(fill_price * (1.0 + self._config.target_return))
         # Entry day = holding day 1 (see MVP 2 spec section 11); the 20th holding day
         # is 19 further trading sessions after the entry session.
@@ -171,21 +181,39 @@ class EntryService:
             target_price=target_price,
             planned_time_exit_date=planned_time_exit_date,
         )
-        position, _created = self._repo.create_position(position)
-
-        self._repo.insert_transaction(
-            VirtualTransaction(
-                transaction_id=VirtualTransaction.make_id(position.position_id, BUY, fill_date),
-                position_id=position.position_id,
-                symbol=order.symbol,
-                transaction_type=BUY,
-                transaction_date=fill_date,
-                price=fill_price,
-                quantity=quantity,
-                notional=round_money(self._config.virtual_notional),
-                reason=fill_reason,
-            )
+        transaction = VirtualTransaction(
+            transaction_id=VirtualTransaction.make_id(position.position_id, BUY, fill_date),
+            position_id=position.position_id,
+            symbol=order.symbol,
+            transaction_type=BUY,
+            transaction_date=fill_date,
+            price=fill_price,
+            quantity=quantity,
+            notional=round_money(quantity * fill_price),
+            reason=fill_reason,
         )
+
+        # Atomic: order status, position, BUY transaction, and (if an EXP-005 seam
+        # is injected) its own executions/reservation writes commit or roll back as
+        # one unit -- a crash partway through can never leave one side of the fill
+        # event persisted without the other.
+        self._repo._conn.execute("BEGIN IMMEDIATE")
+        try:
+            self._repo._update_order_status_row(
+                order.order_id, FILLED, fill_date=fill_date, fill_price=fill_price, fill_reason=fill_reason
+            )
+            existing = self._repo.get_position(position.position_id)
+            if existing is not None:
+                position = existing
+            else:
+                self._repo._insert_position_row(position)
+            self._repo._insert_transaction_row(transaction)
+            self._accounting_seam.on_filled(order, position, transaction, fill_price)
+            self._repo._conn.commit()
+        except Exception:
+            self._repo._conn.rollback()
+            raise
+
         self._repo.insert_recommendation(
             Recommendation(
                 recommendation_id=Recommendation.make_id(ENTITY_CANDIDATE, order.candidate_id, fill_date),
@@ -198,3 +226,16 @@ class EntryService:
             )
         )
         return position
+
+    def _expire_order(self, order: EntryOrder, as_of_date: date, reason: str) -> None:
+        """Atomic: order status and (if an EXP-005 seam is injected) its own
+        reservation-release write commit or roll back together."""
+
+        self._repo._conn.execute("BEGIN IMMEDIATE")
+        try:
+            self._repo._update_order_status_row(order.order_id, EXPIRED, no_fill_reason=reason)
+            self._accounting_seam.on_expired(order, as_of_date, reason)
+            self._repo._conn.commit()
+        except Exception:
+            self._repo._conn.rollback()
+            raise

@@ -1149,3 +1149,44 @@ absence of the forbidden reverse `reservation_id`/`order_id` columns on
 `portfolio_admissions`; presence of a CHECK constraint on every table; and referential
 integrity (`PRAGMA foreign_key_check`). This is an implementation-robustness fix, not
 a change to any frozen design element.
+
+**Errata 3 -- "decision logic unchanged" (Section 11.3) never meant core sandbox's
+$1,000 cost-free position sizing.** Stage 6 implementation surfaced a genuine
+contradiction: Section 8.3's BUY quantity formula (`(slot_budget - entry_commission)
+/ effective_entry_price`, against a $10,000 slot budget) cannot be "core
+`EntryService`'s existing formula, unchanged" (Section 11.3), because core's actual
+`_fill_order` computes `quantity = virtual_notional / raw_fill_price` with no
+commission or slippage at all, against a $1,000 default notional -- a different,
+pre-existing, cost-free simulation with no relationship to EXP-005's economics.
+
+**Resolution (confirmed by architecture review, not a silent implementation
+choice):** position sizing is portfolio ACCOUNTING; raw-price fillability and
+target/time-exit rules are POLICY. These are separable, and only the former needed
+to change:
+
+- Core remains the sole source of trading decisions: ADR-007 fillability, fill
+  price, target-price/target-exit/time-exit triggers all stay on the raw market
+  price, completely unaffected by which sizing is used. `VirtualPosition.entry_price`
+  stays the raw fill price; core's own MFE/MAE/realized-return/unrealized-return
+  fields remain a self-consistent raw-price policy/shadow metric, never a reported
+  EXP-005 financial figure.
+- EXP-005 remains the sole source of financial truth: effective (slippage-adjusted)
+  price, commission, cash, proceeds, realized P&L, and mark-to-market equity all
+  live in the `executions`/`portfolio_equity_snapshots` ledger only.
+- The one quantity EXP-005's sizing computes is used EVERYWHERE a quantity is
+  recorded for that fill -- `VirtualPosition.quantity`, both BUY/SELL
+  `VirtualTransaction.quantity`, and both BUY/SELL `Execution.quantity_units` --
+  never two independently-sized "shadow" positions. This is implemented as an
+  optional sizing/accounting seam on `EntryService`/`MonitoringService`
+  (`stock_analyzer/sandbox/application/accounting_seam.py`): the default
+  implementation preserves today's `virtual_notional / raw_fill_price` sizing
+  exactly (every non-EXP-005 caller is unaffected); EXP-005's implementation
+  (`exp005/application/portfolio_accounting_seam.py`) computes the cost-adjusted
+  quantity once (Stage 5's `compute_buy_accounting`/`compute_sell_accounting`) and
+  reuses that exact result for every record of that fill, never recomputing
+  independently. The full fill/close event (order status, position, transaction,
+  EXP-005 execution, reservation conversion) is one atomic transaction, so a failure
+  partway through leaves nothing persisted on either side.
+
+This is a documentation correction to Section 11.3's scope, not a change to any
+fillability, target-price, or exit-timing rule.

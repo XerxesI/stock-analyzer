@@ -234,17 +234,8 @@ class PortfolioRepository:
         ).fetchall()
         return [self._row_to_reservation(r) for r in rows]
 
-    def update_reservation_status(self, reservation_id: str, status: str, resolved_at: datetime) -> str:
-        """The one, explicit, narrow status transition Section 8.3 specifies:
-        RESERVED -> CONVERTED (fill) or RESERVED -> RELEASED (expiry).
-
-        Returns ALREADY_IN_TARGET_STATE if the reservation is already at `status`
-        (a safe idempotent retry -- no write performed). Returns TRANSITIONED if the
-        RESERVED -> status transition was just applied. Raises
-        ReservationNotFoundError if no such reservation exists.  Raises
-        ReservationTransitionConflictError if the reservation is already resolved to
-        a DIFFERENT status than requested (e.g. CONVERTED, but RELEASED was
-        requested) -- a genuine conflict, never silently treated as success."""
+    def _update_reservation_status_row(self, reservation_id: str, status: str, resolved_at: datetime) -> str:
+        """Non-committing -- see update_reservation_status."""
 
         if status not in (CONVERTED, RELEASED):
             raise ValueError(f"update_reservation_status only transitions to CONVERTED or RELEASED, got {status!r}")
@@ -267,8 +258,23 @@ class PortfolioRepository:
             "UPDATE slot_reservations SET status = ?, resolved_at = ? WHERE reservation_id = ? AND status = 'RESERVED'",
             (status, resolved_at.isoformat(), reservation_id),
         )
-        self._conn.commit()
         return TRANSITIONED
+
+    def update_reservation_status(self, reservation_id: str, status: str, resolved_at: datetime) -> str:
+        """The one, explicit, narrow status transition Section 8.3 specifies:
+        RESERVED -> CONVERTED (fill) or RESERVED -> RELEASED (expiry).
+
+        Returns ALREADY_IN_TARGET_STATE if the reservation is already at `status`
+        (a safe idempotent retry -- no write performed). Returns TRANSITIONED if the
+        RESERVED -> status transition was just applied. Raises
+        ReservationNotFoundError if no such reservation exists.  Raises
+        ReservationTransitionConflictError if the reservation is already resolved to
+        a DIFFERENT status than requested (e.g. CONVERTED, but RELEASED was
+        requested) -- a genuine conflict, never silently treated as success."""
+
+        result = self._update_reservation_status_row(reservation_id, status, resolved_at)
+        self._conn.commit()
+        return result
 
     @staticmethod
     def _row_to_reservation(row: sqlite3.Row) -> SlotReservation:
@@ -285,10 +291,12 @@ class PortfolioRepository:
         )
 
     # ---------------------------------------------------------------- executions
-    def append_execution(self, execution: Execution) -> bool:
-        """Rejects a non-reconciling execution BEFORE writing it -- reconciliation
-        is a write-time gate, not something discovered later by a separate audit
-        pass."""
+    def _append_execution_row(self, execution: Execution) -> bool:
+        """Non-committing -- see append_execution. Still rejects a non-reconciling
+        execution and still enforces idempotent-insert-or-conflict, so a caller
+        composing this into a larger atomic transaction (EntryService's fill event,
+        MonitoringService's close event) gets the exact same safety guarantees, not
+        a stripped-down variant."""
 
         if not reconcile_execution(execution):
             raise NonReconcilingExecutionError(
@@ -336,8 +344,16 @@ class PortfolioRepository:
                 execution.created_at.isoformat(),
             ),
         )
-        self._conn.commit()
         return True
+
+    def append_execution(self, execution: Execution) -> bool:
+        """Rejects a non-reconciling execution BEFORE writing it -- reconciliation
+        is a write-time gate, not something discovered later by a separate audit
+        pass."""
+
+        created = self._append_execution_row(execution)
+        self._conn.commit()
+        return created
 
     def get_execution(self, execution_id: str) -> Execution | None:
         row = self._conn.execute("SELECT * FROM executions WHERE execution_id = ?", (execution_id,)).fetchone()

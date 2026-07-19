@@ -315,7 +315,7 @@ class SandboxRepository:
         ).fetchone()
         return row is not None
 
-    def update_order_status(
+    def _update_order_status_row(
         self,
         order_id: str,
         status: str,
@@ -324,6 +324,11 @@ class SandboxRepository:
         fill_reason: str | None = None,
         no_fill_reason: str | None = None,
     ) -> None:
+        """Non-committing -- see update_order_status. Factored out so a caller
+        (e.g. EXP-005's atomic fill/expiry event) can include this write inside its
+        own larger transaction, the same pattern already used for
+        _insert_entry_order_row."""
+
         self._conn.execute(
             "UPDATE entry_orders SET status=?, fill_date=?, fill_price=?, fill_reason=?, "
             "no_fill_reason=?, updated_at=? WHERE order_id=?",
@@ -337,6 +342,17 @@ class SandboxRepository:
                 order_id,
             ),
         )
+
+    def update_order_status(
+        self,
+        order_id: str,
+        status: str,
+        fill_date: date | None = None,
+        fill_price: float | None = None,
+        fill_reason: str | None = None,
+        no_fill_reason: str | None = None,
+    ) -> None:
+        self._update_order_status_row(order_id, status, fill_date, fill_price, fill_reason, no_fill_reason)
         self._conn.commit()
 
     @staticmethod
@@ -405,10 +421,12 @@ class SandboxRepository:
         ]
 
     # ------------------------------------------------------- positions
-    def create_position(self, position: VirtualPosition) -> tuple[VirtualPosition, bool]:
-        existing = self.get_position(position.position_id)
-        if existing is not None:
-            return existing, False
+    def _insert_position_row(self, position: VirtualPosition) -> None:
+        """Non-committing -- see create_position. The existing-row idempotency
+        check stays in the committing wrapper; this is purely the INSERT body, so
+        an atomic multi-table fill event (EXP-005) can include it in its own
+        transaction."""
+
         now = datetime.now(timezone.utc).isoformat()
         self._conn.execute(
             "INSERT INTO virtual_positions "
@@ -449,6 +467,12 @@ class SandboxRepository:
                 now,
             ),
         )
+
+    def create_position(self, position: VirtualPosition) -> tuple[VirtualPosition, bool]:
+        existing = self.get_position(position.position_id)
+        if existing is not None:
+            return existing, False
+        self._insert_position_row(position)
         self._conn.commit()
         return position, True
 
@@ -511,6 +535,25 @@ class SandboxRepository:
         holding days/MFE/MAE were wrong because a consumer read this table's
         current-state columns instead of the final snapshot)."""
 
+        self._close_position_row(
+            position_id, exit_date, exit_price, exit_reason, realized_return,
+            final_holding_day_count, final_mfe, final_mae,
+        )
+        self._conn.commit()
+
+    def _close_position_row(
+        self,
+        position_id: str,
+        exit_date: date,
+        exit_price: float,
+        exit_reason: str,
+        realized_return: float,
+        final_holding_day_count: int,
+        final_mfe: float,
+        final_mae: float,
+    ) -> None:
+        """Non-committing -- see close_position."""
+
         self._conn.execute(
             "UPDATE virtual_positions SET status='CLOSED', exit_date=?, exit_price=?, "
             "exit_reason=?, realized_return=?, current_holding_day_count=?, mfe=?, mae=?, "
@@ -527,7 +570,6 @@ class SandboxRepository:
                 position_id,
             ),
         )
-        self._conn.commit()
 
     @staticmethod
     def _row_to_position(row: sqlite3.Row) -> VirtualPosition:
@@ -662,7 +704,9 @@ class SandboxRepository:
         ]
 
     # ------------------------------------------------------- transactions
-    def insert_transaction(self, txn: VirtualTransaction) -> bool:
+    def _insert_transaction_row(self, txn: VirtualTransaction) -> bool:
+        """Non-committing -- see insert_transaction."""
+
         cur = self._conn.execute(
             "INSERT OR IGNORE INTO virtual_transactions "
             "(transaction_id, position_id, symbol, transaction_type, transaction_date, price, "
@@ -680,8 +724,12 @@ class SandboxRepository:
                 datetime.now(timezone.utc).isoformat(),
             ),
         )
-        self._conn.commit()
         return cur.rowcount > 0
+
+    def insert_transaction(self, txn: VirtualTransaction) -> bool:
+        created = self._insert_transaction_row(txn)
+        self._conn.commit()
+        return created
 
     def get_transactions_for_position(self, position_id: str) -> list[VirtualTransaction]:
         rows = self._conn.execute(

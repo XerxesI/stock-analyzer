@@ -18,6 +18,7 @@ from datetime import date
 
 import pandas as pd
 
+from stock_analyzer.sandbox.application.accounting_seam import DefaultAccountingSeam, PortfolioAccountingSeam
 from stock_analyzer.sandbox.config import SandboxConfig, round_money, round_price
 from stock_analyzer.sandbox.domain.data_quality import DataQualityEvent
 from stock_analyzer.sandbox.domain.data_quality import MISSING_MARKET_DATA as DQ_MISSING_MARKET_DATA
@@ -44,9 +45,15 @@ class MonitoringOutcome:
 
 
 class MonitoringService:
-    def __init__(self, repository: SandboxRepository, config: SandboxConfig | None = None) -> None:
+    def __init__(
+        self,
+        repository: SandboxRepository,
+        config: SandboxConfig | None = None,
+        accounting_seam: PortfolioAccountingSeam | None = None,
+    ) -> None:
         self._repo = repository
         self._config = config or SandboxConfig()
+        self._accounting_seam = accounting_seam or DefaultAccountingSeam(self._config)
 
     def monitor(self, as_of_date: date) -> list[MonitoringOutcome]:
         outcomes: list[MonitoringOutcome] = []
@@ -220,27 +227,39 @@ class MonitoringService:
         final_mfe: float,
         final_mae: float,
     ) -> None:
+        # realized_return stays on the raw price (position.entry_price is the raw
+        # fill price regardless of which accounting seam sized the position) -- a
+        # core policy/shadow metric, never an EXP-005-reported financial figure.
         realized_return = (exit_price - position.entry_price) / position.entry_price
-        self._repo.close_position(
-            position.position_id,
-            exit_date=exit_date,
-            exit_price=round_price(exit_price),
-            exit_reason=exit_reason,
-            realized_return=realized_return,
-            final_holding_day_count=final_holding_day_count,
-            final_mfe=final_mfe,
-            final_mae=final_mae,
+        transaction = VirtualTransaction(
+            transaction_id=VirtualTransaction.make_id(position.position_id, SELL, exit_date),
+            position_id=position.position_id,
+            symbol=position.symbol,
+            transaction_type=SELL,
+            transaction_date=exit_date,
+            price=round_price(exit_price),
+            quantity=position.quantity,
+            notional=round_money(position.quantity * exit_price),
+            reason=exit_reason,
         )
-        self._repo.insert_transaction(
-            VirtualTransaction(
-                transaction_id=VirtualTransaction.make_id(position.position_id, SELL, exit_date),
-                position_id=position.position_id,
-                symbol=position.symbol,
-                transaction_type=SELL,
-                transaction_date=exit_date,
-                price=round_price(exit_price),
-                quantity=position.quantity,
-                notional=round_money(position.quantity * exit_price),
-                reason=exit_reason,
+
+        # Atomic: position close, SELL transaction, and (if an EXP-005 seam is
+        # injected) its own SELL-execution write commit or roll back together.
+        self._repo._conn.execute("BEGIN IMMEDIATE")
+        try:
+            self._repo._close_position_row(
+                position.position_id,
+                exit_date=exit_date,
+                exit_price=round_price(exit_price),
+                exit_reason=exit_reason,
+                realized_return=realized_return,
+                final_holding_day_count=final_holding_day_count,
+                final_mfe=final_mfe,
+                final_mae=final_mae,
             )
-        )
+            self._repo._insert_transaction_row(transaction)
+            self._accounting_seam.on_closed(position, transaction, exit_date, exit_price, exit_reason)
+            self._repo._conn.commit()
+        except Exception:
+            self._repo._conn.rollback()
+            raise

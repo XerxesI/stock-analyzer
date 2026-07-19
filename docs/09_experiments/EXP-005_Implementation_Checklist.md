@@ -23,10 +23,17 @@ stock_analyzer/sandbox/exp005/
         schema.py                          Stage 2 (DDL for the 4 new tables)
         repository.py                       Stage 3-5 (PortfolioRepository)
     application/
-        admission_orchestrator.py            Stage 4 (AdmissionOrchestrator,
-                                                DefaultAdmissionOrchestrator,
-                                                CapacityAdmissionOrchestrator,
-                                                PortfolioLedger)
+        admission_orchestrator.py            Stage 4 (AdmissionTransactionService --
+                                                the actual atomic-write class; see
+                                                Stage 6 note below on naming)
+        portfolio_accounting_seam.py           Stage 6 (Exp005AccountingSeam --
+                                                 implements the core
+                                                 PortfolioAccountingSeam Protocol;
+                                                 see stock_analyzer/sandbox/
+                                                 application/accounting_seam.py)
+        portfolio_ledger.py                     Stage 6 (PortfolioLedger -- cash/
+                                                  reserved/mark-to-market equity,
+                                                  implements CashAvailabilityProvider)
         variant_runner.py                     Stage 7 (Variant B / D orchestration)
         replay.py                              Stage 8 (frozen-artifact replay entry
                                                 point)
@@ -41,6 +48,15 @@ stock_analyzer/sandbox/exp005/
         opportunity_cost.py                           Stage 13
         report_generator.py                            Stage 14
 ```
+
+**Naming note (discovered during Stage 6):** Section 8.2 names the atomic-write
+methods `SandboxRepository.create_admission_acceptance`/`create_admission_rejection`.
+The actual Stage 4 implementation is `AdmissionTransactionService.admit_candidate`
+(`exp005/application/admission_orchestrator.py`), calling
+`PortfolioRepository.insert_admission`/`insert_reservation` plus
+`SandboxRepository._insert_entry_order_row` inside one transaction it owns -- the
+same atomicity/idempotency/orphan-freedom guarantees Section 8.2 requires, under
+different names. This is a naming difference only, not a behavioral deviation.
 
 | Frozen requirement | Location |
 |---|---|
@@ -90,7 +106,7 @@ stock_analyzer/sandbox/exp005/
 - [x] Stage 3 -- repository layer
 - [x] Stage 4 -- atomic admission transaction + orphan check
 - [x] Stage 5 -- execution accounting
-- [ ] Stage 6
+- [x] Stage 6 -- portfolio ledger, equity snapshots, aligned dual-accounting sizing seam
 - [ ] Stage 7
 - [ ] Stage 8
 - [ ] Stage 9
