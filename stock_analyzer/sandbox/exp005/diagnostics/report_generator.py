@@ -22,6 +22,22 @@ Two-tier design:
 Every "distribution" reported here is a plain tuple of already-computed per-item
 values (never re-fetched or re-derived), so a caller can compute whatever
 additional statistic it needs without re-querying the database.
+
+**Censoring discipline (Stage 11-15 closure, finding 2):** every fixed-horizon
+mean/rate reported here (`horizon_mean_*`, `horizon_target_reached_rate`) is
+computed from `is_censored=False` observations ONLY -- a partial window (e.g. 2
+of a nominal 5 sessions observed) is not a smaller sample of the same quantity a
+full window measures, and blending the two would bias the headline number
+exactly the way a very strong partial path materially distorting an otherwise
+complete-horizon mean would. Each horizon reports its own `horizon_complete_count`
+(the denominator actually used) alongside `horizon_censored_end_of_experiment_count`
+and `horizon_censored_missing_market_data_count` -- Section 27 requires these two
+reasons stay distinguishable, never merged into one flag. Target-hit RATES use a
+narrower, asymmetric rule: an observation that already reached the target counts
+as a resolved success even if later censored (a positive hit is certain the
+moment it happens); one that has NOT reached the target AND is censored is
+excluded entirely from both numerator and denominator (it is genuinely
+unresolved, not a completed failure) -- see `_target_reached_rate`.
 """
 
 from __future__ import annotations
@@ -33,6 +49,7 @@ from stock_analyzer.sandbox.domain.entry_order import FILLED_AT_CEILING
 from stock_analyzer.sandbox.domain.position import CLOSED
 from stock_analyzer.sandbox.domain.recommendation import SELL_TARGET, SELL_TIME
 from stock_analyzer.sandbox.exp005.diagnostics import entry_timing, hold_quality, mfe_mae, opportunity_cost, sell_quality
+from stock_analyzer.sandbox.exp005.diagnostics._shared import END_OF_EXPERIMENT, MISSING_MARKET_DATA
 from stock_analyzer.sandbox.exp005.diagnostics.diagnostics import DiagnosticsContext
 from stock_analyzer.sandbox.exp005.diagnostics.hold_quality import ADVERSE, PROFITABLE, UNRESOLVED
 
@@ -49,6 +66,33 @@ def _mean(values: list[float | None]) -> float | None:
 
 def _rate(numerator: int, denominator: int) -> float | None:
     return numerator / denominator if denominator else None
+
+
+def _complete_only(horizon_results: list) -> list:
+    """Only the fully-observed (`is_censored=False`) results in a horizon's
+    result list -- the set every headline mean/rate must be computed from."""
+
+    return [h for h in horizon_results if not h.is_censored]
+
+
+def _censored_counts_by_reason(horizon_results: list) -> tuple[int, int]:
+    end_of_experiment = sum(1 for h in horizon_results if h.is_censored and h.censoring_reason == END_OF_EXPERIMENT)
+    missing_market_data = sum(1 for h in horizon_results if h.is_censored and h.censoring_reason == MISSING_MARKET_DATA)
+    return end_of_experiment, missing_market_data
+
+
+def _target_reached_rate(horizon_results: list) -> float | None:
+    """A censored observation that has NOT (yet) reached the target is excluded
+    from both numerator and denominator -- it is genuinely unresolved, not a
+    completed failure, so it must never silently count as one. An observation
+    that HAS reached the target counts as a resolved success even if censored
+    afterward, since that fact is certain the moment it happens, regardless of
+    what the rest of the (unobserved) window would have shown."""
+
+    resolved = [h for h in horizon_results if h.target_reached or not h.is_censored]
+    if not resolved:
+        return None
+    return sum(1 for h in resolved if h.target_reached) / len(resolved)
 
 
 def percentile_rank(value: float, distribution: list[float]) -> float | None:
@@ -82,7 +126,9 @@ class BuyQualitySummary:
     horizon_mean_mae_pct: dict[int, float | None]
     horizon_mean_sessions_to_mfe: dict[int, float | None]
     horizon_mean_sessions_to_mae: dict[int, float | None]
-    horizon_censored_count: dict[int, int]
+    horizon_complete_count: dict[int, int]
+    horizon_censored_end_of_experiment_count: dict[int, int]
+    horizon_censored_missing_market_data_count: dict[int, int]
 
 
 def compute_buy_quality_summary(context: DiagnosticsContext, calendar: tuple[date, ...]) -> BuyQualitySummary:
@@ -105,15 +151,19 @@ def compute_buy_quality_summary(context: DiagnosticsContext, calendar: tuple[dat
     horizon_mae: dict[int, float | None] = {}
     horizon_sessions_to_mfe: dict[int, float | None] = {}
     horizon_sessions_to_mae: dict[int, float | None] = {}
-    horizon_censored: dict[int, int] = {}
+    horizon_complete: dict[int, int] = {}
+    horizon_censored_eoe: dict[int, int] = {}
+    horizon_censored_mmd: dict[int, int] = {}
     for i, horizon in enumerate(BUY_HORIZONS):
         horizon_results = [r.horizons[i] for r in results]
-        horizon_forward_return[horizon] = _mean([h.forward_return_pct for h in horizon_results])
-        horizon_mfe[horizon] = _mean([h.mfe_pct for h in horizon_results])
-        horizon_mae[horizon] = _mean([h.mae_pct for h in horizon_results])
-        horizon_sessions_to_mfe[horizon] = _mean([h.sessions_to_mfe for h in horizon_results])
-        horizon_sessions_to_mae[horizon] = _mean([h.sessions_to_mae for h in horizon_results])
-        horizon_censored[horizon] = sum(1 for h in horizon_results if h.is_censored)
+        complete = _complete_only(horizon_results)
+        horizon_forward_return[horizon] = _mean([h.forward_return_pct for h in complete])
+        horizon_mfe[horizon] = _mean([h.mfe_pct for h in complete])
+        horizon_mae[horizon] = _mean([h.mae_pct for h in complete])
+        horizon_sessions_to_mfe[horizon] = _mean([h.sessions_to_mfe for h in complete])
+        horizon_sessions_to_mae[horizon] = _mean([h.sessions_to_mae for h in complete])
+        horizon_complete[horizon] = len(complete)
+        horizon_censored_eoe[horizon], horizon_censored_mmd[horizon] = _censored_counts_by_reason(horizon_results)
 
     return BuyQualitySummary(
         filled_count=len(filled_orders),
@@ -131,7 +181,9 @@ def compute_buy_quality_summary(context: DiagnosticsContext, calendar: tuple[dat
         horizon_mean_mae_pct=horizon_mae,
         horizon_mean_sessions_to_mfe=horizon_sessions_to_mfe,
         horizon_mean_sessions_to_mae=horizon_sessions_to_mae,
-        horizon_censored_count=horizon_censored,
+        horizon_complete_count=horizon_complete,
+        horizon_censored_end_of_experiment_count=horizon_censored_eoe,
+        horizon_censored_missing_market_data_count=horizon_censored_mmd,
     )
 
 
@@ -167,7 +219,9 @@ class HoldQualitySummary:
     horizon_mean_mfe_pct: dict[int, float | None]
     horizon_mean_mae_pct: dict[int, float | None]
     horizon_target_reached_rate: dict[int, float | None]
-    horizon_censored_count: dict[int, int]
+    horizon_complete_count: dict[int, int]
+    horizon_censored_end_of_experiment_count: dict[int, int]
+    horizon_censored_missing_market_data_count: dict[int, int]
     by_holding_age_bucket: tuple[HoldQualityBucketStats, ...]
     by_unrealized_return_bucket: tuple[HoldQualityBucketStats, ...]
 
@@ -177,8 +231,12 @@ def _bucket_stats(label: str, snapshots_with_results) -> HoldQualityBucketStats:
         return HoldQualityBucketStats(label=label, snapshot_count=0, target_reached_rate=None, adverse_rate=None)
     horizon_index = HOLD_HORIZONS.index(_HOLD_BUCKET_REPRESENTATIVE_HORIZON)
     reps = [result.horizons[horizon_index] for _, result in snapshots_with_results]
-    target_reached_rate = _rate(sum(1 for r in reps if r.target_reached), len(reps))
-    adverse_rate = _rate(sum(1 for r in reps if r.forward_close_return_pct is not None and r.forward_close_return_pct < 0), len(reps))
+    target_reached_rate = _target_reached_rate(reps)
+    complete = _complete_only(reps)
+    adverse_rate = _rate(
+        sum(1 for r in complete if r.forward_close_return_pct is not None and r.forward_close_return_pct < 0),
+        len(complete),
+    )
     return HoldQualityBucketStats(label=label, snapshot_count=len(reps), target_reached_rate=target_reached_rate, adverse_rate=adverse_rate)
 
 
@@ -197,14 +255,18 @@ def compute_hold_quality_summary(context: DiagnosticsContext, calendar: tuple[da
     horizon_mfe: dict[int, float | None] = {}
     horizon_mae: dict[int, float | None] = {}
     horizon_target_rate: dict[int, float | None] = {}
-    horizon_censored: dict[int, int] = {}
+    horizon_complete: dict[int, int] = {}
+    horizon_censored_eoe: dict[int, int] = {}
+    horizon_censored_mmd: dict[int, int] = {}
     for i, horizon in enumerate(HOLD_HORIZONS):
         horizon_results = [r.horizons[i] for _, r in results]
-        horizon_forward_return[horizon] = _mean([h.forward_close_return_pct for h in horizon_results])
-        horizon_mfe[horizon] = _mean([h.max_high_pct for h in horizon_results])
-        horizon_mae[horizon] = _mean([h.min_low_pct for h in horizon_results])
-        horizon_target_rate[horizon] = _rate(sum(1 for h in horizon_results if h.target_reached), len(horizon_results))
-        horizon_censored[horizon] = sum(1 for h in horizon_results if h.is_censored)
+        complete = _complete_only(horizon_results)
+        horizon_forward_return[horizon] = _mean([h.forward_close_return_pct for h in complete])
+        horizon_mfe[horizon] = _mean([h.max_high_pct for h in complete])
+        horizon_mae[horizon] = _mean([h.min_low_pct for h in complete])
+        horizon_target_rate[horizon] = _target_reached_rate(horizon_results)
+        horizon_complete[horizon] = len(complete)
+        horizon_censored_eoe[horizon], horizon_censored_mmd[horizon] = _censored_counts_by_reason(horizon_results)
 
     # Per-POSITION eventual-outcome rates (not per-snapshot, so a long-held position
     # does not dominate the rate simply by having more HOLD days).
@@ -239,7 +301,9 @@ def compute_hold_quality_summary(context: DiagnosticsContext, calendar: tuple[da
         horizon_mean_mfe_pct=horizon_mfe,
         horizon_mean_mae_pct=horizon_mae,
         horizon_target_reached_rate=horizon_target_rate,
-        horizon_censored_count=horizon_censored,
+        horizon_complete_count=horizon_complete,
+        horizon_censored_end_of_experiment_count=horizon_censored_eoe,
+        horizon_censored_missing_market_data_count=horizon_censored_mmd,
         by_holding_age_bucket=age_buckets,
         by_unrealized_return_bucket=return_buckets,
     )
@@ -263,7 +327,9 @@ class SellQualitySummary:
     horizon_mean_max_high_pct: dict[int, float | None]
     horizon_mean_min_low_pct: dict[int, float | None]
     horizon_target_reached_rate: dict[int, float | None]
-    horizon_censored_count: dict[int, int]
+    horizon_complete_count: dict[int, int]
+    horizon_censored_end_of_experiment_count: dict[int, int]
+    horizon_censored_missing_market_data_count: dict[int, int]
     total_censored_post_exit_observations: int
 
 
@@ -281,14 +347,18 @@ def compute_sell_quality_summary(context: DiagnosticsContext, calendar: tuple[da
     horizon_max_high: dict[int, float | None] = {}
     horizon_min_low: dict[int, float | None] = {}
     horizon_target_rate: dict[int, float | None] = {}
-    horizon_censored: dict[int, int] = {}
+    horizon_complete: dict[int, int] = {}
+    horizon_censored_eoe: dict[int, int] = {}
+    horizon_censored_mmd: dict[int, int] = {}
     for i, horizon in enumerate(SELL_HORIZONS):
         horizon_results = [r.horizons[i] for r in sell_results]
-        horizon_forward_return[horizon] = _mean([h.close_to_close_return_pct for h in horizon_results])
-        horizon_max_high[horizon] = _mean([h.max_high_pct for h in horizon_results])
-        horizon_min_low[horizon] = _mean([h.min_low_pct for h in horizon_results])
-        horizon_target_rate[horizon] = _rate(sum(1 for h in horizon_results if h.target_reached), len(horizon_results))
-        horizon_censored[horizon] = sum(1 for h in horizon_results if h.is_censored)
+        complete = _complete_only(horizon_results)
+        horizon_forward_return[horizon] = _mean([h.close_to_close_return_pct for h in complete])
+        horizon_max_high[horizon] = _mean([h.max_high_pct for h in complete])
+        horizon_min_low[horizon] = _mean([h.min_low_pct for h in complete])
+        horizon_target_rate[horizon] = _target_reached_rate(horizon_results)
+        horizon_complete[horizon] = len(complete)
+        horizon_censored_eoe[horizon], horizon_censored_mmd[horizon] = _censored_counts_by_reason(horizon_results)
 
     return SellQualitySummary(
         closed_position_count=len(closed_positions),
@@ -304,8 +374,10 @@ def compute_sell_quality_summary(context: DiagnosticsContext, calendar: tuple[da
         horizon_mean_max_high_pct=horizon_max_high,
         horizon_mean_min_low_pct=horizon_min_low,
         horizon_target_reached_rate=horizon_target_rate,
-        horizon_censored_count=horizon_censored,
-        total_censored_post_exit_observations=sum(horizon_censored.values()),
+        horizon_complete_count=horizon_complete,
+        horizon_censored_end_of_experiment_count=horizon_censored_eoe,
+        horizon_censored_missing_market_data_count=horizon_censored_mmd,
+        total_censored_post_exit_observations=sum(horizon_censored_eoe.values()) + sum(horizon_censored_mmd.values()),
     )
 
 
@@ -318,7 +390,9 @@ class CapacityQualitySummary:
     hypothetical_fill_rate: float | None
     horizon_mean_missed_mfe_pct: dict[int, float | None]
     horizon_mean_missed_mae_pct: dict[int, float | None]
-    horizon_censored_count: dict[int, int]
+    horizon_complete_count: dict[int, int]
+    horizon_censored_end_of_experiment_count: dict[int, int]
+    horizon_censored_missing_market_data_count: dict[int, int]
     mean_open_position_count: float | None
     mean_reserved_order_count: float | None
     idle_cash_day_count: int
@@ -336,15 +410,19 @@ def compute_capacity_quality_summary(
 
     horizon_mfe: dict[int, float | None] = {}
     horizon_mae: dict[int, float | None] = {}
-    horizon_censored: dict[int, int] = {}
+    horizon_complete: dict[int, int] = {}
+    horizon_censored_eoe: dict[int, int] = {}
+    horizon_censored_mmd: dict[int, int] = {}
     horizon20_returns: list[float | None] = []
     for i, horizon in enumerate(CAPACITY_HORIZONS):
         horizon_results = [r.horizons[i] for r in results]
-        horizon_mfe[horizon] = _mean([h.mfe_pct for h in horizon_results])
-        horizon_mae[horizon] = _mean([h.mae_pct for h in horizon_results])
-        horizon_censored[horizon] = sum(1 for h in horizon_results if h.is_censored)
+        complete = _complete_only(horizon_results)
+        horizon_mfe[horizon] = _mean([h.mfe_pct for h in complete])
+        horizon_mae[horizon] = _mean([h.mae_pct for h in complete])
+        horizon_complete[horizon] = len(complete)
+        horizon_censored_eoe[horizon], horizon_censored_mmd[horizon] = _censored_counts_by_reason(horizon_results)
         if horizon == 20:
-            horizon20_returns = [h.forward_return_pct for h in horizon_results]
+            horizon20_returns = [h.forward_return_pct for h in complete]
 
     snapshots = context.portfolio_repo.list_equity_snapshots(replay_id)
     closed_positions = [p for p in context.sandbox_repo.list_all_positions() if p.status == CLOSED]
@@ -355,7 +433,9 @@ def compute_capacity_quality_summary(
         hypothetical_fill_rate=_rate(sum(1 for r in results if r.hypothetical_would_have_filled), len(results)),
         horizon_mean_missed_mfe_pct=horizon_mfe,
         horizon_mean_missed_mae_pct=horizon_mae,
-        horizon_censored_count=horizon_censored,
+        horizon_complete_count=horizon_complete,
+        horizon_censored_end_of_experiment_count=horizon_censored_eoe,
+        horizon_censored_missing_market_data_count=horizon_censored_mmd,
         mean_open_position_count=_mean([float(s.open_position_count) for s in snapshots]),
         mean_reserved_order_count=_mean([float(s.reserved_order_count) for s in snapshots]),
         idle_cash_day_count=sum(1 for s in snapshots if s.open_position_count == 0 and s.reserved_order_count == 0),

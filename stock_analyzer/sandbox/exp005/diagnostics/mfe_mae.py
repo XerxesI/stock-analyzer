@@ -1,11 +1,12 @@
-"""MFE/MAE diagnostics -- Revision 5, Section 20, Stage 12.
+"""MFE/MAE diagnostics -- Revision 5, Section 20, Stage 12 (corrected in the
+Stage 11-15 closure cycle, finding 4).
 
 For every position (open or closed), computed post-hoc from the frozen OHLCV over
 its holding window:
 
-    MFE = (max observed High during the holding window - effective_entry_price)
+    MFE = (max KNOWN price reached during the holding window - effective_entry_price)
           / effective_entry_price
-    MAE = (min observed Low during the holding window - effective_entry_price)
+    MAE = (min KNOWN price reached during the holding window - effective_entry_price)
           / effective_entry_price
 
 reported together with the MFE/MAE price and date, sessions from entry to each,
@@ -34,6 +35,30 @@ when the executable moment within it is unambiguous:
   `outcome_data_end_date`, since the position was never observed to exit within
   the frozen period.
 
+**Known-boundary-point correction (Stage 11-15 closure, finding 4):** excluding
+an exit session's own (unknown-ordering) High/Low must never make MFE/MAE
+UNDERSTATE what the position is actually known to have reached. The realized
+effective exit price is itself a certain, known point on the path -- it is
+always included as a candidate for both MFE and MAE, alongside whatever the
+(possibly-excluded) window's own High/Low contribute. For an ordinary profitable
+`SELL_TARGET` exit this guarantees `mfe_pct >= realized_return_pct` (the position
+cannot be reported as never having reached the very price it demonstrably sold
+at), which in turn guarantees peak-to-exit giveback is never negative and exit
+efficiency never exceeds 1 purely as an artifact of the exclusion rule above.
+This is a general correctness property, not special-cased to the ambiguous exit
+branch: for `SELL_TIME`/unambiguous `SELL_TARGET` exits the exit session's own
+High/Low are already in the window and already dominate, so including the exit
+price as an extra candidate there is a harmless no-op.
+
+**Degenerate empty-window fallback (Stage 11-15 closure, finding 4):** if the
+ambiguity exclusions above leave literally zero observed sessions in the window
+(e.g. a `FILLED_AT_CEILING` entry immediately followed by an ambiguous
+`SELL_TARGET` exit the very next session), the trade is NOT discarded as
+undefined. Instead MFE/MAE fall back to the two (or, for an open position with
+no data at all after entry, the one) points that ARE certainly known: the
+effective entry price (a zero-excursion baseline -- no intermediate excursion
+can be claimed or denied) and, for a closed position, the effective exit price.
+
 Both `effective_entry_price` and `effective_exit_price` come from EXP-005's own
 `executions` ledger (Stage 5/6) -- never core `virtual_positions.entry_price`
 (the raw, uncosted reference core's own decisions use; see the Stage 6 dual-
@@ -60,10 +85,9 @@ from stock_analyzer.sandbox.exp005.domain.units import price_units_to_float
 
 class MfeMaeComputationError(RuntimeError):
     """Raised when a position's data is inconsistent with this computation's
-    preconditions (missing BUY/SELL execution, unrecognized fill/exit reason),
-    or when its holding window (after the entry/exit-session ambiguity
-    exclusion) contains zero observed sessions -- MFE/MAE is genuinely undefined
-    for that position, never silently reported as zero."""
+    preconditions: missing BUY/SELL execution, or an unrecognized fill/exit
+    reason. No longer raised for an empty post-ambiguity-exclusion window -- see
+    the degenerate-fallback branch below."""
 
 
 @dataclass(frozen=True)
@@ -107,6 +131,14 @@ def compute_mfe_mae(context: DiagnosticsContext, position: VirtualPosition) -> M
     effective_entry_price = price_units_to_float(buy_execution.effective_fill_price_units)
     sessions = _symbol_sessions(context.prices_df, position.symbol)
 
+    is_closed = position.status == CLOSED
+    effective_exit_price: float | None = None
+    if is_closed:
+        sell_execution = next((e for e in executions if e.side != BUY), None)
+        if sell_execution is None:
+            raise MfeMaeComputationError(f"closed position {position.position_id} has no SELL execution.")
+        effective_exit_price = price_units_to_float(sell_execution.effective_fill_price_units)
+
     fill_reason = buy_execution.fill_reason
     if fill_reason == FILLED_AT_OPEN:
         window_start = position.entry_date
@@ -117,7 +149,6 @@ def compute_mfe_mae(context: DiagnosticsContext, position: VirtualPosition) -> M
             f"unrecognized BUY fill_reason {fill_reason!r} for position {position.position_id}."
         )
 
-    is_closed = position.status == CLOSED
     if is_closed:
         if position.exit_reason == SELL_TIME:
             window_end = position.exit_date
@@ -134,35 +165,51 @@ def compute_mfe_mae(context: DiagnosticsContext, position: VirtualPosition) -> M
         window_end = context.manifest.outcome_data_end_date
 
     if window_start is None or window_end is None or window_start > window_end:
-        raise MfeMaeComputationError(
-            f"position {position.position_id}'s holding window is empty after the entry/exit-session "
-            "ambiguity exclusion -- MFE/MAE is undefined for it."
-        )
+        # Degenerate: the ambiguity exclusions above leave no observed session at
+        # all. Fall back to the certainly-known boundary price(s) rather than
+        # discarding an otherwise valid trade -- see the module docstring.
+        known_points: list[tuple[date, float]] = [(position.entry_date, effective_entry_price)]
+        if is_closed:
+            known_points.append((position.exit_date, effective_exit_price))
+        mfe_date, mfe_price = max(known_points, key=lambda p: p[1])
+        mae_date, mae_price = min(known_points, key=lambda p: p[1])
+        sessions_to_mfe = known_points.index((mfe_date, mfe_price)) + 1
+        sessions_to_mae = known_points.index((mae_date, mae_price)) + 1
+        reported_window_start = window_start if window_start is not None else position.entry_date
+        reported_window_end = window_end if window_end is not None else reported_window_start
+    else:
+        window = sessions.loc[(sessions.index >= window_start) & (sessions.index <= window_end)]
+        if window.empty:
+            raise MfeMaeComputationError(
+                f"position {position.position_id} has no observed sessions in its holding window "
+                f"[{window_start}, {window_end}] despite a non-empty nominal range -- a genuine gap "
+                "in the frozen source, not the ambiguity-exclusion case."
+            )
 
-    window = sessions.loc[(sessions.index >= window_start) & (sessions.index <= window_end)]
-    if window.empty:
-        raise MfeMaeComputationError(
-            f"position {position.position_id} has no observed sessions in its holding window "
-            f"[{window_start}, {window_end}]."
-        )
+        mfe_date = window["High"].idxmax()
+        mfe_price = float(window.loc[mfe_date, "High"])
+        mae_date = window["Low"].idxmin()
+        mae_price = float(window.loc[mae_date, "Low"])
 
-    mfe_date = window["High"].idxmax()
-    mfe_price = float(window.loc[mfe_date, "High"])
+        ordered_dates = list(window.index)
+        if is_closed and position.exit_date not in ordered_dates:
+            # The exit session's own High/Low were excluded (ambiguous touch),
+            # but the exit price ITSELF is a known point on the path -- always a
+            # candidate for both MFE and MAE, never silently understated.
+            ordered_dates = ordered_dates + [position.exit_date]
+            if effective_exit_price > mfe_price:
+                mfe_date, mfe_price = position.exit_date, effective_exit_price
+            if effective_exit_price < mae_price:
+                mae_date, mae_price = position.exit_date, effective_exit_price
+
+        sessions_to_mfe = ordered_dates.index(mfe_date) + 1
+        sessions_to_mae = ordered_dates.index(mae_date) + 1
+        reported_window_start, reported_window_end = window_start, window_end
+
     mfe_pct = (mfe_price - effective_entry_price) / effective_entry_price
-
-    mae_date = window["Low"].idxmin()
-    mae_price = float(window.loc[mae_date, "Low"])
     mae_pct = (mae_price - effective_entry_price) / effective_entry_price
 
-    ordered_dates = list(window.index)
-    sessions_to_mfe = ordered_dates.index(mfe_date) + 1
-    sessions_to_mae = ordered_dates.index(mae_date) + 1
-
     if is_closed:
-        sell_execution = next((e for e in executions if e.side != BUY), None)
-        if sell_execution is None:
-            raise MfeMaeComputationError(f"closed position {position.position_id} has no SELL execution.")
-        effective_exit_price = price_units_to_float(sell_execution.effective_fill_price_units)
         realized_or_mtm_return_pct = (effective_exit_price - effective_entry_price) / effective_entry_price
     else:
         mark_price = position.current_close if position.current_close is not None else effective_entry_price
@@ -177,8 +224,8 @@ def compute_mfe_mae(context: DiagnosticsContext, position: VirtualPosition) -> M
         symbol=position.symbol,
         is_closed=is_closed,
         effective_entry_price=effective_entry_price,
-        window_start_date=window_start,
-        window_end_date=window_end,
+        window_start_date=reported_window_start,
+        window_end_date=reported_window_end,
         mfe_pct=mfe_pct,
         mfe_price=mfe_price,
         mfe_date=mfe_date,

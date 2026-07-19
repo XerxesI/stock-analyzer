@@ -1,6 +1,40 @@
 # EXP-005 Stage 15 Completion Report
 
-## Status
+## Update (2026-07-20): Stage 11-15 closure cycle
+
+The first independent review of Stages 11-15 found 4 confirmed P1 defects, the
+largest being that the Section 10 financial-feasibility report -- the module
+that actually answers whether Model 2's ranking makes money -- did not exist.
+All four are now fixed, alongside a fifth diagnostics-provenance hardening the
+reviewer required in the same pass. Full detail lives in the implementation
+checklist's own "Stage 11-15 closure cycle" note
+(`docs/09_experiments/EXP-005_Implementation_Checklist.md`); in short:
+
+1. Added `exp005/diagnostics/financial_performance.py` (net P&L/return,
+   drawdown, quarterly returns, profit factor, trade-concentration
+   diagnostics, and the 5-criterion feasibility verdict against Variant D).
+2. Fixed `report_generator.py` to exclude censored observations from
+   headline horizon means/rates (they are now reported separately, by
+   censoring reason).
+3. Fixed `opportunity_cost.py`'s capacity-occupancy reconstruction, which had
+   compared wall-clock timestamps against historical replay dates -- now
+   uses only logical replay event dates, reconciled against the day's own
+   equity snapshot.
+4. Fixed `mfe_mae.py` so MFE can never be reported below a position's own
+   known realized return on an intraday-touch `SELL_TARGET` exit.
+5. Hardened `load_diagnostics_context` to require a `COMPLETED` replay whose
+   persisted provenance matches the manifest.
+
+`tests/test_exp005_stage15_synthetic_end_to_end.py` was extended to prove all
+five corrections hold together through the real pipeline, including an
+explicit before/after row-level fingerprint proving no diagnostic call
+mutates any decision-time/accounting table. 600/600 tests pass (508
+sandbox+exp005, 92 unrelated); EXP-004's checksum is unchanged.
+
+**No real EXP-005 replay or P&L has been produced.** This corrective cycle
+must pass another independent review before Stages 11-15 can be closed.
+
+## Original Stage 15 completion status (2026-07-19, superseded above)
 
 **Stage 15 (synthetic end-to-end fixture; completion report) is complete.**
 Stages 0-15 of the implementation checklist are now done. **No real EXP-005

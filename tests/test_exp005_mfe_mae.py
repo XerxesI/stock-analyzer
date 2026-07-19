@@ -227,10 +227,12 @@ def test_open_position_falls_back_to_entry_price_when_current_close_missing():
 # ------------------------------------------------------------------------- edge cases
 
 
-def test_empty_window_raises():
+def test_empty_window_falls_back_to_known_entry_exit_boundary_points():
     position_id = "p7"
     # FILLED_AT_CEILING entry on Jan 6 -> window starts Jan 7. SELL_TARGET-intraday
-    # exit on Jan 7 -> window ends Jan 6 (previous session). start > end -> empty.
+    # exit on Jan 7 -> window ends Jan 6 (previous session). start > end -> empty --
+    # no observed session at all, so MFE/MAE fall back to the two KNOWN boundary
+    # prices (entry, exit) rather than raising (Stage 11-15 closure, finding 4).
     prices = pd.DataFrame(
         [
             _bar(date(2026, 1, 5), 100.0, 105.0, 98.0, 102.0),
@@ -245,8 +247,59 @@ def test_empty_window_raises():
     ]
     context = _FakeContext(prices, executions, date(2026, 1, 7))
 
-    with pytest.raises(MfeMaeComputationError):
-        compute_mfe_mae(context, position)
+    result = compute_mfe_mae(context, position)
+
+    assert result.mfe_price == pytest.approx(105.0)  # the known exit price -- the higher of the two known points
+    assert result.mfe_date == date(2026, 1, 7)
+    assert result.mfe_pct == pytest.approx((105.0 - 102.0) / 102.0)
+    assert result.sessions_to_mfe == 2
+    assert result.mae_price == pytest.approx(102.0)  # the known entry price -- the lower of the two known points
+    assert result.mae_date == date(2026, 1, 6)
+    assert result.mae_pct == pytest.approx(0.0)
+    assert result.sessions_to_mae == 1
+    assert result.realized_or_mtm_return_pct == pytest.approx((105.0 - 102.0) / 102.0)
+    assert result.peak_to_exit_giveback_pct == pytest.approx(0.0)
+    assert result.exit_efficiency == pytest.approx(1.0)
+
+
+def test_ambiguous_target_exit_mfe_never_understates_the_known_realized_exit():
+    """The reviewer's exact failure scenario: an intraday SELL_TARGET exit whose
+    prior (non-excluded) window High is LOWER than the realized exit price. MFE
+    must never be reported below the known realized return -- otherwise giveback
+    goes negative and exit efficiency exceeds 1, both nonsensical for an ordinary
+    profitable target exit."""
+
+    position_id = "p7b"
+    # Prior session (Jan 6, included) tops out at High=104 -- well below the
+    # eventual target/exit price of 110. Exit session (Jan 7) is excluded (open
+    # 100 < target 110 <= high 112, an ambiguous intraday touch).
+    prices = pd.DataFrame(
+        [
+            _bar(date(2026, 1, 5), 100.0, 101.0, 98.0, 100.0),
+            _bar(date(2026, 1, 6), 100.0, 104.0, 99.0, 103.0),
+            _bar(date(2026, 1, 7), 100.0, 112.0, 95.0, 108.0),
+        ]
+    )
+    position = _position(position_id, date(2026, 1, 5), target_price=110.0, status=CLOSED, exit_date=date(2026, 1, 7), exit_reason=SELL_TARGET)
+    executions = [
+        _buy_execution(position_id, FILLED_AT_OPEN, 100.0, date(2026, 1, 5)),
+        _sell_execution(position_id, SELL_TARGET, 110.0, date(2026, 1, 7)),
+    ]
+    context = _FakeContext(prices, executions, date(2026, 1, 7))
+
+    result = compute_mfe_mae(context, position)
+
+    # Without the fix, mfe_price would be Jan 6's High (104) -- BELOW the known
+    # realized exit (110), which is the exact defect the reviewer flagged.
+    assert result.mfe_price == pytest.approx(110.0)
+    assert result.mfe_date == date(2026, 1, 7)
+    assert result.mfe_pct == pytest.approx(0.10)
+    assert result.realized_or_mtm_return_pct == pytest.approx(0.10)
+    assert result.mfe_pct >= result.realized_or_mtm_return_pct
+    assert result.peak_to_exit_giveback_pct == pytest.approx(0.0)
+    assert result.exit_efficiency == pytest.approx(1.0)
+    # MAE is unaffected -- the exit price (110) is not the window's minimum.
+    assert result.mae_price == pytest.approx(98.0)  # Jan 5's Low (entry session, included)
 
 
 def test_exit_efficiency_none_when_mfe_is_exactly_zero():

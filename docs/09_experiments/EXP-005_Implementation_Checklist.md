@@ -47,6 +47,9 @@ stock_analyzer/sandbox/exp005/
         sell_quality.py                              Stage 13
         opportunity_cost.py                           Stage 13
         report_generator.py                            Stage 14
+        financial_performance.py                        Stage 11-15 closure (Section 10 --
+                                                          missing from the original Stage 14;
+                                                          see Status below)
 ```
 
 **Naming note (discovered during Stage 6):** Section 8.2 names the atomic-write
@@ -71,7 +74,7 @@ different names. This is a naming difference only, not a behavioral deviation.
 | Portfolio replay | `exp005/application/replay.py`, reusing core `ReplayService`/`CandidateService`/`EntryService`/`MonitoringService` with the frozen seam (Section 11.2-11.3) |
 | Experiment Manifest | `exp005/manifest.py` |
 | Post-hoc diagnostics | `exp005/diagnostics/` (Stages 11-13) |
-| Report generation | `exp005/diagnostics/report_generator.py` (Stage 14) |
+| Report generation | `exp005/diagnostics/report_generator.py` (Stage 14, decision-quality) + `exp005/diagnostics/financial_performance.py` (Stage 11-15 closure, Section 10 financial feasibility) |
 | Import-boundary enforcement | test: `tests/test_exp005_diagnostics_import_boundary.py` (Stage 11) |
 | Deterministic-output validation | tests in Stage 8 (replay), Stage 9 (manifest), Stage 14 (reports) |
 | Censoring | `exp005/diagnostics/_shared.py::compute_forward_horizon` (Stage 13), applied consistently to every fixed-horizon post-hoc outcome in Sections 21-24 (Section 20's MFE/MAE complete path is not fixed-horizon and is not censored the same way -- see mfe_mae.py's module docstring) |
@@ -321,8 +324,96 @@ different names. This is a naming difference only, not a behavioral deviation.
       hand-count fix, not a code defect: the fill day's own same-day HOLD
       snapshot was initially miscounted).
 
-      **Stages 0-15 complete. No real EXP-005 replay or P&L has been
-      produced.** Per the standing authorization, an independent review of
-      Stages 11-15 is required next; only after it passes may a final manifest
-      be generated for the commit with which a real Variant B or Variant D run
-      is actually executed.
+      **Stages 0-15 complete.**
+
+      **Stage 11-15 independent review, first round (2026-07-20): 4 confirmed
+      P1 findings, closed in one corrective cycle.**
+
+      1. **The Section 10 financial-feasibility report was entirely missing.**
+         `report_generator.py` only ever covered decision quality (Sections
+         18-25) -- nothing computed net P&L, net return, max drawdown,
+         quarterly returns, profit factor, trade-concentration diagnostics, or
+         the Variant B vs. D percentile feasibility verdict, so the project's
+         actual research question ("does Model 2's ranking make money?") had
+         no computed answer. Fixed: new `exp005/diagnostics/
+         financial_performance.py` (module docstring documents that Section
+         10's exact Revision 2 prose is not independently recoverable from
+         this repo's git history -- only one commit ever added the frozen
+         doc, already at Revision 5 -- so the already-frozen, already-tested
+         `exp005.config.FeasibilityCriteria` thresholds are the authoritative
+         numeric source, not an invented one). `compute_financial_performance`
+         (starting/ending equity, net P&L/return, drawdown with peak/trough
+         dates, quarterly returns, closed-trade win/loss/profit-factor,
+         largest-winner and largest-open-position concentration diagnostics,
+         all from `portfolio_equity_snapshots`/paired BUY-SELL `executions` in
+         exact integer units) and `compute_feasibility_verdict` (composes a
+         Variant B report with Variant D seed reports into 5 explicit
+         criteria plus one final verdict that is `None`, never a silent pass,
+         whenever any criterion is undeterminable). 13 hand-computed tests
+         (`tests/test_exp005_financial_performance.py`).
+      2. **Censored (partial-window) observations were blended into headline
+         horizon means/rates in `report_generator.py`.** Fixed:
+         `horizon_mean_*`/`horizon_target_reached_rate` now compute from
+         `is_censored=False` observations only, with `horizon_complete_count`
+         plus separate `horizon_censored_end_of_experiment_count`/
+         `horizon_censored_missing_market_data_count` reported alongside
+         (Section 27's two reasons never merged). Target-hit rates use an
+         asymmetric rule: a censored-but-already-reached-target observation
+         counts as a resolved success; a censored-and-not-yet-reached one is
+         excluded from both numerator and denominator entirely (`_target_
+         reached_rate`). New fixture proves a single extreme censored
+         observation cannot swing an otherwise-complete headline mean.
+      3. **`opportunity_cost.py` reconstructed capacity occupancy from
+         `slot_reservations.created_at`/`resolved_at` wall-clock timestamps
+         compared against the historical `admission.as_of_date`** -- two
+         unrelated clocks (a 2024 replay date has no relationship to a 2026
+         diagnostics-run wall-clock write time), so the reconstruction never
+         actually found anything, and open positions weren't returned at all.
+         Fixed: occupancy is reconstructed purely from logical replay event
+         dates -- a reservation occupies from its admission's `as_of_date`
+         through its logical fill/expiry session (derived from
+         `entry_order_attempts`, mirroring `entry_timing.py`); a position
+         occupies for `entry_date <= as_of_date < exit_date`, honoring
+         same-day rank ordering (Section 8.4) for tie-breaking. Returns both
+         `occupying_reservations` and `occupying_open_positions`, reconciled
+         against that day's own equity snapshot
+         (`CapacityOccupancyReconciliationError` on mismatch, never silently
+         accepted). Regression test uses 2024 replay dates with 2026
+         wall-clock timestamps to prove the fix.
+      4. **`mfe_mae.py` could report MFE below the position's own known
+         realized return for an intraday-touch `SELL_TARGET` exit** (excluding
+         the exit session's unknown High/Low also excluded the KNOWN exit
+         price itself as a candidate), producing negative peak-to-exit
+         giveback and exit efficiency over 1 -- both nonsensical. Fixed: the
+         known, certain effective exit price is now always a boundary
+         candidate for both MFE and MAE, alongside whatever the (possibly
+         window-excluded) session data contributes; `mfe_pct >=
+         realized_return_pct` now holds by construction. The prior empty-window
+         `MfeMaeComputationError` is replaced by a degenerate 2-point
+         (entry/exit) fallback instead of discarding an otherwise valid trade.
+      5. **`load_diagnostics_context` never verified the replay it was
+         analyzing actually existed, completed, or matched the manifest's own
+         provenance** -- any connection could be passed off as "the" replay
+         database. Fixed: now loads the manifest fresh from its persisted
+         artifact file (never an in-memory object, mirroring `real_run.py`'s
+         own boundary), and requires a `replay_metadata` row for `replay_id`
+         that is `COMPLETED` and whose commit/model/feature-snapshot/
+         market-data-snapshot/period AND `configuration_json`'s own recorded
+         manifest-artifact-file hash all match.
+
+      All five fixes are covered by dedicated regression tests reproducing
+      the reviewer's exact failure scenarios, and by an extended
+      `tests/test_exp005_stage15_synthetic_end_to_end.py` proving all five
+      corrections hold together through the real pipeline: the corrected MFE
+      boundary, historical (not wall-clock) capacity occupants, censored
+      observations excluded from complete aggregates, the new financial
+      performance report/verdict, and an explicit before/after row-level
+      fingerprint proving no diagnostic call mutates any decision-time/
+      accounting table. 600/600 (508 sandbox+exp005, 92 unrelated) tests
+      pass; EXP-004's checksum is unchanged.
+
+      **No real EXP-005 replay or P&L has been produced.** Per the standing
+      authorization, this corrective cycle must pass ANOTHER independent
+      review before Stages 11-15 can be closed; only after that passes may a
+      final manifest be generated for the commit with which a real Variant B
+      or Variant D run is actually executed.

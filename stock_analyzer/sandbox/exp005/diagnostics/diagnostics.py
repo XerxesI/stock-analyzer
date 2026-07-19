@@ -33,23 +33,26 @@ or any core sandbox table.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
 
-from stock_analyzer.sandbox.exp005.infrastructure.frozen_artifacts import verify_frozen_lineage
+from stock_analyzer.sandbox.domain.replay import COMPLETED
+from stock_analyzer.sandbox.exp005.infrastructure.frozen_artifacts import sha256_of_file, verify_frozen_lineage
 from stock_analyzer.sandbox.exp005.infrastructure.repository import PortfolioRepository
-from stock_analyzer.sandbox.exp005.manifest import ExperimentManifest
+from stock_analyzer.sandbox.exp005.manifest import ExperimentManifest, read_manifest_artifact
 from stock_analyzer.sandbox.infrastructure.sqlite_repository import SandboxRepository
 
 
 class DiagnosticsProvenanceError(RuntimeError):
-    """Raised when the frozen prices artifact supplied for diagnostics does not
-    match the completed replay's own recorded manifest -- diagnostics must be
-    computed against the EXACT same frozen data the replay itself used, never a
-    different or unverified snapshot."""
+    """Raised when the supplied database/artifacts do not provably belong to the
+    completed replay this diagnostics pass claims to analyze -- diagnostics must
+    be computed against the EXACT same frozen data and the EXACT same completed
+    run the manifest describes, never a different, unverified, or still-running
+    one (Stage 11-15 closure, finding 5)."""
 
 
 @dataclass(frozen=True)
@@ -69,21 +72,32 @@ class DiagnosticsContext:
 
 def load_diagnostics_context(
     conn: sqlite3.Connection,
-    manifest: ExperimentManifest,
+    manifest_artifact_path: str | Path,
     feature_snapshot_dir: str | Path,
     replay_id: str,
 ) -> DiagnosticsContext:
     """Loads and re-verifies the frozen prices artifact against
     `manifest.ohlc_hash`/`manifest.feature_snapshot_id` -- never trusts a
-    caller-supplied path without re-hashing it, the same discipline
-    `real_run.py`'s execution boundary already applies to a real run. Call this
-    ONCE per diagnostics pass; every individual diagnostic function takes the
-    returned `DiagnosticsContext`, never `conn`/a file path directly.
+    caller-supplied path without re-hashing it -- AND verifies the supplied
+    connection actually holds a COMPLETED replay whose own persisted provenance
+    matches that same manifest (Stage 11-15 closure, finding 5). Mirrors
+    `real_run.py`'s own execution boundary: the manifest is loaded fresh from its
+    PERSISTED artifact file, never accepted as an in-memory object a caller could
+    construct without ever freezing it, and the replay's own configuration
+    identity must incorporate that artifact file's own hash. Call this ONCE per
+    diagnostics pass; every individual diagnostic function takes the returned
+    `DiagnosticsContext`, never `conn`/a file path directly.
 
-    `conn` must already be a connection to the COMPLETED replay database this
-    `replay_id` was written to -- this function does not open or validate the
-    connection itself (Section 26: the decision-time write path and this
-    read-only analysis path never share code, only data)."""
+    A database whose `replay_metadata` row for `replay_id` is missing, still
+    `RUNNING`/`FAILED`, or whose provenance disagrees with the manifest is
+    rejected -- since core sandbox tables carry no `replay_id` column (each
+    replay is its own isolated database, per EXP-004's convention), this
+    replay_metadata match is the strongest available proof that the supplied
+    connection is genuinely the isolated database for this replay, not a
+    different or mismatched one accidentally pointed at."""
+
+    manifest = read_manifest_artifact(manifest_artifact_path)
+    manifest_artifact_hash = sha256_of_file(manifest_artifact_path)
 
     lineage = verify_frozen_lineage(feature_snapshot_dir)
     if lineage.artifact_hashes["prices"] != manifest.ohlc_hash:
@@ -96,6 +110,49 @@ def load_diagnostics_context(
         raise DiagnosticsProvenanceError(
             f"the supplied feature snapshot ({lineage.feature_snapshot_id!r}) does not match the "
             f"manifest's recorded feature_snapshot_id ({manifest.feature_snapshot_id!r})."
+        )
+
+    replay = SandboxRepository(conn).get_replay_metadata(replay_id)
+    if replay is None:
+        raise DiagnosticsProvenanceError(
+            f"no replay_metadata row exists for replay_id={replay_id!r} in the supplied database -- "
+            "diagnostics can only be computed against an actually-completed replay."
+        )
+    if replay.status != COMPLETED:
+        raise DiagnosticsProvenanceError(
+            f"replay {replay_id!r} has status {replay.status!r}, not {COMPLETED!r} -- diagnostics "
+            "can only be computed once a replay has genuinely finished."
+        )
+
+    _provenance_checks = (
+        ("code_commit_sha", replay.code_commit_sha, manifest.code_commit_sha),
+        ("model_version", replay.model_version, manifest.model_version),
+        ("feature_snapshot_id", replay.feature_snapshot_id, manifest.feature_snapshot_id),
+        ("market_data_snapshot_id", replay.market_data_snapshot_id, manifest.ohlc_hash),
+        ("signal_start_date", replay.signal_start_date, manifest.signal_start_date),
+        ("signal_end_date", replay.signal_end_date, manifest.signal_end_date),
+        ("outcome_data_end_date", replay.outcome_data_end_date, manifest.outcome_data_end_date),
+    )
+    for field_name, actual, expected in _provenance_checks:
+        if actual != expected:
+            raise DiagnosticsProvenanceError(
+                f"replay {replay_id!r}'s persisted {field_name} ({actual!r}) does not match the "
+                f"manifest's recorded {field_name} ({expected!r})."
+            )
+
+    try:
+        configuration = json.loads(replay.configuration_json)
+    except (TypeError, ValueError) as e:
+        raise DiagnosticsProvenanceError(
+            f"replay {replay_id!r}'s persisted configuration_json is not valid JSON: {e}."
+        ) from e
+    actual_manifest_artifact_hash = configuration.get("manifest_artifact_hash")
+    if actual_manifest_artifact_hash != manifest_artifact_hash:
+        raise DiagnosticsProvenanceError(
+            f"replay {replay_id!r}'s persisted configuration_json records manifest_artifact_hash "
+            f"{actual_manifest_artifact_hash!r}, which does not match the SUPPLIED manifest "
+            f"artifact file's actual hash ({manifest_artifact_hash!r}) -- this replay was not "
+            "provably run against this exact manifest artifact."
         )
 
     return DiagnosticsContext(

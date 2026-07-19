@@ -42,14 +42,21 @@ from stock_analyzer.sandbox.domain.recommendation import SELL_TARGET
 from stock_analyzer.sandbox.domain.replay import DEVELOPMENT_HISTORICAL_REPLAY, ReplayMetadata
 from stock_analyzer.sandbox.exp005.application.real_run import run_real_experiment
 from stock_analyzer.sandbox.exp005.config import VARIANT_B, Exp005Config, PortfolioConfig
+from stock_analyzer.sandbox.exp005.diagnostics import mfe_mae, opportunity_cost
 from stock_analyzer.sandbox.exp005.diagnostics._shared import full_market_calendar
 from stock_analyzer.sandbox.exp005.diagnostics.diagnostics import load_diagnostics_context
+from stock_analyzer.sandbox.exp005.diagnostics.financial_performance import (
+    compute_feasibility_verdict,
+    compute_financial_performance,
+)
 from stock_analyzer.sandbox.exp005.diagnostics.report_generator import compute_run_summary
 from stock_analyzer.sandbox.exp005.domain.admission import NO_CAPACITY
 from stock_analyzer.sandbox.exp005.infrastructure.frozen_artifacts import sha256_of_dataframe, sha256_of_file
+from stock_analyzer.sandbox.exp005.infrastructure.repository import PortfolioRepository
 from stock_analyzer.sandbox.exp005.infrastructure.schema import init_exp005_schema
 from stock_analyzer.sandbox.exp005.manifest import build_experiment_manifest, write_manifest_artifact
 from stock_analyzer.sandbox.infrastructure.schema import init_db
+from stock_analyzer.sandbox.infrastructure.sqlite_repository import SandboxRepository
 
 REPLAY_ID = "replay-stage15-synthetic"
 
@@ -165,6 +172,24 @@ def _universe_row(symbol: str) -> dict:
     return {"symbol": symbol, "adv20": 5_000_000.0, "spy_trend": "Bull", "spy_volatility_bucket": "Normal"}
 
 
+_MUTATION_GUARD_TABLES = (
+    "portfolio_admissions", "slot_reservations", "executions", "portfolio_equity_snapshots",
+    "virtual_positions", "virtual_transactions", "entry_orders",
+)
+
+
+def _table_fingerprint(conn: sqlite3.Connection) -> dict[str, tuple]:
+    """A cheap, exact snapshot of every row in every decision-time/accounting
+    table this diagnostics pass must never mutate -- compared before/after to
+    prove the diagnostics calls below are strictly read-only."""
+
+    fingerprint = {}
+    for table in _MUTATION_GUARD_TABLES:
+        rows = conn.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
+        fingerprint[table] = tuple(tuple(row) for row in rows)
+    return fingerprint
+
+
 def _make_connection() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -222,8 +247,6 @@ def test_synthetic_end_to_end_pipeline(tmp_path, monkeypatch):
     result = run_real_experiment(conn, manifest_path, feature_dir, config, replay_metadata_template, active_dates)
     assert result is not None
 
-    from stock_analyzer.sandbox.infrastructure.sqlite_repository import SandboxRepository
-
     sandbox_repo = SandboxRepository(conn)
     stored_replay = sandbox_repo.get_replay_metadata(REPLAY_ID)
     assert stored_replay is not None
@@ -239,17 +262,20 @@ def test_synthetic_end_to_end_pipeline(tmp_path, monkeypatch):
     assert positions[0].status == "CLOSED"
     assert positions[0].exit_reason == SELL_TARGET
 
-    from stock_analyzer.sandbox.exp005.infrastructure.repository import PortfolioRepository
-
     portfolio_repo = PortfolioRepository(conn)
     admissions = portfolio_repo.list_admissions_for_experiment(REPLAY_ID)
     no_capacity = [a for a in admissions if a.decision == NO_CAPACITY]
     assert len(no_capacity) == 2
     assert {a.symbol for a in no_capacity} == {"BBB"}
 
+    # --- Mutation guard: everything from here on is diagnostics-only. Snapshot
+    # every decision-time/accounting table now, and re-check bit-for-bit at the
+    # very end of the test that not one row changed.
+    fingerprint_before = _table_fingerprint(conn)
+
     # --- Stage 11: the real, unpatched diagnostics loading boundary, against the
     # database this real replay actually produced.
-    context = load_diagnostics_context(conn, manifest, feature_dir, REPLAY_ID)
+    context = load_diagnostics_context(conn, manifest_path, feature_dir, REPLAY_ID)
     calendar = full_market_calendar(context.prices_df)
 
     # --- Stage 12-13/14: the real per-item diagnostics and report aggregation.
@@ -275,3 +301,66 @@ def test_synthetic_end_to_end_pipeline(tmp_path, monkeypatch):
 
     assert summary.capacity.no_capacity_count == 2
     assert summary.capacity.hypothetical_fill_rate is not None  # BBB's own hypothetical-fill check ran without error
+
+    # --- Corrected target-exit MFE boundary (Stage 11-15 closure, finding 4):
+    # AAA's SELL_TARGET was an ambiguous intraday touch -- MFE must never be
+    # reported below the known realized return.
+    aaa_position = positions[0]
+    mfe_result = mfe_mae.compute_mfe_mae(context, aaa_position)
+    assert mfe_result.mfe_pct >= mfe_result.realized_or_mtm_return_pct
+    assert mfe_result.peak_to_exit_giveback_pct >= 0.0
+    assert mfe_result.exit_efficiency is None or mfe_result.exit_efficiency <= 1.0 + 1e-9
+
+    # --- Historical capacity occupants reconstructed from LOGICAL dates (Stage
+    # 11-15 closure, finding 3): BBB's first admission (idx0, same day as AAA's
+    # own acceptance) sees AAA as a still-pending RESERVATION; BBB's second
+    # admission (idx1, the day AAA actually fills) sees AAA as an OPEN POSITION
+    # instead, since entries are processed before that day's own admission phase.
+    bbb_admissions = sorted((a for a in admissions if a.symbol == "BBB"), key=lambda a: a.as_of_date)
+    assert len(bbb_admissions) == 2
+    day0_result = opportunity_cost.compute_opportunity_cost(context, bbb_admissions[0], calendar)
+    assert [r.symbol for r in day0_result.occupying_reservations] == ["AAA"]
+    assert day0_result.occupying_open_positions == ()
+    day1_result = opportunity_cost.compute_opportunity_cost(context, bbb_admissions[1], calendar)
+    assert day1_result.occupying_reservations == ()
+    assert [p.symbol for p in day1_result.occupying_open_positions] == ["AAA"]
+
+    # --- Censored observations excluded from complete-horizon aggregates
+    # (Stage 11-15 closure, finding 2): only 8 trailing sessions exist after
+    # AAA's exit, so the 20-session SELL horizon cannot be fully observed.
+    assert summary.sell.horizon_complete_count[20] < 20
+    assert (
+        summary.sell.horizon_censored_end_of_experiment_count[20]
+        + summary.sell.horizon_censored_missing_market_data_count[20]
+    ) > 0
+    # The 1-session horizon, by contrast, is fully observed.
+    assert summary.sell.horizon_complete_count[1] == 1
+    assert summary.sell.horizon_censored_end_of_experiment_count[1] == 0
+
+    # --- The new financial-performance report and feasibility verdict (Stage
+    # 11-15 closure, finding 1): the module that actually answers "did this
+    # policy make money," entirely absent before this closure cycle.
+    financial_report = compute_financial_performance(context, REPLAY_ID, VARIANT_B, None)
+    assert financial_report.starting_equity == pytest.approx(20_000.0)
+    assert financial_report.net_pnl > 0  # AAA's single closed trade was a gain
+    assert financial_report.closed_trade_count == 1
+    assert financial_report.win_count == 1
+    assert financial_report.loss_count == 0
+    assert financial_report.largest_closed_winning_trade is not None
+    assert financial_report.largest_closed_winning_trade.symbol == "AAA"
+
+    feasibility_criteria = context.manifest.feasibility_criteria
+    # No Variant D seeds were run in this synthetic fixture (out of scope for
+    # Stage 15 -- see the completion report), so the percentile comparison is
+    # explicitly undetermined, which must make the overall verdict undetermined
+    # too, never a silent pass.
+    verdict = compute_feasibility_verdict(financial_report, [], feasibility_criteria)
+    percentile_criterion = next(c for c in verdict.criteria if c.name == "beats_control_percentile")
+    assert percentile_criterion.passed is None
+    assert verdict.verdict is None
+    positive_pnl_criterion = next(c for c in verdict.criteria if c.name == "positive_net_pnl")
+    assert positive_pnl_criterion.passed is True
+
+    # --- No diagnostic call above mutated any decision-time/accounting table.
+    fingerprint_after = _table_fingerprint(conn)
+    assert fingerprint_after == fingerprint_before
