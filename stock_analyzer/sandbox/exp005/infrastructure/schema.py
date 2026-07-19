@@ -320,10 +320,29 @@ def _verify_v1_physical_invariants(conn: sqlite3.Connection) -> None:
     for table, expected_columns in _EXPECTED_COLUMNS.items():
         info_rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
         actual_by_name = {row["name"]: row for row in info_rows}
+        actual_column_set = set(actual_by_name)
+        expected_column_set = set(expected_columns)
 
-        missing_columns = set(expected_columns) - set(actual_by_name)
+        missing_columns = expected_column_set - actual_column_set
         if missing_columns:
             raise DecisionAuditSchemaIntegrityError(f"{table} is missing expected columns: {sorted(missing_columns)}")
+
+        # Strict equality, not just "no columns missing": this is a frozen pilot's
+        # physical schema, not a compatible superset -- an unrecognized extra
+        # column (whether a forbidden reverse-reference or anything else) means the
+        # database does not actually have the exact v1 shape its label claims.
+        extra_columns = actual_column_set - expected_column_set
+        if extra_columns:
+            forbidden_present = _FORBIDDEN_COLUMNS.get(table, set()) & extra_columns
+            if forbidden_present:
+                raise DecisionAuditSchemaIntegrityError(
+                    f"{table} has forbidden reverse-reference column(s) {sorted(forbidden_present)} -- "
+                    "this would reintroduce the foreign-key cycle Section 8.1's design deliberately avoids."
+                )
+            raise DecisionAuditSchemaIntegrityError(
+                f"{table} has unexpected column(s) not part of the frozen v1 physical shape: "
+                f"{sorted(extra_columns)}"
+            )
 
         for column, (expected_type, expected_not_null) in expected_columns.items():
             row = actual_by_name[column]
@@ -344,13 +363,6 @@ def _verify_v1_physical_invariants(conn: sqlite3.Connection) -> None:
         if actual_pk_columns != [expected_pk]:
             raise DecisionAuditSchemaIntegrityError(
                 f"{table} has primary key columns {actual_pk_columns}, expected [{expected_pk!r}]"
-            )
-
-        forbidden_present = _FORBIDDEN_COLUMNS.get(table, set()) & set(actual_by_name)
-        if forbidden_present:
-            raise DecisionAuditSchemaIntegrityError(
-                f"{table} has forbidden reverse-reference column(s) {sorted(forbidden_present)} -- this "
-                "would reintroduce the foreign-key cycle Section 8.1's design deliberately avoids."
             )
 
         actual_indexes = {row["name"] for row in conn.execute(f"PRAGMA index_list({table})").fetchall()}
@@ -392,20 +404,31 @@ def init_exp005_schema(conn: sqlite3.Connection) -> None:
     then verifies AND records the physical decision-audit schema identity -- never
     relies only on a bare Python constant nothing in the database actually checks.
 
+    Version is read and validated BEFORE any DDL runs (schema-init review,
+    corrective cycle): SQLite DDL statements executed via `executescript()`
+    auto-commit as they run and cannot be rolled back after the fact, so a database
+    recorded at an unsupported future version must be rejected with the connection
+    touched by nothing -- not even an idempotent `CREATE INDEX IF NOT EXISTS` that
+    happens to be missing from that database's actual (newer, unknown-to-us) shape.
+    Only once the version is confirmed supported does the DDL execute, followed by
+    physical verification and (for a genuinely fresh database) recording the
+    version.
+
     Must be called AFTER stock_analyzer.sandbox.infrastructure.schema.init_db (or
     connect()), which creates the core tables these four reference. PRAGMA
     foreign_keys must already be ON on `conn` (the caller's responsibility, matching
     the core schema module's own convention).
     """
 
-    conn.executescript(DECISION_AUDIT_DDL)
-
     current_version = _get_decision_audit_schema_version(conn)
     if current_version is not None and current_version > DECISION_AUDIT_SCHEMA_VERSION:
         raise UnsupportedDecisionAuditSchemaVersionError(
             f"database decision_audit_schema_version={current_version} is newer than this code "
-            f"understands (DECISION_AUDIT_SCHEMA_VERSION={DECISION_AUDIT_SCHEMA_VERSION})."
+            f"understands (DECISION_AUDIT_SCHEMA_VERSION={DECISION_AUDIT_SCHEMA_VERSION}) -- refused "
+            "before executing any decision-audit DDL, so this database is left byte-for-byte unchanged."
         )
+
+    conn.executescript(DECISION_AUDIT_DDL)
 
     _verify_v1_physical_invariants(conn)
 

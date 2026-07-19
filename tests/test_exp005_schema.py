@@ -15,6 +15,7 @@ from stock_analyzer.sandbox.exp005.infrastructure.schema import (
     DECISION_AUDIT_SCHEMA_VERSION,
     DecisionAuditSchemaIntegrityError,
     UnsupportedDecisionAuditSchemaVersionError,
+    _get_decision_audit_schema_version,
     _verify_v1_physical_invariants,
     init_exp005_schema,
 )
@@ -387,6 +388,107 @@ def test_unsupported_future_decision_audit_version_is_refused():
         init_exp005_schema(conn)
 
 
+# --------------------------------------- DDL-before-version-check ordering defect
+#
+# init_exp005_schema used to run executescript(DECISION_AUDIT_DDL) BEFORE reading
+# and validating decision_audit_schema_version. Because SQLite DDL statements
+# auto-commit as they execute (executescript cannot be rolled back after the fact),
+# a database recorded at an unsupported FUTURE version could be physically mutated
+# -- e.g. an idempotent CREATE INDEX IF NOT EXISTS silently adding an index that
+# database's actual (newer, unknown) shape didn't have -- before the version
+# exception was ever raised. Fixed by reading/validating the version first.
+
+
+def _snapshot(conn: sqlite3.Connection) -> tuple[frozenset, frozenset]:
+    """(sqlite_master rows, schema_meta rows) -- enough to detect ANY DDL or data
+    mutation, not just the specific missing-index case under test."""
+
+    master = frozenset(
+        (row["type"], row["name"], row["sql"]) for row in conn.execute("SELECT type, name, sql FROM sqlite_master").fetchall()
+    )
+    meta = frozenset((row["key"], row["value"]) for row in conn.execute("SELECT key, value FROM schema_meta").fetchall())
+    return master, meta
+
+
+def test_unsupported_future_version_with_missing_ddl_object_causes_zero_mutation():
+    """Direct regression test: a database labeled with an unsupported future
+    version, whose actual physical shape happens to be missing something the
+    current code's DDL would (idempotently) create, must be rejected with the
+    connection left byte-for-byte/logically unchanged -- not merely "eventually
+    raises after already mutating.\""""
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    init_db(conn)
+    # A plausible "future version" physical shape: otherwise DDL-compatible, but
+    # missing one index the CURRENT code's DDL would create via IF NOT EXISTS.
+    mutated_ddl = DECISION_AUDIT_DDL.replace(
+        "CREATE INDEX IF NOT EXISTS idx_executions_order_id ON executions(order_id);\n", "", 1
+    )
+    conn.executescript(mutated_ddl)
+    conn.execute("INSERT INTO schema_meta(key, value) VALUES ('decision_audit_schema_version', '99')")
+    conn.commit()
+
+    before = _snapshot(conn)
+    with pytest.raises(UnsupportedDecisionAuditSchemaVersionError):
+        init_exp005_schema(conn)
+    after = _snapshot(conn)
+
+    assert before == after, "database was mutated before the unsupported-version rejection"
+    # Specifically confirm the index that DDL would have (idempotently) added is
+    # still absent -- the exact mutation this defect used to allow.
+    indexes = {row["name"] for row in conn.execute("PRAGMA index_list(executions)").fetchall()}
+    assert "idx_executions_order_id" not in indexes
+
+
+def test_unsupported_future_version_with_no_physical_drift_also_causes_zero_mutation():
+    """Same guarantee even when the future-version database's physical shape is
+    otherwise fully DDL-compatible: no CREATE TABLE/INDEX statement should ever run
+    against a database whose version we have not yet confirmed we understand."""
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    init_db(conn)
+    init_exp005_schema(conn)
+    conn.execute(
+        "UPDATE schema_meta SET value = '99' WHERE key = 'decision_audit_schema_version'"
+    )
+    conn.commit()
+
+    before = _snapshot(conn)
+    with pytest.raises(UnsupportedDecisionAuditSchemaVersionError):
+        init_exp005_schema(conn)
+    after = _snapshot(conn)
+
+    assert before == after
+
+
+# --------------------------------------------------- strict column-set equality
+
+
+@pytest.mark.parametrize(
+    "table,extra_column_ddl",
+    [
+        ("portfolio_admissions", "unexpected_extra_column TEXT"),
+        ("slot_reservations", "unexpected_extra_column TEXT"),
+        ("portfolio_equity_snapshots", "unexpected_extra_column TEXT"),
+        ("executions", "unexpected_extra_column TEXT"),
+    ],
+)
+def test_unexpected_extra_column_on_any_table_is_rejected(table: str, extra_column_ddl: str):
+    """The frozen pilot's physical schema is matched EXACTLY, not as a compatible
+    superset: an unrecognized extra column on any of the four tables (not just the
+    two named forbidden columns on portfolio_admissions) must fail closed."""
+
+    mutated_ddl = DECISION_AUDIT_DDL.replace(f"CREATE TABLE IF NOT EXISTS {table} (", f"CREATE TABLE IF NOT EXISTS {table} ({extra_column_ddl}, ", 1)
+    assert mutated_ddl != DECISION_AUDIT_DDL
+    conn = _init_with_mutated_ddl(mutated_ddl)
+    with pytest.raises(DecisionAuditSchemaIntegrityError, match="unexpected_extra_column"):
+        init_exp005_schema(conn)
+
+
 def test_physical_verification_catches_a_falsely_labeled_database():
     """Never rely only on the version label: a database claiming
     decision_audit_schema_version=1 but missing the expected integer-unit columns
@@ -414,6 +516,37 @@ def test_physical_verification_catches_a_falsely_labeled_database():
     conn.commit()
     with pytest.raises(DecisionAuditSchemaIntegrityError):
         init_exp005_schema(conn)
+
+
+def test_malformed_fresh_database_is_rejected_without_ever_being_relabeled_v1():
+    """Distinct from the test above (which pre-labels the malformed database as
+    v1): here NO version is recorded yet -- init_exp005_schema must still reject
+    the malformed physical shape, and critically must NOT fall back to writing
+    decision_audit_schema_version=1 just because verification failed on a
+    fresh-looking (unlabeled) database. A failed verification must never result in
+    a false v1 label being recorded."""
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    init_db(conn)
+    conn.executescript(
+        """
+        CREATE TABLE portfolio_admissions (admission_id TEXT PRIMARY KEY, replay_id TEXT, as_of_date TEXT);
+        CREATE TABLE slot_reservations (reservation_id TEXT PRIMARY KEY, replay_id TEXT, status TEXT, created_at TEXT);
+        CREATE TABLE portfolio_equity_snapshots (snapshot_id TEXT PRIMARY KEY, as_of_date TEXT);
+        CREATE TABLE executions (
+            execution_id TEXT PRIMARY KEY, order_id TEXT, position_id TEXT, candidate_id TEXT,
+            replay_id TEXT, execution_date TEXT, raw_market_fill_price REAL
+        );
+        """
+    )
+    conn.commit()
+
+    assert _get_decision_audit_schema_version(conn) is None
+    with pytest.raises(DecisionAuditSchemaIntegrityError):
+        init_exp005_schema(conn)
+    assert _get_decision_audit_schema_version(conn) is None, "a failed verification must never record a v1 label"
 
 
 # --------------------------------------------- malformed-fixture, fail-closed suite
