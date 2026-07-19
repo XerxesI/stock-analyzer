@@ -61,7 +61,13 @@ class EntryService:
                 # execution session is the signal date's next trading session.
                 continue
 
-            prior_attempts = self._repo.get_attempts_for_order(order.order_id)
+            # Only attempts from EARLIER sessions count toward "prior" -- if today's
+            # own attempt already exists (a replay resume reprocessing this same date
+            # after an interruption between insert_entry_order_attempt and the status
+            # update that follows it), it must not inflate attempt_number below and
+            # cause a premature EXPIRED decision that would not have happened in an
+            # uninterrupted run.
+            prior_attempts = [a for a in self._repo.get_attempts_for_order(order.order_id) if a.attempt_date < as_of_date]
             if len(prior_attempts) >= self._config.entry_validity_sessions:
                 continue  # already resolved in a prior run; defensive, should not happen
 

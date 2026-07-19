@@ -19,6 +19,32 @@ No future date may influence a decision made on date T: each day's processing re
 only repository state already committed from prior days, and price data is always
 truncated to <= T by market_data_adapter.fetch_as_of.
 
+Resume semantics
+-----------------
+Calling run() again on a replay_id that is RUNNING or FAILED (rather than COMPLETED)
+is a resume, not a rerun. The contract:
+  - The caller always supplies the ORIGINAL, complete trading_dates list -- the same
+    one used (or intended) for the first attempt. ReplayService decides internally
+    what to skip.
+  - Every date up to and including replay_metadata.last_completed_date already
+    committed its FULL processing (entries + monitoring + candidate generation, if a
+    signal day) in a prior attempt and is skipped entirely -- it is never
+    reprocessed, so it can never "see" state from a date that, from its own point in
+    time, had not happened yet (see _migrate_v1_to_v2 / mark_date_completed).
+  - The one date strictly after last_completed_date (if any work happened on it
+    before the prior attempt stopped) is reprocessed from scratch. Every write in
+    that reprocessing must be idempotent: an identical pre-existing row (same
+    candidate_id/order_id/position_id/etc, same content) is a safe no-op; a
+    conflicting pre-existing row (same id, different content) must raise loudly
+    rather than silently diverge from what is already persisted -- see
+    SandboxRepository.insert_ranked_candidate and RankedCandidateConflictError.
+  - A configuration mismatch (different code/model/data/date-boundaries) is rejected
+    outright by _require_matching_configuration -- resume never continues a different
+    configuration into a partially-populated database.
+  - The end result of an interrupted-then-resumed replay must be identical (modulo
+    non-deterministic timestamp columns) to an uninterrupted run of the same
+    configuration -- see tests/test_sandbox_replay_service.py's comparison test.
+
 See docs/09_experiments/EXP-004_Sandbox_Historical_Replay.md for the pre-registration
 and classification (DEVELOPMENT_HISTORICAL_REPLAY -- NOT INDEPENDENT MODEL VALIDATION
 -- NOT FOR POLICY OPTIMIZATION).
@@ -114,6 +140,7 @@ class ReplayService:
         self._validate_trading_dates(replay, trading_dates)
 
         stored, created = self._repo.create_replay_metadata(replay)
+        resume_from: date | None = None
         if not created:
             if stored.status == COMPLETED:
                 raise ReplayAlreadyCompletedError(
@@ -126,9 +153,18 @@ class ReplayService:
             # code/model/data could silently continue into a database populated
             # under a different configuration.
             self._require_matching_configuration(replay, stored)
+            # Resume watermark: every date up to and including last_completed_date
+            # committed its FULL processing before the prior attempt stopped (crashed
+            # or failed) -- skip those entirely and only reprocess the date after it
+            # onward. This is what makes resume safe: the one date that may have been
+            # left partially processed is redone from scratch (each service's own
+            # idempotency handles that), but no already-completed date is ever
+            # touched again, so it can never "see" state from dates that, from its
+            # own point in time, had not happened yet.
+            resume_from = stored.last_completed_date
 
         try:
-            day_results = self._process_dates(replay, trading_dates, progress_every)
+            day_results = self._process_dates(replay, trading_dates, progress_every, resume_from)
         except Exception:
             self._repo.fail_replay(replay.replay_id, datetime.now(timezone.utc))
             raise
@@ -138,16 +174,22 @@ class ReplayService:
 
         return ReplayRunResult(
             replay_id=replay.replay_id,
-            dates_processed=trading_dates,
+            dates_processed=[r.as_of_date for r in day_results],
             day_results=day_results,
             unresolved_position_ids=unresolved,
         )
 
     def _process_dates(
-        self, replay: ReplayMetadata, trading_dates: list[date], progress_every: int | None
+        self,
+        replay: ReplayMetadata,
+        trading_dates: list[date],
+        progress_every: int | None,
+        resume_from: date | None = None,
     ) -> list[ReplayDayResult]:
+        dates_to_process = [d for d in trading_dates if resume_from is None or d > resume_from]
+
         day_results: list[ReplayDayResult] = []
-        for position, as_of_date in enumerate(trading_dates, start=1):
+        for position, as_of_date in enumerate(dates_to_process, start=1):
             entry_outcomes = self._entries.process_entries(as_of_date)
             monitoring_outcomes = self._monitoring.monitor(as_of_date)
 
@@ -167,10 +209,11 @@ class ReplayService:
                     n_shadow_candidates=n_shadow,
                 )
             )
+            self._repo.mark_date_completed(replay.replay_id, as_of_date)
 
-            if progress_every and (position % progress_every == 0 or position == len(trading_dates)):
+            if progress_every and (position % progress_every == 0 or position == len(dates_to_process)):
                 print(
-                    f"[replay] {position}/{len(trading_dates)} dates -- {as_of_date} "
+                    f"[replay] {position}/{len(dates_to_process)} dates -- {as_of_date} "
                     f"(signal_day={is_signal_day})",
                     flush=True,
                 )

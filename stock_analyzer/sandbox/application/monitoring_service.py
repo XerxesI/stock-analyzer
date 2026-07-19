@@ -115,7 +115,7 @@ class MonitoringService:
         low_price = float(bar["Low"])
         close_price = float(bar["Close"])
 
-        holding_day_count = self._next_holding_day_count(position)
+        holding_day_count = self._next_holding_day_count(position, as_of_date)
 
         target_hit, exit_price = self._check_target(position, open_price, high_price)
         time_exit = holding_day_count >= self._config.holding_horizon_days
@@ -197,9 +197,18 @@ class MonitoringService:
             return True, round_price(position.target_price)
         return False, None
 
-    def _next_holding_day_count(self, position: VirtualPosition) -> int:
+    def _next_holding_day_count(self, position: VirtualPosition, as_of_date: date) -> int:
+        """Counts only snapshots strictly BEFORE as_of_date. A plain len(existing)+1
+        would double-count today's own snapshot if it already exists from a prior,
+        interrupted attempt at processing this same date (a replay resume reprocesses
+        the full trading_dates list, including a date whose snapshot already
+        persisted before the crash) -- silently inflating the holding day by one and
+        risking a premature SELL_TIME decision that would not have happened in an
+        uninterrupted run."""
+
         existing = self._repo.get_snapshots_for_position(position.position_id)
-        return len(existing) + 1
+        prior = [s for s in existing if s.as_of_date < as_of_date]
+        return len(prior) + 1
 
     def _close_position(
         self,

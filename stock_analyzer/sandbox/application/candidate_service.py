@@ -156,23 +156,18 @@ class CandidateService:
         # Phase 2: decide the final selection (rank-limit cap, already-open/pending
         # exclusion), still in memory -- no orders yet, since entry_orders.candidate_id
         # has a foreign key into ranked_candidates and no candidate row exists yet.
-        final_candidates, actionable = self._decide_selection(drafts)
+        final_candidates, actionable = self._decide_selection(drafts, as_of_date)
 
         # Phase 3: persist every shadow row exactly once, with its final values.
-        # Each candidate_id is freshly derived from (as_of_date, symbol) in this same
-        # call, so a False return here can only mean the insert was silently rejected
-        # (e.g. a constraint violation swallowed by INSERT OR IGNORE) -- never a
-        # legitimate "already exists." Raise loudly rather than let the in-memory
-        # result (used by callers and reports) silently disagree with what is
-        # actually in the database.
+        # insert_ranked_candidate itself distinguishes a legitimate resume (this same
+        # candidate_id already persisted with IDENTICAL content -- e.g. a replay
+        # resuming and reprocessing an already-completed signal date) from a genuine
+        # conflict (same candidate_id, different content), raising
+        # RankedCandidateConflictError only for the latter. Either way, `candidate`
+        # itself (used below and by callers/reports) is exactly what is now
+        # persisted, so no further check is needed here.
         for candidate in final_candidates:
-            inserted = self._repo.insert_ranked_candidate(candidate)
-            if not inserted:
-                raise RuntimeError(
-                    f"ranked_candidates insert for {candidate.candidate_id} was silently rejected "
-                    "(constraint violation swallowed by INSERT OR IGNORE) -- in-memory result would "
-                    "no longer match persisted state."
-                )
+            self._repo.insert_ranked_candidate(candidate)
 
         # Phase 4: now that the candidate rows exist, create entry orders (and
         # BUY_PENDING recommendations) for the selected symbols only.
@@ -243,7 +238,9 @@ class CandidateService:
             else None,
         )
 
-    def _decide_selection(self, drafts: list[RankedCandidate]) -> tuple[list[RankedCandidate], list[RankedCandidate]]:
+    def _decide_selection(
+        self, drafts: list[RankedCandidate], as_of_date: date
+    ) -> tuple[list[RankedCandidate], list[RankedCandidate]]:
         """Decides the final actionable/exclusion_reason for every draft, in rank
         order, entirely in memory -- no entry orders are created here (their
         candidate_id foreign key requires the candidate row to already be persisted,
@@ -264,7 +261,7 @@ class CandidateService:
             if self._repo.has_open_position_for_symbol(draft.symbol):
                 final_candidates.append(self._finalize_excluded(draft, ALREADY_OPEN_POSITION))
                 continue
-            if self._repo.has_pending_order_for_symbol(draft.symbol):
+            if self._repo.has_pending_order_for_symbol(draft.symbol, before_date=as_of_date):
                 final_candidates.append(self._finalize_excluded(draft, ALREADY_PENDING_CANDIDATE))
                 continue
 

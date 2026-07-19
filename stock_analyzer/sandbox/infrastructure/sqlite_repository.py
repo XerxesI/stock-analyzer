@@ -1,9 +1,19 @@
 """SQLite-backed repository for the Recommendation Sandbox.
 
 The application layer depends on this class's method signatures only, not on SQLite
-specifics, so the storage engine could later be swapped (ADR-006). All "insert"
+specifics, so the storage engine could later be swapped (ADR-006). Most "insert"
 methods for append-only tables use INSERT OR IGNORE and report whether a row was
-newly created, which is how the application layer implements idempotent daily runs.
+newly created, which is how the application layer implements idempotent daily runs
+(a duplicate key there always means "this exact event was already recorded" --
+attempts/snapshots/recommendations/transactions/data-quality-events are each keyed by
+an entity id plus a date, and re-deriving the same entity+date deterministically
+produces the same content, so no separate conflict check is needed for them).
+
+insert_ranked_candidate is the one exception: it explicitly checks the existing row's
+content before writing, distinguishing an identical pre-existing row (safe resume,
+returns False) from a genuine conflict (raises RankedCandidateConflictError). See its
+docstring -- this was added after a resume defect where a blanket "any rowcount==0
+means corruption" assumption in the application layer broke legitimate resumes.
 """
 
 from __future__ import annotations
@@ -31,6 +41,46 @@ def _dt(value: str | None) -> datetime | None:
 
 def _b(value: int | None) -> bool | None:
     return None if value is None else bool(value)
+
+
+_FLOAT_TOLERANCE = 1e-6
+
+
+def _floats_close(a: float | None, b: float | None) -> bool:
+    if a is None or b is None:
+        return a is None and b is None
+    return abs(a - b) <= _FLOAT_TOLERANCE * max(1.0, abs(a), abs(b))
+
+
+def _ranked_candidate_content_matches(existing: RankedCandidate, new: RankedCandidate) -> bool:
+    """True if `existing` and `new` describe the same logical event (same symbol/date
+    producing the same ranking/data-quality outcome) -- the case a replay resume must
+    treat as an idempotent no-op. False means a genuine conflict: the same
+    candidate_id (same as_of_date + symbol) produced DIFFERENT content across two
+    runs, which is not safe to silently accept."""
+
+    return (
+        existing.symbol == new.symbol
+        and existing.as_of_date == new.as_of_date
+        and existing.daily_rank == new.daily_rank
+        and _floats_close(existing.model_score, new.model_score)
+        and _floats_close(existing.signal_close, new.signal_close)
+        and _floats_close(existing.atr14, new.atr14)
+        and _floats_close(existing.max_entry_price, new.max_entry_price)
+        and existing.shadow_top10 == new.shadow_top10
+        and existing.actionable == new.actionable
+        and existing.exclusion_reason == new.exclusion_reason
+        and existing.adv_quintile == new.adv_quintile
+        and existing.market_regime == new.market_regime
+    )
+
+
+class RankedCandidateConflictError(RuntimeError):
+    """Raised by insert_ranked_candidate when a row for this candidate_id already
+    exists with DIFFERENT content than what is being inserted now. A plain repeat of
+    IDENTICAL content is the expected, safe outcome of resuming a replay that already
+    persisted this signal date -- see insert_ranked_candidate and
+    application/candidate_service.py."""
 
 
 class SandboxRepository:
@@ -110,8 +160,32 @@ class SandboxRepository:
 
     # --------------------------------------------------------- candidates
     def insert_ranked_candidate(self, candidate: RankedCandidate) -> bool:
-        cur = self._conn.execute(
-            "INSERT OR IGNORE INTO ranked_candidates "
+        """Returns True if this row was newly inserted, False if a row with this
+        candidate_id already existed and has IDENTICAL content (the expected outcome
+        when a replay resume reprocesses an already-persisted signal date -- see
+        application/candidate_service.py). Raises RankedCandidateConflictError if a
+        row with this candidate_id already exists with DIFFERENT content, since that
+        is not a safe resume: the same (as_of_date, symbol) produced two different
+        results across runs and silently keeping the first would disagree with the
+        in-memory result the caller is about to use.
+
+        Checks existence explicitly (rather than relying on INSERT OR IGNORE's
+        rowcount, which cannot distinguish an identical pre-existing row from a
+        conflicting one) and uses a plain INSERT for the actual write, so any other,
+        genuinely unexpected constraint violation surfaces as sqlite3.IntegrityError
+        instead of being silently swallowed."""
+
+        existing = self.get_candidate(candidate.candidate_id)
+        if existing is not None:
+            if _ranked_candidate_content_matches(existing, candidate):
+                return False
+            raise RankedCandidateConflictError(
+                f"ranked_candidates row for {candidate.candidate_id} already exists with "
+                f"different content than the candidate being inserted now -- "
+                f"existing={existing!r}, new={candidate!r}."
+            )
+        self._conn.execute(
+            "INSERT INTO ranked_candidates "
             "(candidate_id, run_id, as_of_date, symbol, daily_rank, model_score, signal_close, "
             " atr14, max_entry_price, shadow_top10, actionable, exclusion_reason, adv_quintile, "
             " market_regime, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -134,7 +208,7 @@ class SandboxRepository:
             ),
         )
         self._conn.commit()
-        return cur.rowcount > 0
+        return True
 
     def get_candidates_for_date(self, as_of_date: date) -> list[RankedCandidate]:
         rows = self._conn.execute(
@@ -213,9 +287,20 @@ class SandboxRepository:
         rows = self._conn.execute("SELECT * FROM entry_orders WHERE status = 'PENDING'").fetchall()
         return [self._row_to_order(r) for r in rows]
 
-    def has_pending_order_for_symbol(self, symbol: str) -> bool:
+    def has_pending_order_for_symbol(self, symbol: str, before_date: date) -> bool:
+        """Only counts a PENDING order whose signal_date is strictly BEFORE
+        before_date. Candidate selection calls this with the signal day currently
+        being decided -- an order with signal_date == that same day can only be this
+        same candidate-generation call's own, already-created order from an earlier,
+        interrupted attempt at this date (replay resume reprocesses the full date
+        list, including a date whose Phase 4 order creation partially completed
+        before crashing). Counting it would wrongly exclude a symbol as
+        "already pending" because of its own not-yet-finished selection, diverging
+        from what an uninterrupted run would have decided."""
+
         row = self._conn.execute(
-            "SELECT 1 FROM entry_orders WHERE symbol = ? AND status = 'PENDING' LIMIT 1", (symbol,)
+            "SELECT 1 FROM entry_orders WHERE symbol = ? AND status = 'PENDING' AND signal_date < ? LIMIT 1",
+            (symbol, before_date.isoformat()),
         ).fetchone()
         return row is not None
 
@@ -709,8 +794,9 @@ class SandboxRepository:
             "INSERT INTO replay_metadata "
             "(replay_id, classification, code_commit_sha, model_version, feature_snapshot_id, "
             " market_data_snapshot_id, signal_start_date, signal_end_date, outcome_data_end_date, "
-            " configuration_json, configuration_hash, status, started_at, completed_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " configuration_json, configuration_hash, status, started_at, completed_at, "
+            " last_completed_date) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 replay.replay_id,
                 replay.classification,
@@ -726,6 +812,7 @@ class SandboxRepository:
                 replay.status,
                 replay.started_at.isoformat(),
                 replay.completed_at.isoformat() if replay.completed_at else None,
+                replay.last_completed_date.isoformat() if replay.last_completed_date else None,
             ),
         )
         self._conn.commit()
@@ -752,6 +839,7 @@ class SandboxRepository:
             status=row["status"],
             started_at=_dt(row["started_at"]),
             completed_at=_dt(row["completed_at"]),
+            last_completed_date=_d(row["last_completed_date"]),
         )
 
     def complete_replay(self, replay_id: str, completed_at: datetime) -> None:
@@ -765,5 +853,17 @@ class SandboxRepository:
         self._conn.execute(
             "UPDATE replay_metadata SET status='FAILED', completed_at=? WHERE replay_id=?",
             (completed_at.isoformat(), replay_id),
+        )
+        self._conn.commit()
+
+    def mark_date_completed(self, replay_id: str, completed_date: date) -> None:
+        """Advances the resume watermark after a date's FULL processing (entries +
+        monitoring + candidate generation, if a signal day) has committed
+        successfully. ReplayService uses this to skip already-completed dates on
+        resume -- see application/replay_service.py."""
+
+        self._conn.execute(
+            "UPDATE replay_metadata SET last_completed_date=? WHERE replay_id=?",
+            (completed_date.isoformat(), replay_id),
         )
         self._conn.commit()

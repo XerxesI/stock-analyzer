@@ -31,3 +31,9 @@ class ReplayMetadata:
     feature_snapshot_id: str | None = None
     market_data_snapshot_id: str | None = None
     completed_at: datetime | None = None
+    # The last trading date whose FULL day processing (entries + monitoring +
+    # candidate generation, if a signal day) committed successfully. None means no
+    # date has completed yet. A resume uses this watermark to skip every
+    # already-completed date and reprocess only the one date that may have been
+    # partially done when the process died -- see application/replay_service.py.
+    last_completed_date: date | None = None
