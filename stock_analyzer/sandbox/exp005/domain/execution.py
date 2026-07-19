@@ -1,12 +1,14 @@
 """Immutable per-fill execution audit record -- Revision 5, Section 18.
 
-Sign convention (Stage 5, frozen here as the single source of truth for the whole
-package): `quantity`, `gross_notional`, `commission`, `slippage_cost` are always
+Every numeric field is an exact integer, in the fixed-point units defined by
+domain/units.py -- never a float, never a SQLite REAL. Sign convention (Stage 5,
+frozen here as the single source of truth for the whole package): `quantity_units`,
+`gross_notional_units`, `commission_units`, `slippage_cost_units` are always
 non-negative MAGNITUDES; direction is carried entirely by `side` and by the signed
-`net_cash_flow` (negative for BUY -- cash leaves the portfolio; positive for SELL --
-cash enters it). Both `raw_market_fill_price` (ADR-007's unadjusted simulated price)
-and `effective_fill_price` (slippage-adjusted) are always persisted; neither is ever
-derived from or overwrites the other after the fact.
+`net_cash_flow_units` (negative for BUY -- cash leaves the portfolio; positive for
+SELL -- cash enters it). Both `raw_market_fill_price_units` (ADR-007's unadjusted
+simulated price) and `effective_fill_price_units` (slippage-adjusted) are always
+persisted; neither is ever derived from or overwrites the other after the fact.
 """
 
 from __future__ import annotations
@@ -31,14 +33,14 @@ class Execution:
     side: str
     decision_date: date
     execution_date: date
-    raw_market_fill_price: float
-    effective_fill_price: float
-    quantity: float
-    gross_notional: float
-    commission: float
-    slippage_rate: float
-    slippage_cost: float
-    net_cash_flow: float
+    raw_market_fill_price_units: int  # PRICE_SCALE
+    effective_fill_price_units: int  # PRICE_SCALE
+    quantity_units: int  # QUANTITY_SCALE
+    gross_notional_units: int  # MONEY_SCALE
+    commission_units: int  # MONEY_SCALE
+    slippage_rate_units: int  # RATE_SCALE (basis points)
+    slippage_cost_units: int  # MONEY_SCALE
+    net_cash_flow_units: int  # MONEY_SCALE
     fill_reason: str
     market_data_snapshot_id: str
     created_at: datetime
