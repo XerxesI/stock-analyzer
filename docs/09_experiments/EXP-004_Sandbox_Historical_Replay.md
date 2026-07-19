@@ -376,6 +376,67 @@ See git history: the actionable-flag fix, the replay engine/metrics (Part 1
 pre-registration), this Part 2 result, and the holding/MFE/MAE staleness fix are each
 separate commits.
 
+## Post-hoc infrastructure fixes: replay resume + schema migration (2026-07-19)
+
+A second independent audit round, following the Bug 1/Bug 2 fixes above, found that
+the P0 fix's own defensive code (`candidate_service.py` Phase 3: raise on any `False`
+return from `insert_ranked_candidate`) broke replay **resume** -- a replay with one
+already-persisted signal date failed when resumed with the same configuration,
+because `False` can legitimately mean "this exact candidate was already persisted in
+a prior, interrupted attempt," not just "silently rejected." The audit separately
+found that `SCHEMA_VERSION` had been bumped to `2` in code (for the Bug 1 nullable
+`signal_close` fix) without any actual migration: `init_db()`'s
+`CREATE TABLE IF NOT EXISTS` is a no-op on an existing table, so a pre-existing v1
+database file would be relabelled `schema_version=2` in `schema_meta` while its
+physical `ranked_candidates.signal_close` column stayed `NOT NULL`.
+
+**Neither defect affects this experiment's results.** EXP-004's own replay ran to
+completion in a single, uninterrupted pass (resume was never exercised), and its
+database file was never re-opened by the fixed code (`schema_meta.schema_version`
+there still correctly reads `'1'`, matching its actual, unmigrated physical schema --
+verified by SHA-256 checksum before and after this work, unchanged:
+`9f4d579df1c39f436ca28a35f768d201d89005fca36b43db3872fbf658c28882`).
+
+Fixes, both scoped strictly to sandbox infrastructure (no ranking/entry/exit/
+portfolio policy changed):
+
+1. **Resume conflict handling** -- `SandboxRepository.insert_ranked_candidate` now
+   explicitly checks any existing row's content before writing: an identical
+   pre-existing row (the expected outcome of resuming an already-persisted signal
+   date) is a safe no-op; a row with the same `candidate_id` but different content
+   raises `RankedCandidateConflictError` rather than being silently accepted or
+   mistaken for corruption.
+2. **Resume watermark** -- `replay_metadata` gained `last_completed_date`, advanced
+   only after a date's FULL processing (entries + monitoring + candidate generation)
+   commits. `ReplayService.run()` uses it to skip every already-completed date on
+   resume and reprocess only the one date that may have been left partially done.
+   This was necessary, not optional: a full-history reprocess on resume let an
+   *earlier* date's candidate selection see positions/orders opened on *later* dates
+   from the pre-crash attempt (a genuine point-in-time leak), which a comparison test
+   (below) caught directly. Full resume semantics are documented in
+   `application/replay_service.py`'s module docstring.
+3. **Real v1 -> v2 schema migration** -- `init_db()` now reads the database's actual
+   recorded `schema_version` and, if it is `1`, runs an explicit, transactional
+   migration (`_migrate_v1_to_v2` in `infrastructure/schema.py`): rebuilds
+   `ranked_candidates` with `signal_close` nullable (SQLite cannot `ALTER` a `NOT
+   NULL` constraint in place), adds `replay_metadata.last_completed_date`, and
+   verifies `PRAGMA foreign_key_check` before committing. Any failure rolls back
+   completely and leaves the database labelled `v1`, matching its true physical
+   schema -- never silently relabelled.
+
+New tests (`tests/test_sandbox_replay_service.py`,
+`tests/test_sandbox_schema_migration.py`):
+`test_resume_after_genuine_partial_signal_day_succeeds`,
+`test_interrupted_and_resumed_replay_matches_uninterrupted_replay` (byte-for-byte
+comparison, excluding only timestamp columns, of every persisted table between an
+uninterrupted replay and a realistically interrupted-then-resumed one),
+`test_conflicting_ranked_candidate_content_is_rejected`,
+`test_migration_produces_v2_schema_and_preserves_data`,
+`test_null_signal_close_can_be_persisted_after_migration`,
+`test_repeated_init_after_migration_is_idempotent`,
+`test_migration_rolls_back_and_does_not_relabel_on_failure`. All 66 sandbox tests
+pass (`tests/test_sandbox_*.py`).
+
 ## Remaining blockers before `FORWARD_PAPER_EVALUATION`
 
 1. **`DailyPointInTimeUniverseProvider`** (MVP 2 spec Section 19) -- not implemented.
