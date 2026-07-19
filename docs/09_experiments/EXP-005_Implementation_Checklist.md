@@ -191,7 +191,30 @@ different names. This is a naming difference only, not a behavioral deviation.
       loading boundary, re-verifies the frozen prices artifact against the
       manifest) + import-isolation test (statically walks the import graph of
       every decision-time module, direct and transitive, per Section 26)
-- [ ] Stage 12
+- [x] Stage 12 -- MFE/MAE diagnostics (exp005/diagnostics/mfe_mae.py::compute_mfe_mae).
+      Holding window derived post-hoc from the frozen prices artifact, per
+      Section 20's entry/exit-session ambiguity rule: FILLED_AT_OPEN includes
+      the entry session, FILLED_AT_CEILING excludes it (window starts the next
+      session); for closed positions SELL_TIME includes the exit session,
+      SELL_TARGET includes it only when that session's own Open >= target_price
+      (reconstructed via the same open-first branch MonitoringService.
+      _check_target uses -- otherwise the exit session is excluded and the
+      window ends the previous session); open positions run through
+      manifest.outcome_data_end_date. effective_entry_price/effective_exit_price
+      always come from EXP-005's own executions ledger, never core's raw
+      entry_price/exit_price. An empty window (possible when a
+      FILLED_AT_CEILING entry is immediately followed by an ambiguous
+      SELL_TARGET exit on the very next session) raises
+      MfeMaeComputationError rather than silently reporting zero/undefined
+      values; exit_efficiency is None (not inf/NaN) when mfe_pct == 0.
+      tests/test_exp005_mfe_mae.py: 10 hand-computed scenarios (unambiguous
+      open+time exit baseline; ceiling-entry exclusion; unambiguous
+      open-triggered target exit; ambiguous intraday-triggered target exit
+      exclusion; open-position window to outcome_data_end_date; open position
+      with no current_close falling back to entry price; empty-window
+      MfeMaeComputationError; exit_efficiency=None at mfe_pct==0; missing
+      BUY/SELL execution errors), all pass with exact hand-computed
+      MFE/MAE/session-count values.
 - [ ] Stage 13
 - [ ] Stage 14
 - [ ] Stage 15 (synthetic fixture + completion report)
