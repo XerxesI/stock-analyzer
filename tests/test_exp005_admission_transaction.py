@@ -1,5 +1,5 @@
 """Tests for EXP-005's atomic admission transaction and orphan checker (Revision 5,
-Stage 4).
+Stage 4, corrected in the Stage 2-5 review cycle).
 """
 
 from __future__ import annotations
@@ -8,6 +8,7 @@ import os
 import sqlite3
 import tempfile
 import threading
+from dataclasses import replace
 from datetime import date, datetime, timezone
 
 import pytest
@@ -15,8 +16,11 @@ import pytest
 from stock_analyzer.sandbox.domain.candidate import RankedCandidate
 from stock_analyzer.sandbox.domain.entry_order import EntryOrder
 from stock_analyzer.sandbox.domain.entry_order import PENDING as ORDER_PENDING
-from stock_analyzer.sandbox.domain.run import SandboxRun
-from stock_analyzer.sandbox.exp005.application.admission_orchestrator import AdmissionTransactionService
+from stock_analyzer.sandbox.exp005.application.admission_orchestrator import (
+    AdmissionIntegrityError,
+    AdmissionTransactionService,
+    AdmissionValidationError,
+)
 from stock_analyzer.sandbox.exp005.infrastructure.integrity import (
     ADMISSION_WITHOUT_ORDER,
     ADMISSION_WITHOUT_RESERVATION,
@@ -26,7 +30,7 @@ from stock_analyzer.sandbox.exp005.infrastructure.integrity import (
     RESERVATION_WITHOUT_ADMISSION,
     check_admission_integrity,
 )
-from stock_analyzer.sandbox.exp005.infrastructure.repository import PortfolioRepository
+from stock_analyzer.sandbox.exp005.infrastructure.repository import AdmissionConflictError, PortfolioRepository
 from stock_analyzer.sandbox.exp005.infrastructure.schema import init_exp005_schema
 from stock_analyzer.sandbox.infrastructure.schema import init_db
 from stock_analyzer.sandbox.infrastructure.sqlite_repository import SandboxRepository
@@ -34,7 +38,24 @@ from stock_analyzer.sandbox.infrastructure.sqlite_repository import SandboxRepos
 NOW = datetime.now(timezone.utc)
 REPLAY_ID = "replay-1"
 MAX_SLOTS = 2
-SLOT_BUDGET = 10_000.0
+SLOT_BUDGET_UNITS = 1_000_000  # $10,000.00 in cents
+
+
+class FixedCashAvailabilityProvider:
+    """Test double ONLY -- production wiring (Stage 6) must supply a real,
+    ledger-backed implementation. There is no default in
+    AdmissionTransactionService itself; this class exists so tests can control cash
+    availability explicitly and deterministically."""
+
+    def __init__(self, available_units: int) -> None:
+        self._available_units = available_units
+
+    def available_unreserved_cash_units(self) -> int:
+        return self._available_units
+
+
+def _ample_cash() -> FixedCashAvailabilityProvider:
+    return FixedCashAvailabilityProvider(10 ** 12)
 
 
 def _make_connection() -> sqlite3.Connection:
@@ -77,9 +98,10 @@ def _order_for(candidate: RankedCandidate) -> EntryOrder:
     )
 
 
-def _service(conn: sqlite3.Connection, max_slots: int = MAX_SLOTS) -> AdmissionTransactionService:
+def _service(conn: sqlite3.Connection, max_slots: int = MAX_SLOTS, cash_provider=None) -> AdmissionTransactionService:
     return AdmissionTransactionService(
-        conn, PortfolioRepository(conn), SandboxRepository(conn), REPLAY_ID, max_slots, SLOT_BUDGET
+        conn, PortfolioRepository(conn), SandboxRepository(conn), REPLAY_ID, max_slots, SLOT_BUDGET_UNITS,
+        cash_provider or _ample_cash(),
     )
 
 
@@ -102,9 +124,8 @@ def test_successful_admission_writes_all_three_records():
     assert SandboxRepository(conn).get_entry_order_by_candidate("c0") is not None
 
 
-def test_no_capacity_writes_only_the_admission():
+def test_no_capacity_writes_only_the_admission_when_slots_full():
     conn = _make_connection()
-    # Fill both slots first.
     for i in range(MAX_SLOTS):
         candidate = _seed_candidate(conn, f"c{i}", f"SYM{i}", i + 1)
         _service(conn).admit_candidate(candidate, candidate.as_of_date, _order_for(candidate))
@@ -114,20 +135,233 @@ def test_no_capacity_writes_only_the_admission():
 
     assert result.created is True
     assert result.admission.decision == "NO_CAPACITY"
+    assert "slots occupied" in result.admission.reason
     assert result.reservation is None
     assert result.order is None
-    assert PortfolioRepository(conn).get_reservation_for_admission("c-overflow") is None
-    assert SandboxRepository(conn).get_entry_order_by_candidate("c-overflow") is None
 
 
-def test_no_capacity_records_which_slots_were_occupied():
+# ------------------------------------------------------------------- cash-awareness
+
+
+def test_free_slot_with_insufficient_cash_is_no_capacity_not_accepted():
+    """Point 8 of the corrective cycle: a free slot must NOT automatically imply
+    sufficient cash. Uses a controllable cash provider double -- production Stage 6
+    wiring must supply a real ledger-backed one; there is no default that would
+    silently assume unlimited cash."""
+
     conn = _make_connection()
+    candidate = _seed_candidate(conn, "c0", "AAA", 1)
+    poor_cash = FixedCashAvailabilityProvider(available_units=SLOT_BUDGET_UNITS - 1)
+    service = _service(conn, max_slots=5, cash_provider=poor_cash)
+
+    result = service.admit_candidate(candidate, candidate.as_of_date, _order_for(candidate))
+
+    assert result.admission.decision == "NO_CAPACITY"
+    assert "insufficient unreserved cash" in result.admission.reason
+    assert result.reservation is None
+    assert result.order is None
+
+
+def test_sufficient_cash_and_free_slot_is_accepted():
+    conn = _make_connection()
+    candidate = _seed_candidate(conn, "c0", "AAA", 1)
+    exact_cash = FixedCashAvailabilityProvider(available_units=SLOT_BUDGET_UNITS)
+    service = _service(conn, max_slots=5, cash_provider=exact_cash)
+
+    result = service.admit_candidate(candidate, candidate.as_of_date, _order_for(candidate))
+    assert result.admission.decision == "ACCEPTED"
+
+
+def test_cash_provider_not_consulted_when_no_slot_is_free():
+    """When slots are already full, the cash provider must not even be asked (and
+    certainly must not be able to override a slot-based rejection)."""
+
+    conn = _make_connection()
+
+    class ExplodingCashProvider:
+        def available_unreserved_cash_units(self) -> int:
+            raise AssertionError("cash provider must not be consulted when no slot is free")
+
     for i in range(MAX_SLOTS):
         candidate = _seed_candidate(conn, f"c{i}", f"SYM{i}", i + 1)
         _service(conn).admit_candidate(candidate, candidate.as_of_date, _order_for(candidate))
+
     overflow = _seed_candidate(conn, "c-overflow", "ZZZ", 99)
-    result = _service(conn).admit_candidate(overflow, overflow.as_of_date, _order_for(overflow))
-    assert f"{MAX_SLOTS}/{MAX_SLOTS}" in result.admission.reason
+    service = _service(conn, cash_provider=ExplodingCashProvider())
+    result = service.admit_candidate(overflow, overflow.as_of_date, _order_for(overflow))
+    assert result.admission.decision == "NO_CAPACITY"
+    assert "slots occupied" in result.admission.reason
+
+
+# --------------------------------------------------------- cross-entity validation
+
+
+def test_order_id_not_matching_candidate_is_rejected_before_any_write():
+    conn = _make_connection()
+    candidate = _seed_candidate(conn, "c0", "AAA", 1)
+    bad_order = replace(_order_for(candidate), order_id="wrong-order-id")
+    service = _service(conn)
+    with pytest.raises(AdmissionValidationError):
+        service.admit_candidate(candidate, candidate.as_of_date, bad_order)
+    assert PortfolioRepository(conn).get_admission("c0") is None
+
+
+def test_order_candidate_id_mismatch_is_rejected_before_any_write():
+    conn = _make_connection()
+    candidate = _seed_candidate(conn, "c0", "AAA", 1)
+    bad_order = replace(_order_for(candidate), candidate_id="different-candidate")
+    service = _service(conn)
+    with pytest.raises(AdmissionValidationError):
+        service.admit_candidate(candidate, candidate.as_of_date, bad_order)
+    assert PortfolioRepository(conn).get_admission("c0") is None
+
+
+def test_order_symbol_mismatch_is_rejected_before_any_write():
+    conn = _make_connection()
+    candidate = _seed_candidate(conn, "c0", "AAA", 1)
+    bad_order = replace(_order_for(candidate), symbol="WRONG")
+    service = _service(conn)
+    with pytest.raises(AdmissionValidationError):
+        service.admit_candidate(candidate, candidate.as_of_date, bad_order)
+    assert PortfolioRepository(conn).get_admission("c0") is None
+
+
+def test_order_signal_date_mismatch_is_rejected_before_any_write():
+    conn = _make_connection()
+    candidate = _seed_candidate(conn, "c0", "AAA", 1)
+    bad_order = replace(_order_for(candidate), signal_date=date(2026, 1, 6))
+    service = _service(conn)
+    with pytest.raises(AdmissionValidationError):
+        service.admit_candidate(candidate, candidate.as_of_date, bad_order)
+    assert PortfolioRepository(conn).get_admission("c0") is None
+
+
+def test_validation_rejects_before_transaction_opens_leaving_no_partial_state():
+    conn = _make_connection()
+    candidate = _seed_candidate(conn, "c0", "AAA", 1)
+    bad_order = replace(_order_for(candidate), symbol="WRONG")
+    service = _service(conn)
+    with pytest.raises(AdmissionValidationError):
+        service.admit_candidate(candidate, candidate.as_of_date, bad_order)
+    assert PortfolioRepository(conn).get_admission("c0") is None
+    assert PortfolioRepository(conn).get_reservation_for_admission("c0") is None
+    assert SandboxRepository(conn).get_entry_order_by_candidate("c0") is None
+
+
+# --------------------------------------------------------- complete idempotency contract
+
+
+def test_exact_retry_of_already_successful_admission_is_a_noop():
+    conn = _make_connection()
+    candidate = _seed_candidate(conn, "c0", "AAA", 1)
+    service = _service(conn)
+
+    first = service.admit_candidate(candidate, candidate.as_of_date, _order_for(candidate))
+    second = service.admit_candidate(candidate, candidate.as_of_date, _order_for(candidate))
+
+    assert first.created is True
+    assert second.created is False
+    assert second.admission == first.admission
+    assert len(PortfolioRepository(conn).list_active_reservations(REPLAY_ID)) == 1
+
+
+def test_conflicting_symbol_on_retry_raises():
+    conn = _make_connection()
+    candidate = _seed_candidate(conn, "c0", "AAA", 1)
+    service = _service(conn)
+    service.admit_candidate(candidate, candidate.as_of_date, _order_for(candidate))
+
+    mutated = replace(candidate, symbol="ZZZ")
+    with pytest.raises(AdmissionConflictError):
+        service.admit_candidate(mutated, candidate.as_of_date, replace(_order_for(candidate), symbol="ZZZ"))
+
+
+def test_conflicting_rank_on_retry_raises():
+    conn = _make_connection()
+    candidate = _seed_candidate(conn, "c0", "AAA", 1)
+    service = _service(conn)
+    service.admit_candidate(candidate, candidate.as_of_date, _order_for(candidate))
+
+    mutated = replace(candidate, daily_rank=99)
+    with pytest.raises(AdmissionConflictError):
+        service.admit_candidate(mutated, candidate.as_of_date, _order_for(candidate))
+
+
+def test_conflicting_as_of_date_on_retry_raises():
+    conn = _make_connection()
+    candidate = _seed_candidate(conn, "c0", "AAA", 1)
+    service = _service(conn)
+    service.admit_candidate(candidate, candidate.as_of_date, _order_for(candidate))
+
+    with pytest.raises(AdmissionConflictError):
+        service.admit_candidate(candidate, date(2026, 1, 6), replace(_order_for(candidate), signal_date=date(2026, 1, 6)))
+
+
+def test_conflicting_replay_id_on_retry_raises():
+    conn = _make_connection()
+    candidate = _seed_candidate(conn, "c0", "AAA", 1)
+    service = _service(conn)
+    service.admit_candidate(candidate, candidate.as_of_date, _order_for(candidate))
+
+    other_replay_service = AdmissionTransactionService(
+        conn, PortfolioRepository(conn), SandboxRepository(conn), "replay-DIFFERENT", MAX_SLOTS, SLOT_BUDGET_UNITS,
+        _ample_cash(),
+    )
+    with pytest.raises(AdmissionConflictError):
+        other_replay_service.admit_candidate(candidate, candidate.as_of_date, _order_for(candidate))
+
+
+def test_conflicting_slot_budget_configuration_on_retry_raises():
+    """Configuration drift between runs (a resumed replay started with a different
+    slot_budget than the original) must be caught, not silently accepted."""
+
+    conn = _make_connection()
+    candidate = _seed_candidate(conn, "c0", "AAA", 1)
+    _service(conn).admit_candidate(candidate, candidate.as_of_date, _order_for(candidate))
+
+    drifted_service = _service(conn)
+    object.__setattr__(drifted_service, "_slot_budget_units", SLOT_BUDGET_UNITS * 2)
+    with pytest.raises(AdmissionConflictError):
+        drifted_service.admit_candidate(candidate, candidate.as_of_date, _order_for(candidate))
+
+
+def test_accepted_admission_missing_reservation_is_an_integrity_failure_not_a_noop():
+    conn = _make_connection()
+    candidate = _seed_candidate(conn, "c0", "AAA", 1)
+    # Directly construct the broken state: an ACCEPTED admission with no reservation.
+    from stock_analyzer.sandbox.exp005.domain.admission import ACCEPTED, PortfolioAdmission
+
+    conn.execute(
+        "INSERT INTO portfolio_admissions (admission_id, replay_id, candidate_id, symbol, as_of_date, "
+        " decision, rank_at_admission, slot_budget_units, reason, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        ("c0", REPLAY_ID, "c0", "AAA", "2026-01-05", ACCEPTED, 1, SLOT_BUDGET_UNITS, None, NOW.isoformat()),
+    )
+    conn.commit()
+
+    service = _service(conn)
+    with pytest.raises(AdmissionIntegrityError):
+        service.admit_candidate(candidate, candidate.as_of_date, _order_for(candidate))
+
+
+def test_no_capacity_admission_never_flips_to_accepted_when_capacity_frees_up():
+    conn = _make_connection()
+    candidates = [_seed_candidate(conn, f"c{i}", f"SYM{i}", i + 1) for i in range(MAX_SLOTS)]
+    service = _service(conn)
+    results = [service.admit_candidate(c, c.as_of_date, _order_for(c)) for c in candidates]
+    assert all(r.admission.decision == "ACCEPTED" for r in results)
+
+    overflow = _seed_candidate(conn, "c-overflow", "ZZZ", 99)
+    first_attempt = service.admit_candidate(overflow, overflow.as_of_date, _order_for(overflow))
+    assert first_attempt.admission.decision == "NO_CAPACITY"
+
+    # Capacity frees up (a position for c0 closes).
+    conn.execute("UPDATE virtual_positions SET status = 'CLOSED' WHERE candidate_id IS NOT NULL")
+    conn.execute("UPDATE slot_reservations SET status = 'RELEASED', resolved_at = ? WHERE admission_id = 'c0'", (NOW.isoformat(),))
+    conn.commit()
+
+    second_attempt = service.admit_candidate(overflow, overflow.as_of_date, _order_for(overflow))
+    assert second_attempt.admission.decision == "NO_CAPACITY"  # persisted decision is final, never re-decided
+    assert second_attempt.created is False
 
 
 # --------------------------------------------------------------- rollback injection
@@ -222,21 +456,6 @@ def test_rollback_during_no_capacity_path_leaves_nothing(monkeypatch):
 # ---------------------------------------------------------------------- idempotency
 
 
-def test_exact_retry_of_already_successful_admission_is_a_noop():
-    conn = _make_connection()
-    candidate = _seed_candidate(conn, "c0", "AAA", 1)
-    service = _service(conn)
-
-    first = service.admit_candidate(candidate, candidate.as_of_date, _order_for(candidate))
-    second = service.admit_candidate(candidate, candidate.as_of_date, _order_for(candidate))
-
-    assert first.created is True
-    assert second.created is False
-    assert second.admission == first.admission
-    # No duplicate rows -- still exactly one reservation, one order.
-    assert len(PortfolioRepository(conn).list_active_reservations(REPLAY_ID)) == 1
-
-
 def test_retry_after_rolled_back_failure_succeeds_cleanly(monkeypatch):
     conn = _make_connection()
     candidate = _seed_candidate(conn, "c0", "AAA", 1)
@@ -278,9 +497,6 @@ def test_two_different_candidates_competing_for_one_slot():
 
 
 def test_repeated_orchestration_after_simulated_process_restart():
-    # A "process restart" is simulated by constructing a fresh AdmissionTransactionService
-    # (and fresh PortfolioRepository/SandboxRepository instances) against the SAME
-    # connection/database -- proving state lives in the database, not in-memory.
     conn = _make_connection()
     candidate = _seed_candidate(conn, "c0", "AAA", 1)
     _service(conn).admit_candidate(candidate, candidate.as_of_date, _order_for(candidate))
@@ -297,8 +513,7 @@ def test_repeated_orchestration_after_simulated_process_restart():
 def test_two_competing_admissions_cannot_both_consume_the_final_slot():
     """Real SQLite concurrency, not mocked: two independent connections to the same
     file-backed database, each racing to admit a different candidate into the last
-    remaining slot. BEGIN IMMEDIATE's write-lock exclusivity must ensure exactly one
-    of the two succeeds."""
+    remaining slot."""
 
     fd, path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
@@ -320,7 +535,7 @@ def test_two_competing_admissions_cannot_both_consume_the_final_slot():
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA foreign_keys = ON")
             service = AdmissionTransactionService(
-                conn, PortfolioRepository(conn), SandboxRepository(conn), REPLAY_ID, max_slots=1, slot_budget=SLOT_BUDGET
+                conn, PortfolioRepository(conn), SandboxRepository(conn), REPLAY_ID, 1, SLOT_BUDGET_UNITS, _ample_cash()
             )
             barrier.wait(timeout=5)
             results[candidate_id] = service.admit_candidate(candidate, candidate.as_of_date, _order_for(candidate))
@@ -357,11 +572,11 @@ def test_orphan_check_finds_nothing_on_a_clean_database():
 
 def test_orphan_check_detects_admission_without_reservation():
     conn = _make_connection()
-    candidate = _seed_candidate(conn, "c0", "AAA", 1)
+    _seed_candidate(conn, "c0", "AAA", 1)
     conn.execute(
         "INSERT INTO portfolio_admissions (admission_id, replay_id, candidate_id, symbol, as_of_date, "
-        " decision, rank_at_admission, slot_budget, reason, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-        ("c0", REPLAY_ID, "c0", "AAA", "2026-01-05", "ACCEPTED", 1, 10_000.0, None, NOW.isoformat()),
+        " decision, rank_at_admission, slot_budget_units, reason, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        ("c0", REPLAY_ID, "c0", "AAA", "2026-01-05", "ACCEPTED", 1, SLOT_BUDGET_UNITS, None, NOW.isoformat()),
     )
     conn.commit()
     findings = check_admission_integrity(conn, REPLAY_ID)
@@ -370,16 +585,13 @@ def test_orphan_check_detects_admission_without_reservation():
 
 
 def test_orphan_check_detects_reservation_without_admission():
-    # Only constructible by deliberately disabling foreign keys -- the FK
-    # (admission_id NOT NULL REFERENCES portfolio_admissions) otherwise prevents this
-    # state from ever existing.
     conn = _make_connection()
     _seed_candidate(conn, "c0", "AAA", 1)
     conn.execute("PRAGMA foreign_keys = OFF")
     conn.execute(
         "INSERT INTO slot_reservations (reservation_id, replay_id, admission_id, candidate_id, symbol, "
-        " reserved_amount, status, created_at, resolved_at) VALUES (?,?,?,?,?,?,?,?,?)",
-        ("orphan-r", REPLAY_ID, "no-such-admission", "c0", "AAA", 10_000.0, "RESERVED", NOW.isoformat(), None),
+        " reserved_amount_units, status, created_at, resolved_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        ("orphan-r", REPLAY_ID, "no-such-admission", "c0", "AAA", SLOT_BUDGET_UNITS, "RESERVED", NOW.isoformat(), None),
     )
     conn.commit()
     conn.execute("PRAGMA foreign_keys = ON")
@@ -388,29 +600,21 @@ def test_orphan_check_detects_reservation_without_admission():
     assert any(f.category == RESERVATION_WITHOUT_ADMISSION for f in findings)
 
 
-def test_orphan_check_detects_multiple_reservations_for_one_admission():
-    # Only constructible by disabling foreign keys AND the UNIQUE(admission_id)
-    # constraint would normally prevent this too -- demonstrated here via a raw
-    # connection where we accept the UNIQUE violation is the real guard and instead
-    # verify the checker's query logic directly using two different replay-scoped
-    # reservation ids that both (artificially) reference the same admission via a
-    # manually corrupted second table state is not reachable; this test documents
-    # that the invariant is guarded at the schema level (UNIQUE), not just detected
-    # post-hoc.
+def test_orphan_check_multiple_reservations_guarded_at_schema_level():
     conn = _make_connection()
     candidate = _seed_candidate(conn, "c0", "AAA", 1)
     _service(conn).admit_candidate(candidate, candidate.as_of_date, _order_for(candidate))
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute(
             "INSERT INTO slot_reservations (reservation_id, replay_id, admission_id, candidate_id, symbol, "
-            " reserved_amount, status, created_at, resolved_at) VALUES (?,?,?,?,?,?,?,?,?)",
-            ("second-reservation-for-c0", REPLAY_ID, "c0", "c0", "AAA", 10_000.0, "RESERVED", NOW.isoformat(), None),
+            " reserved_amount_units, status, created_at, resolved_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            ("second-reservation-for-c0", REPLAY_ID, "c0", "c0", "AAA", SLOT_BUDGET_UNITS, "RESERVED", NOW.isoformat(), None),
         )
 
 
 def test_orphan_check_detects_order_without_admission():
     conn = _make_connection()
-    candidate = _seed_candidate(conn, "c0", "AAA", 1)
+    _seed_candidate(conn, "c0", "AAA", 1)
     conn.execute(
         "INSERT INTO entry_orders (order_id, candidate_id, symbol, signal_date, created_date, valid_until, "
         " max_entry_price, status, fill_date, fill_price, fill_reason, no_fill_reason, created_at, updated_at) "
@@ -427,14 +631,14 @@ def test_orphan_check_detects_no_capacity_with_reservation():
     _seed_candidate(conn, "c0", "AAA", 1)
     conn.execute(
         "INSERT INTO portfolio_admissions (admission_id, replay_id, candidate_id, symbol, as_of_date, "
-        " decision, rank_at_admission, slot_budget, reason, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        " decision, rank_at_admission, slot_budget_units, reason, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
         ("c0", REPLAY_ID, "c0", "AAA", "2026-01-05", "NO_CAPACITY", 1, None, "reason", NOW.isoformat()),
     )
     conn.execute("PRAGMA foreign_keys = OFF")
     conn.execute(
         "INSERT INTO slot_reservations (reservation_id, replay_id, admission_id, candidate_id, symbol, "
-        " reserved_amount, status, created_at, resolved_at) VALUES (?,?,?,?,?,?,?,?,?)",
-        ("c0:reservation", REPLAY_ID, "c0", "c0", "AAA", 10_000.0, "RESERVED", NOW.isoformat(), None),
+        " reserved_amount_units, status, created_at, resolved_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        ("c0:reservation", REPLAY_ID, "c0", "c0", "AAA", SLOT_BUDGET_UNITS, "RESERVED", NOW.isoformat(), None),
     )
     conn.commit()
     conn.execute("PRAGMA foreign_keys = ON")
@@ -444,11 +648,11 @@ def test_orphan_check_detects_no_capacity_with_reservation():
 
 def test_orphan_checker_never_deletes_or_repairs():
     conn = _make_connection()
-    candidate = _seed_candidate(conn, "c0", "AAA", 1)
+    _seed_candidate(conn, "c0", "AAA", 1)
     conn.execute(
         "INSERT INTO portfolio_admissions (admission_id, replay_id, candidate_id, symbol, as_of_date, "
-        " decision, rank_at_admission, slot_budget, reason, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-        ("c0", REPLAY_ID, "c0", "AAA", "2026-01-05", "ACCEPTED", 1, 10_000.0, None, NOW.isoformat()),
+        " decision, rank_at_admission, slot_budget_units, reason, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        ("c0", REPLAY_ID, "c0", "AAA", "2026-01-05", "ACCEPTED", 1, SLOT_BUDGET_UNITS, None, NOW.isoformat()),
     )
     conn.commit()
     before = conn.execute("SELECT COUNT(*) FROM portfolio_admissions").fetchone()[0]
