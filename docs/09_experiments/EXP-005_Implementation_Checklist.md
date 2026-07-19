@@ -109,7 +109,7 @@ different names. This is a naming difference only, not a behavioral deviation.
 - [x] Stage 6 -- portfolio ledger, equity snapshots, aligned dual-accounting sizing seam
 - [x] Stage 7 -- admission orchestrator seam (CandidateService), RankingControlAdapter (Variant D), CapacityAdmissionOrchestrator
 - [x] Stage 8 -- replay entry point (build_exp005_replay_services), day-start/day-complete hooks on ReplayService, determinism/resume tests
-- [ ] Stage 9
+- [x] Stage 9 -- Experiment Manifest generator (exp005/manifest.py)
 - [ ] Stage 10 (stop point -- no real run until this passes)
 - [ ] Stage 11
 - [ ] Stage 12
