@@ -11,9 +11,11 @@ from datetime import datetime, timezone
 import pytest
 
 from stock_analyzer.sandbox.exp005.infrastructure.schema import (
+    DECISION_AUDIT_DDL,
     DECISION_AUDIT_SCHEMA_VERSION,
     DecisionAuditSchemaIntegrityError,
     UnsupportedDecisionAuditSchemaVersionError,
+    _verify_v1_physical_invariants,
     init_exp005_schema,
 )
 from stock_analyzer.sandbox.infrastructure.schema import init_db
@@ -412,3 +414,217 @@ def test_physical_verification_catches_a_falsely_labeled_database():
     conn.commit()
     with pytest.raises(DecisionAuditSchemaIntegrityError):
         init_exp005_schema(conn)
+
+
+# --------------------------------------------- malformed-fixture, fail-closed suite
+#
+# Each test below builds an otherwise-correct v1 physical shape (derived from the
+# real DECISION_AUDIT_DDL via a single targeted mutation, so only the ONE invariant
+# under test is actually violated) and confirms init_exp005_schema fails closed --
+# raising DecisionAuditSchemaIntegrityError -- rather than silently accepting the
+# recorded version=1 label. None of these tests exercise any repair path: this
+# module has none, by design (Revision 5's "no silent repair of corrupted data").
+
+
+def _init_with_mutated_ddl(mutated_ddl: str) -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    init_db(conn)
+    conn.executescript(mutated_ddl)
+    conn.execute("INSERT INTO schema_meta(key, value) VALUES ('decision_audit_schema_version', '1')")
+    conn.commit()
+    return conn
+
+
+def test_malformed_portfolio_admissions_wrong_column_type_fails_closed():
+    mutated = DECISION_AUDIT_DDL.replace("slot_budget_units INTEGER,", "slot_budget_units TEXT,", 1)
+    assert mutated != DECISION_AUDIT_DDL
+    conn = _init_with_mutated_ddl(mutated)
+    with pytest.raises(DecisionAuditSchemaIntegrityError, match="slot_budget_units"):
+        init_exp005_schema(conn)
+
+
+def test_malformed_portfolio_admissions_missing_not_null_fails_closed():
+    mutated = DECISION_AUDIT_DDL.replace(
+        "    replay_id TEXT NOT NULL,\n    candidate_id TEXT NOT NULL REFERENCES ranked_candidates(candidate_id),\n"
+        "    symbol TEXT NOT NULL,\n    as_of_date TEXT NOT NULL,\n    decision",
+        "    replay_id TEXT,\n    candidate_id TEXT NOT NULL REFERENCES ranked_candidates(candidate_id),\n"
+        "    symbol TEXT NOT NULL,\n    as_of_date TEXT NOT NULL,\n    decision",
+        1,
+    )
+    assert mutated != DECISION_AUDIT_DDL
+    conn = _init_with_mutated_ddl(mutated)
+    with pytest.raises(DecisionAuditSchemaIntegrityError, match="replay_id"):
+        init_exp005_schema(conn)
+
+
+def test_malformed_portfolio_admissions_forbidden_reverse_column_fails_closed():
+    mutated = DECISION_AUDIT_DDL.replace(
+        "    admission_id TEXT NOT NULL PRIMARY KEY,\n    replay_id TEXT NOT NULL,",
+        "    admission_id TEXT NOT NULL PRIMARY KEY,\n    reservation_id TEXT,\n    replay_id TEXT NOT NULL,",
+        1,
+    )
+    assert mutated != DECISION_AUDIT_DDL
+    conn = _init_with_mutated_ddl(mutated)
+    with pytest.raises(DecisionAuditSchemaIntegrityError, match="reservation_id"):
+        init_exp005_schema(conn)
+
+
+def test_malformed_slot_reservations_missing_admission_id_uniqueness_fails_closed():
+    mutated = DECISION_AUDIT_DDL.replace(
+        "admission_id TEXT NOT NULL UNIQUE REFERENCES portfolio_admissions(admission_id),",
+        "admission_id TEXT NOT NULL REFERENCES portfolio_admissions(admission_id),",
+        1,
+    )
+    assert mutated != DECISION_AUDIT_DDL
+    conn = _init_with_mutated_ddl(mutated)
+    with pytest.raises(DecisionAuditSchemaIntegrityError, match="slot_reservations"):
+        init_exp005_schema(conn)
+
+
+def test_malformed_portfolio_equity_snapshots_missing_uniqueness_fails_closed():
+    mutated = DECISION_AUDIT_DDL.replace(
+        "    created_at TEXT NOT NULL,\n    UNIQUE (replay_id, as_of_date)\n);",
+        "    created_at TEXT NOT NULL\n);",
+        1,
+    )
+    assert mutated != DECISION_AUDIT_DDL
+    conn = _init_with_mutated_ddl(mutated)
+    with pytest.raises(DecisionAuditSchemaIntegrityError, match="portfolio_equity_snapshots"):
+        init_exp005_schema(conn)
+
+
+def test_malformed_executions_missing_index_fails_closed():
+    """Unlike the CREATE TABLE statements (guarded by IF NOT EXISTS, so an already-
+    existing malformed table is left untouched), CREATE INDEX IF NOT EXISTS is
+    per-object and would silently ADD a dropped index back onto an existing table
+    the next time init_exp005_schema runs its own DDL -- so a missing-index defect
+    can only be observed by calling the verification step directly, before that
+    self-healing re-execution has a chance to run. This still proves the check
+    itself fails closed, and documents the self-healing behavior explicitly rather
+    than leaving it as a silent surprise."""
+
+    mutated = DECISION_AUDIT_DDL.replace(
+        "CREATE INDEX IF NOT EXISTS idx_executions_order_id ON executions(order_id);\n", "", 1
+    )
+    assert mutated != DECISION_AUDIT_DDL
+    conn = _init_with_mutated_ddl(mutated)
+    with pytest.raises(DecisionAuditSchemaIntegrityError, match="idx_executions_order_id"):
+        _verify_v1_physical_invariants(conn)
+
+
+def test_malformed_table_missing_any_check_constraint_fails_closed():
+    """A table that otherwise matches every column/type/PK/index/uniqueness
+    expectation, but was created with none of its CHECK constraints, must still be
+    rejected -- CHECK-bearing table definitions are required "where practical" even
+    though SQLite exposes no PRAGMA to verify them structurally."""
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    init_db(conn)
+    conn.executescript(
+        """
+        CREATE TABLE portfolio_admissions (
+            admission_id TEXT NOT NULL PRIMARY KEY,
+            replay_id TEXT NOT NULL,
+            candidate_id TEXT NOT NULL REFERENCES ranked_candidates(candidate_id),
+            symbol TEXT NOT NULL,
+            as_of_date TEXT NOT NULL,
+            decision TEXT NOT NULL,
+            rank_at_admission INTEGER NOT NULL,
+            slot_budget_units INTEGER,
+            reason TEXT,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_portfolio_admissions_as_of_date ON portfolio_admissions(as_of_date);
+        CREATE INDEX idx_portfolio_admissions_replay_id ON portfolio_admissions(replay_id);
+        CREATE TABLE slot_reservations (
+            reservation_id TEXT NOT NULL PRIMARY KEY,
+            replay_id TEXT NOT NULL,
+            admission_id TEXT NOT NULL UNIQUE REFERENCES portfolio_admissions(admission_id),
+            candidate_id TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            reserved_amount_units INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            resolved_at TEXT
+        );
+        CREATE INDEX idx_slot_reservations_status ON slot_reservations(status);
+        CREATE INDEX idx_slot_reservations_replay_id ON slot_reservations(replay_id);
+        CREATE TABLE portfolio_equity_snapshots (
+            snapshot_id TEXT NOT NULL PRIMARY KEY,
+            replay_id TEXT NOT NULL,
+            as_of_date TEXT NOT NULL,
+            cash_units INTEGER NOT NULL,
+            reserved_capital_units INTEGER NOT NULL,
+            open_position_market_value_units INTEGER NOT NULL,
+            total_equity_units INTEGER NOT NULL,
+            open_position_count INTEGER NOT NULL,
+            reserved_order_count INTEGER NOT NULL,
+            cumulative_commissions_units INTEGER NOT NULL,
+            cumulative_slippage_cost_units INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE (replay_id, as_of_date)
+        );
+        CREATE INDEX idx_portfolio_equity_snapshots_as_of_date ON portfolio_equity_snapshots(as_of_date);
+        CREATE TABLE executions (
+            execution_id TEXT NOT NULL PRIMARY KEY,
+            replay_id TEXT NOT NULL,
+            variant_id TEXT NOT NULL,
+            control_seed INTEGER,
+            order_id TEXT REFERENCES entry_orders(order_id),
+            candidate_id TEXT NOT NULL REFERENCES ranked_candidates(candidate_id),
+            position_id TEXT REFERENCES virtual_positions(position_id),
+            symbol TEXT NOT NULL,
+            side TEXT NOT NULL,
+            decision_date TEXT NOT NULL,
+            execution_date TEXT NOT NULL,
+            raw_market_fill_price_units INTEGER NOT NULL,
+            effective_fill_price_units INTEGER NOT NULL,
+            quantity_units INTEGER NOT NULL,
+            gross_notional_units INTEGER NOT NULL,
+            commission_units INTEGER NOT NULL,
+            slippage_rate_units INTEGER NOT NULL,
+            slippage_cost_units INTEGER NOT NULL,
+            net_cash_flow_units INTEGER NOT NULL,
+            fill_reason TEXT NOT NULL,
+            market_data_snapshot_id TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_executions_order_id ON executions(order_id);
+        CREATE INDEX idx_executions_position_id ON executions(position_id);
+        CREATE INDEX idx_executions_candidate_id ON executions(candidate_id);
+        CREATE INDEX idx_executions_replay_id ON executions(replay_id);
+        """
+    )
+    conn.execute("INSERT INTO schema_meta(key, value) VALUES ('decision_audit_schema_version', '1')")
+    conn.commit()
+    with pytest.raises(DecisionAuditSchemaIntegrityError, match="CHECK"):
+        init_exp005_schema(conn)
+
+
+def test_malformed_dangling_foreign_key_is_caught_by_integrity_check():
+    """A row inserted while foreign_keys enforcement was OFF (e.g. restored from a
+    dump) can leave a dangling reference that INSERT-time CHECKs never saw --
+    PRAGMA foreign_key_check scans existing data directly, independent of whether
+    enforcement was on at insert time, and must catch this."""
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    init_db(conn)
+    init_exp005_schema(conn)
+
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute(
+        "INSERT INTO slot_reservations (reservation_id, replay_id, admission_id, candidate_id, symbol, "
+        " reserved_amount_units, status, created_at, resolved_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        ("dangling-r1", "replay-1", "no-such-admission", "AAA", "AAA", 1_000_000, "RESERVED", NOW, None),
+    )
+    conn.commit()
+    conn.execute("PRAGMA foreign_keys = ON")
+
+    with pytest.raises(DecisionAuditSchemaIntegrityError, match="foreign key"):
+        _verify_v1_physical_invariants(conn)

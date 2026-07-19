@@ -40,10 +40,12 @@ from datetime import date, datetime, timezone
 from typing import Protocol
 
 from stock_analyzer.sandbox.domain.candidate import RankedCandidate
-from stock_analyzer.sandbox.domain.entry_order import EntryOrder
+from stock_analyzer.sandbox.domain.entry_order import PENDING, EntryOrder
 from stock_analyzer.sandbox.exp005.domain.admission import (
     ACCEPTED,
+    CONVERTED,
     NO_CAPACITY,
+    RELEASED,
     RESERVED,
     PortfolioAdmission,
     SlotReservation,
@@ -119,7 +121,7 @@ class AdmissionTransactionService:
         try:
             existing_admission = self._portfolio_repo.get_admission(admission_id)
             if existing_admission is not None:
-                result = self._resolve_existing_admission(existing_admission, candidate, as_of_date)
+                result = self._resolve_existing_admission(existing_admission, candidate, as_of_date, order)
                 self._conn.execute("COMMIT")
                 return result
 
@@ -185,7 +187,11 @@ class AdmissionTransactionService:
             raise
 
     def _resolve_existing_admission(
-        self, existing_admission: PortfolioAdmission, candidate: RankedCandidate, as_of_date: date
+        self,
+        existing_admission: PortfolioAdmission,
+        candidate: RankedCandidate,
+        as_of_date: date,
+        order: EntryOrder,
     ) -> AdmissionResult:
         """Called with the write lock already held. Compares the request's full
         logical content against what is persisted; a NO_CAPACITY admission is never
@@ -215,13 +221,53 @@ class AdmissionTransactionService:
                 f"reservation ({reservation!r}) or order ({existing_order!r}) -- this is a data-"
                 "integrity failure, not a resumable state."
             )
-        if reservation.reserved_amount_units != self._slot_budget_units:
+
+        if not self._orders_match_immutable_fields(existing_order, order):
             raise AdmissionConflictError(
-                f"admission {existing_admission.admission_id}'s persisted reservation "
-                f"({reservation.reserved_amount_units} units) does not match this run's configured "
-                f"slot_budget_units ({self._slot_budget_units}) -- configuration drift between runs."
+                f"admission {existing_admission.admission_id} already has an order with different "
+                f"immutable content than the one supplied on this retry -- existing="
+                f"{existing_order!r}, supplied={order!r}. A retry must supply the identical order; "
+                "this looks like a caller bug (e.g. re-deriving max_entry_price/valid_until from "
+                "since-changed inputs) rather than a safe resume."
+            )
+
+        expected_reservation_id = SlotReservation.make_id(existing_admission.admission_id)
+        if (
+            reservation.reservation_id != expected_reservation_id
+            or reservation.replay_id != self._replay_id
+            or reservation.admission_id != existing_admission.admission_id
+            or reservation.candidate_id != candidate.candidate_id
+            or reservation.symbol != candidate.symbol
+            or reservation.reserved_amount_units != self._slot_budget_units
+            or reservation.status not in (RESERVED, CONVERTED, RELEASED)
+        ):
+            raise AdmissionConflictError(
+                f"admission {existing_admission.admission_id}'s persisted reservation does not match "
+                f"the content/configuration expected on this retry -- persisted={reservation!r}, "
+                f"expected admission_id={existing_admission.admission_id!r}, candidate_id="
+                f"{candidate.candidate_id!r}, symbol={candidate.symbol!r}, "
+                f"slot_budget_units={self._slot_budget_units!r}."
             )
         return AdmissionResult(existing_admission, reservation, existing_order, created=False)
+
+    @staticmethod
+    def _orders_match_immutable_fields(existing: EntryOrder, supplied: EntryOrder) -> bool:
+        """Compares only the entry-time facts that are set once and never changed
+        (order_id, candidate_id, symbol, signal_date, created_date, valid_until,
+        max_entry_price) -- deliberately NOT the mutable lifecycle fields (status,
+        fill_date, fill_price, fill_reason, no_fill_reason), which legitimately
+        diverge between a freshly-constructed order (always PENDING) and one that
+        has since been filled/expired by EntryService on a genuine resume."""
+
+        return (
+            existing.order_id == supplied.order_id
+            and existing.candidate_id == supplied.candidate_id
+            and existing.symbol == supplied.symbol
+            and existing.signal_date == supplied.signal_date
+            and existing.created_date == supplied.created_date
+            and existing.valid_until == supplied.valid_until
+            and existing.max_entry_price == supplied.max_entry_price
+        )
 
     def _count_occupied_slots(self) -> int:
         """Section 8.3's invariant: count(open positions) + count(RESERVED
@@ -250,4 +296,17 @@ class AdmissionTransactionService:
         if order.signal_date != as_of_date:
             raise AdmissionValidationError(
                 f"order.signal_date={order.signal_date!r} != as_of_date={as_of_date!r}"
+            )
+        if (
+            order.status != PENDING
+            or order.fill_date is not None
+            or order.fill_price is not None
+            or order.fill_reason is not None
+            or order.no_fill_reason is not None
+        ):
+            raise AdmissionValidationError(
+                f"order={order!r} does not have the initial lifecycle state expected of a freshly-"
+                "constructed order (status=PENDING, no fill_date/fill_price/fill_reason/"
+                "no_fill_reason) -- admit_candidate must always be called with a newly-built order, "
+                "never one already carrying a resolved outcome."
             )

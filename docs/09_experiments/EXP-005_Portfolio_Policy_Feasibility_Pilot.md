@@ -1079,3 +1079,73 @@ raw file paths themselves, which `diagnostics.py` alone resolves against the
 Experiment Manifest) and return plain, serializable structures -- keeping every
 individual diagnostic formula testable in isolation, exactly matching Section 13's
 per-diagnostic test list.
+
+---
+
+# POST-FREEZE ERRATA (added during implementation, does not modify frozen text above)
+
+```text
+Added: 2026-07-19, during the Stage 2-5 implementation corrective cycle.
+This is a documentation correction, not a policy change. No frozen design element
+(variant, threshold, feasibility criterion, diagnostic, MFE/MAE definition,
+censoring rule, horizon, fill rule, or portfolio configuration) is altered by this
+note. All text above this line remains exactly as frozen; nothing above has been
+edited or removed.
+```
+
+**Errata 1 -- Section 28's persisted-table classification is imprecise for
+`slot_reservations`.** The table at line 947 groups all four new tables under "all
+append-only, all additive." That is correct for `portfolio_admissions`,
+`portfolio_equity_snapshots`, and `executions` -- each gets exactly one row per
+logical fact, ever, and no existing row is ever updated. It is **not** correct for
+`slot_reservations`: that table is **mutable current-state**, the same category as
+the existing schema's `entry_orders`/`virtual_positions` (Section 28's second row).
+Its `status` column transitions on the same row via exactly two conflict-safe paths
+(`infrastructure/repository.py`'s `update_reservation_status`):
+
+```text
+RESERVED -> CONVERTED   (the reservation was spent on a BUY fill)
+RESERVED -> RELEASED    (the reservation expired/was released without a fill)
+```
+
+No other transition is permitted; `RESERVED` is the only state a reservation is ever
+created in, and `CONVERTED`/`RELEASED` are terminal.
+
+**Reconstructability of the transition history.** A reservation's *current* state
+and *when* it last changed are directly on the row itself (`status`, `resolved_at`)
+-- nothing needs to be reconstructed to answer "what is this reservation's state
+now, and since when." What the row alone does not carry is a separate log of the
+*event* that caused the transition. That event is reconstructable by joining out to
+already-persisted facts sharing the same `admission_id`/`candidate_id`:
+
+- `RESERVED -> CONVERTED`: the corresponding BUY row in `executions`
+  (`executions.candidate_id`, `side='BUY'`), whose `created_at`/`execution_date`
+  identifies the causing fill.
+- `RESERVED -> RELEASED`: `entry_orders.status='EXPIRED'` (via
+  `entry_orders.candidate_id == slot_reservations.admission_id`) plus that order's
+  `entry_order_attempts` history, which identifies the causing expiry.
+
+**One acknowledged limitation:** because `update_reservation_status` is
+conflict-safe and idempotent (a repeat of the same already-applied transition is a
+no-op; a genuinely different transition raises `ReservationTransitionConflictError`
+rather than silently overwriting), exactly one transition is ever successfully
+applied to a given reservation. There is therefore no scenario, under this design,
+where an intermediate/superseded transition attempt needs to be recovered from
+history -- but if that invariant were ever relaxed in a future revision, this
+row-only representation would not by itself preserve a full multi-attempt audit
+trail. This is noted explicitly rather than left as a silent gap.
+
+**Errata 2 -- physical schema verification, expanded.** Section 28/29 describe a
+"decision-audit schema version" marker recorded in the Experiment Manifest. During
+the Stage 2-5 corrective cycle, the physical verification behind that marker
+(`infrastructure/schema.py`'s `_verify_v1_physical_invariants`) was found to check
+only table existence and `executions`' unit-column names -- not physically
+sufficient to back the version-1 claim for the other three tables. It has since been
+expanded to verify, for all four tables: column names and SQLite storage types
+(every `*_units` field is INTEGER); primary keys; NOT NULL properties; one-directional
+foreign keys; `slot_reservations.admission_id` uniqueness;
+`portfolio_equity_snapshots(replay_id, as_of_date)` uniqueness; required indexes;
+absence of the forbidden reverse `reservation_id`/`order_id` columns on
+`portfolio_admissions`; presence of a CHECK constraint on every table; and referential
+integrity (`PRAGMA foreign_key_check`). This is an implementation-robustness fix, not
+a change to any frozen design element.

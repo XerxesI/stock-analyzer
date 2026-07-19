@@ -153,6 +153,55 @@ def test_rejects_out_of_range_slippage_rate():
         compute_buy_accounting(raw_fill_price=100.0, slot_budget=10_000.0, commission=1.0, slippage_rate=1.5)
 
 
+# ---------------------------------------------------- SELL slippage-rate boundary (closure task 3)
+#
+# effective_price = raw * (1 - rate) for SELL: a rate of 1.0 or more makes the
+# effective price zero or negative, a degenerate fill -- confirmed P2 from the
+# second review. SELL's upper bound is strictly < 1, tighter than the general
+# [0, 1] bound _validate_common enforces for BUY (where rate=1.0 merely doubles the
+# price, still positive).
+
+
+@pytest.mark.parametrize("slippage_rate", [0.0, 0.0005, 0.9999])
+def test_sell_accepts_valid_slippage_rates_up_to_but_excluding_one(slippage_rate: float):
+    # commission=0.0 here isolates the slippage_rate boundary itself: at rate=0.9999
+    # gross proceeds shrink to $0.01/share, and a nonzero commission would separately
+    # trip the net_cash_flow_units>0 check by exceeding those proceeds -- a genuine
+    # but different degenerate case, not the one this test targets.
+    result = compute_sell_accounting(raw_fill_price=100.0, quantity=100.0, commission=0.0, slippage_rate=slippage_rate)
+    assert result.effective_fill_price_units > 0
+    assert result.gross_notional_units > 0
+    assert result.net_cash_flow_units > 0
+
+
+def test_sell_rejects_slippage_rate_of_exactly_one():
+    with pytest.raises(InvalidExecutionInputError):
+        compute_sell_accounting(raw_fill_price=100.0, quantity=100.0, commission=1.0, slippage_rate=1.0)
+
+
+def test_sell_rejects_slippage_rate_above_one():
+    with pytest.raises(InvalidExecutionInputError):
+        compute_sell_accounting(raw_fill_price=100.0, quantity=100.0, commission=1.0, slippage_rate=1.5)
+
+
+def test_sell_rejects_when_commission_consumes_all_proceeds_at_extreme_slippage():
+    """A valid slippage_rate (<1) combined with a commission that meets or exceeds
+    the shrunken gross proceeds is a separate degenerate case the net_cash_flow_units
+    positivity check catches -- found while boundary-testing rate=0.9999 above."""
+
+    with pytest.raises(InvalidExecutionInputError):
+        compute_sell_accounting(raw_fill_price=100.0, quantity=100.0, commission=1.0, slippage_rate=0.9999)
+
+
+def test_sell_rejects_a_rate_that_would_round_effective_price_to_zero():
+    """A rate just under 1 applied to a very small raw price can still round the
+    effective price down to zero units -- the post-computation positivity checks
+    must catch this even though the rate itself is technically < 1."""
+
+    with pytest.raises(InvalidExecutionInputError):
+        compute_sell_accounting(raw_fill_price=0.0001, quantity=1.0, commission=0.0, slippage_rate=0.9999)
+
+
 # ------------------------------------------------------------- exact round-trip / reconciliation
 
 

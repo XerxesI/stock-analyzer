@@ -325,6 +325,96 @@ def test_conflicting_slot_budget_configuration_on_retry_raises():
         drifted_service.admit_candidate(candidate, candidate.as_of_date, _order_for(candidate))
 
 
+# --------------------------------- changed-order-on-retry conflict (closure task 1)
+#
+# _validate_order_matches_candidate (called unconditionally, before the retry path
+# is even reached) already guards order_id/candidate_id/symbol/signal_date against
+# the CANDIDATE -- so a mismatch there is caught before _resolve_existing_admission
+# ever runs. created_date/valid_until/max_entry_price are NOT checked against the
+# candidate (they aren't derivable from it), so they are the fields a caller bug
+# could silently drift on retry without _validate_order_matches_candidate ever
+# noticing -- this is exactly the confirmed P1 the second review found: the retry
+# path never compared the supplied order against what was actually persisted.
+
+
+def test_retry_with_changed_max_entry_price_raises_conflict():
+    conn = _make_connection()
+    candidate = _seed_candidate(conn, "c0", "AAA", 1)
+    service = _service(conn)
+    service.admit_candidate(candidate, candidate.as_of_date, _order_for(candidate))
+
+    mutated_order = replace(_order_for(candidate), max_entry_price=candidate.max_entry_price + 5.0)
+    with pytest.raises(AdmissionConflictError):
+        service.admit_candidate(candidate, candidate.as_of_date, mutated_order)
+
+
+def test_retry_with_changed_valid_until_raises_conflict():
+    conn = _make_connection()
+    candidate = _seed_candidate(conn, "c0", "AAA", 1)
+    service = _service(conn)
+    service.admit_candidate(candidate, candidate.as_of_date, _order_for(candidate))
+
+    mutated_order = replace(_order_for(candidate), valid_until=date(2026, 1, 20))
+    with pytest.raises(AdmissionConflictError):
+        service.admit_candidate(candidate, candidate.as_of_date, mutated_order)
+
+
+def test_retry_with_changed_created_date_raises_conflict():
+    conn = _make_connection()
+    candidate = _seed_candidate(conn, "c0", "AAA", 1)
+    service = _service(conn)
+    service.admit_candidate(candidate, candidate.as_of_date, _order_for(candidate))
+
+    mutated_order = replace(_order_for(candidate), created_date=date(2026, 1, 4))
+    with pytest.raises(AdmissionConflictError):
+        service.admit_candidate(candidate, candidate.as_of_date, mutated_order)
+
+
+def test_identical_order_on_retry_remains_a_safe_noop():
+    """Direct contrast to the three tests above: an exact re-submission of the same
+    order content (not merely the same candidate/date) must still be a safe no-op --
+    the fix must not turn every legitimate resume into a false conflict."""
+
+    conn = _make_connection()
+    candidate = _seed_candidate(conn, "c0", "AAA", 1)
+    service = _service(conn)
+    first = service.admit_candidate(candidate, candidate.as_of_date, _order_for(candidate))
+
+    second = service.admit_candidate(candidate, candidate.as_of_date, _order_for(candidate))
+
+    assert second.created is False
+    assert second.order.order_id == first.order.order_id
+    assert second.order.max_entry_price == first.order.max_entry_price
+    assert second.order.valid_until == first.order.valid_until
+
+
+def test_retry_after_order_has_since_been_filled_remains_a_safe_noop():
+    """A retry's freshly-constructed `order` is always PENDING (per
+    _validate_order_matches_candidate's own lifecycle check), but the PERSISTED
+    order may legitimately have since transitioned to FILLED/EXPIRED by
+    EntryService between the original admission and this resume attempt --
+    _orders_match_immutable_fields must compare only the immutable entry-time
+    facts, never the mutable lifecycle fields, or every legitimate post-fill resume
+    would be misreported as a conflict."""
+
+    conn = _make_connection()
+    candidate = _seed_candidate(conn, "c0", "AAA", 1)
+    service = _service(conn)
+    service.admit_candidate(candidate, candidate.as_of_date, _order_for(candidate))
+
+    conn.execute(
+        "UPDATE entry_orders SET status = 'FILLED', fill_date = ?, fill_price = ?, fill_reason = ? "
+        "WHERE candidate_id = ?",
+        ("2026-01-06", 100.5, "FILLED_AT_OPEN", "c0"),
+    )
+    conn.commit()
+
+    result = service.admit_candidate(candidate, candidate.as_of_date, _order_for(candidate))
+
+    assert result.created is False
+    assert result.order.status == "FILLED"
+
+
 def test_accepted_admission_missing_reservation_is_an_integrity_failure_not_a_noop():
     conn = _make_connection()
     candidate = _seed_candidate(conn, "c0", "AAA", 1)

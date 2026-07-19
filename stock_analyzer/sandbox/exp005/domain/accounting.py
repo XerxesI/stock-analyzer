@@ -190,11 +190,25 @@ def compute_sell_accounting(
 ) -> ExecutionAccounting:
     """Quantity is GIVEN (the position's existing share count, fixed at entry) --
     proceeds return to cash net of commission and adverse slippage. No remainder
-    concept applies (nothing is being sized against a budget)."""
+    concept applies (nothing is being sized against a budget).
+
+    SELL slippage_rate must be strictly < 1 (tighter than _validate_common's general
+    [0, 1] bound, which is also correct for BUY): effective_price = raw * (1 - rate),
+    so a rate of 1.0 or more makes the effective price zero or negative -- a
+    degenerate, economically meaningless fill, not merely an extreme one. The
+    computed result is also validated to be strictly positive on every dimension
+    after rounding, since a rate just under 1 applied to a very small raw price
+    could still round down to zero.
+    """
 
     _validate_common(raw_fill_price, commission, slippage_rate)
     if quantity <= 0:
         raise InvalidExecutionInputError(f"quantity must be positive, got {quantity!r}")
+    if slippage_rate >= 1:
+        raise InvalidExecutionInputError(
+            f"SELL slippage_rate must be < 1, got {slippage_rate!r} -- a rate of 1.0 or more makes "
+            "the effective sell price zero or negative, which is not a valid fill."
+        )
 
     raw_units = to_price_units(raw_fill_price)
     quantity_units = to_quantity_units(quantity)
@@ -204,6 +218,16 @@ def compute_sell_accounting(
     effective_units, gross_notional_units, slippage_cost_units, net_cash_flow_units = _compute_from_quantity(
         raw_units, quantity_units, commission_units, rate_units, SELL
     )
+
+    if effective_units <= 0:
+        raise InvalidExecutionInputError(
+            f"computed SELL effective_fill_price_units is non-positive ({effective_units}) -- raw "
+            f"price {raw_fill_price} at slippage_rate {slippage_rate} rounds down to zero."
+        )
+    if gross_notional_units <= 0:
+        raise InvalidExecutionInputError(f"computed SELL gross_notional_units is non-positive ({gross_notional_units})")
+    if net_cash_flow_units <= 0:
+        raise InvalidExecutionInputError(f"computed SELL net_cash_flow_units is non-positive ({net_cash_flow_units})")
 
     return ExecutionAccounting(
         effective_fill_price_units=effective_units,

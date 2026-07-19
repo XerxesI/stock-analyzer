@@ -36,7 +36,7 @@ DECISION_AUDIT_DDL = """
 -- Append-only: one row per admission_id, ever (see application/
 -- admission_orchestrator.py -- there is exactly one production write path).
 CREATE TABLE IF NOT EXISTS portfolio_admissions (
-    admission_id TEXT PRIMARY KEY,
+    admission_id TEXT NOT NULL PRIMARY KEY,
     replay_id TEXT NOT NULL,
     candidate_id TEXT NOT NULL REFERENCES ranked_candidates(candidate_id),
     symbol TEXT NOT NULL,
@@ -62,7 +62,7 @@ CREATE INDEX IF NOT EXISTS idx_portfolio_admissions_replay_id ON portfolio_admis
 -- infrastructure/repository.py's update_reservation_status for the one, narrow,
 -- conflict-safe transition path.
 CREATE TABLE IF NOT EXISTS slot_reservations (
-    reservation_id TEXT PRIMARY KEY,
+    reservation_id TEXT NOT NULL PRIMARY KEY,
     replay_id TEXT NOT NULL,
     admission_id TEXT NOT NULL UNIQUE REFERENCES portfolio_admissions(admission_id),
     candidate_id TEXT NOT NULL,
@@ -83,7 +83,7 @@ CREATE INDEX IF NOT EXISTS idx_slot_reservations_replay_id ON slot_reservations(
 -- UNIQUE(replay_id, as_of_date) makes a second snapshot for the same day a
 -- constraint violation, not a silent duplicate.
 CREATE TABLE IF NOT EXISTS portfolio_equity_snapshots (
-    snapshot_id TEXT PRIMARY KEY,
+    snapshot_id TEXT NOT NULL PRIMARY KEY,
     replay_id TEXT NOT NULL,
     as_of_date TEXT NOT NULL,
     cash_units INTEGER NOT NULL,
@@ -106,7 +106,7 @@ CREATE INDEX IF NOT EXISTS idx_portfolio_equity_snapshots_as_of_date ON portfoli
 -- (negative for BUY, positive for SELL) -- Stage 5's sign convention, enforced here
 -- at the schema level too, not only in application code.
 CREATE TABLE IF NOT EXISTS executions (
-    execution_id TEXT PRIMARY KEY,
+    execution_id TEXT NOT NULL PRIMARY KEY,
     replay_id TEXT NOT NULL,
     variant_id TEXT NOT NULL CHECK (variant_id IN ('B','D')),
     control_seed INTEGER,
@@ -140,17 +140,123 @@ CREATE INDEX IF NOT EXISTS idx_executions_candidate_id ON executions(candidate_i
 CREATE INDEX IF NOT EXISTS idx_executions_replay_id ON executions(replay_id);
 """
 
-_EXPECTED_EXECUTION_UNIT_COLUMNS = (
-    "raw_market_fill_price_units",
-    "effective_fill_price_units",
-    "quantity_units",
-    "gross_notional_units",
-    "commission_units",
-    "slippage_rate_units",
-    "slippage_cost_units",
-    "net_cash_flow_units",
-)
 _EXPECTED_TABLES = ("portfolio_admissions", "slot_reservations", "portfolio_equity_snapshots", "executions")
+
+# Column name -> (declared SQLite storage type, NOT NULL). Mirrors DECISION_AUDIT_DDL
+# exactly, so a physically-drifted table (wrong type, dropped NOT NULL, extra/missing
+# column) is caught even though its recorded version label still claims v1.
+_EXPECTED_COLUMNS: dict[str, dict[str, tuple[str, bool]]] = {
+    "portfolio_admissions": {
+        "admission_id": ("TEXT", True),
+        "replay_id": ("TEXT", True),
+        "candidate_id": ("TEXT", True),
+        "symbol": ("TEXT", True),
+        "as_of_date": ("TEXT", True),
+        "decision": ("TEXT", True),
+        "rank_at_admission": ("INTEGER", True),
+        "slot_budget_units": ("INTEGER", False),
+        "reason": ("TEXT", False),
+        "created_at": ("TEXT", True),
+    },
+    "slot_reservations": {
+        "reservation_id": ("TEXT", True),
+        "replay_id": ("TEXT", True),
+        "admission_id": ("TEXT", True),
+        "candidate_id": ("TEXT", True),
+        "symbol": ("TEXT", True),
+        "reserved_amount_units": ("INTEGER", True),
+        "status": ("TEXT", True),
+        "created_at": ("TEXT", True),
+        "resolved_at": ("TEXT", False),
+    },
+    "portfolio_equity_snapshots": {
+        "snapshot_id": ("TEXT", True),
+        "replay_id": ("TEXT", True),
+        "as_of_date": ("TEXT", True),
+        "cash_units": ("INTEGER", True),
+        "reserved_capital_units": ("INTEGER", True),
+        "open_position_market_value_units": ("INTEGER", True),
+        "total_equity_units": ("INTEGER", True),
+        "open_position_count": ("INTEGER", True),
+        "reserved_order_count": ("INTEGER", True),
+        "cumulative_commissions_units": ("INTEGER", True),
+        "cumulative_slippage_cost_units": ("INTEGER", True),
+        "created_at": ("TEXT", True),
+    },
+    "executions": {
+        "execution_id": ("TEXT", True),
+        "replay_id": ("TEXT", True),
+        "variant_id": ("TEXT", True),
+        "control_seed": ("INTEGER", False),
+        "order_id": ("TEXT", False),
+        "candidate_id": ("TEXT", True),
+        "position_id": ("TEXT", False),
+        "symbol": ("TEXT", True),
+        "side": ("TEXT", True),
+        "decision_date": ("TEXT", True),
+        "execution_date": ("TEXT", True),
+        "raw_market_fill_price_units": ("INTEGER", True),
+        "effective_fill_price_units": ("INTEGER", True),
+        "quantity_units": ("INTEGER", True),
+        "gross_notional_units": ("INTEGER", True),
+        "commission_units": ("INTEGER", True),
+        "slippage_rate_units": ("INTEGER", True),
+        "slippage_cost_units": ("INTEGER", True),
+        "net_cash_flow_units": ("INTEGER", True),
+        "fill_reason": ("TEXT", True),
+        "market_data_snapshot_id": ("TEXT", True),
+        "created_at": ("TEXT", True),
+    },
+}
+
+_EXPECTED_PRIMARY_KEYS: dict[str, str] = {
+    "portfolio_admissions": "admission_id",
+    "slot_reservations": "reservation_id",
+    "portfolio_equity_snapshots": "snapshot_id",
+    "executions": "execution_id",
+}
+
+# Reverse-reference columns that would reintroduce the FK cycle Section 8.1's design
+# deliberately avoids (the reservation/order are looked up via slot_reservations.
+# admission_id / entry_orders.candidate_id instead) -- their presence on
+# portfolio_admissions is a physical-schema defect, not a compatible superset.
+_FORBIDDEN_COLUMNS: dict[str, set[str]] = {
+    "portfolio_admissions": {"reservation_id", "order_id"},
+}
+
+_EXPECTED_UNIQUE_COLUMN_SETS: dict[str, list[tuple[str, ...]]] = {
+    "slot_reservations": [("admission_id",)],
+    "portfolio_equity_snapshots": [("replay_id", "as_of_date")],
+}
+
+_EXPECTED_INDEXES: dict[str, set[str]] = {
+    "portfolio_admissions": {"idx_portfolio_admissions_as_of_date", "idx_portfolio_admissions_replay_id"},
+    "slot_reservations": {"idx_slot_reservations_status", "idx_slot_reservations_replay_id"},
+    "portfolio_equity_snapshots": {"idx_portfolio_equity_snapshots_as_of_date"},
+    "executions": {
+        "idx_executions_order_id",
+        "idx_executions_position_id",
+        "idx_executions_candidate_id",
+        "idx_executions_replay_id",
+    },
+}
+
+# table -> {expected outbound FK column: expected referenced table}. Confirms
+# one-directional-only references (the child points at portfolio_admissions/
+# entry_orders/ranked_candidates/virtual_positions; none of those point back).
+_EXPECTED_OUTBOUND_FKS: dict[str, dict[str, str]] = {
+    "portfolio_admissions": {"candidate_id": "ranked_candidates"},
+    "slot_reservations": {"admission_id": "portfolio_admissions"},
+    "portfolio_equity_snapshots": {},
+    "executions": {"order_id": "entry_orders", "candidate_id": "ranked_candidates", "position_id": "virtual_positions"},
+}
+
+_TABLES_REQUIRING_CHECK_CONSTRAINT = (
+    "portfolio_admissions",
+    "slot_reservations",
+    "portfolio_equity_snapshots",
+    "executions",
+)
 
 
 class DecisionAuditSchemaIntegrityError(RuntimeError):
@@ -178,25 +284,107 @@ def _set_decision_audit_schema_version(conn: sqlite3.Connection, version: int) -
     )
 
 
+def _has_unique_constraint(conn: sqlite3.Connection, table: str, columns: tuple[str, ...]) -> bool:
+    """True iff `table` has a UNIQUE index (explicit or the implicit one SQLite
+    creates for a column-level UNIQUE/PRIMARY KEY constraint) covering exactly
+    `columns`, in any order of declaration but as an exact set match."""
+
+    for idx in conn.execute(f"PRAGMA index_list({table})").fetchall():
+        if not idx["unique"]:
+            continue
+        idx_columns = {row["name"] for row in conn.execute(f"PRAGMA index_info({idx['name']})").fetchall()}
+        if idx_columns == set(columns):
+            return True
+    return False
+
+
 def _verify_v1_physical_invariants(conn: sqlite3.Connection) -> None:
-    """Physical verification, not just trusting a label: confirms the four tables
-    actually exist, and that `executions` actually has the corrected integer-unit
-    columns (not the pre-corrective-cycle float columns) -- so a database mislabeled
-    by some future bug is caught here, the same way the core sandbox schema's own
-    physical-inspection fix (schema.py's mislabeled-v2 detection) works."""
+    """Physical verification, not just trusting a label: a database recorded as
+    decision_audit_schema_version=1 must ACTUALLY have the v1 physical shape --
+    every table's columns/types/NOT NULL/primary key, one-directional foreign keys,
+    the two uniqueness constraints Section 8.1/8.5 depend on for correctness
+    (slot_reservations.admission_id, portfolio_equity_snapshots(replay_id,
+    as_of_date)), the required indexes, absence of the forbidden reverse-reference
+    columns on portfolio_admissions, a CHECK constraint on every table, and
+    referential integrity -- so a database mislabeled or drifted by some future bug
+    is caught here, the same way the core sandbox schema's own physical-inspection
+    fix (schema.py's mislabeled-v2 detection) works. This function only ever
+    verifies and raises; it never attempts to repair an unrecognized physical shape.
+    """
 
     existing_tables = {row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
     missing_tables = set(_EXPECTED_TABLES) - existing_tables
     if missing_tables:
         raise DecisionAuditSchemaIntegrityError(f"missing expected decision-audit tables: {sorted(missing_tables)}")
 
-    execution_columns = {row["name"] for row in conn.execute("PRAGMA table_info(executions)").fetchall()}
-    missing_columns = set(_EXPECTED_EXECUTION_UNIT_COLUMNS) - execution_columns
-    if missing_columns:
-        raise DecisionAuditSchemaIntegrityError(
-            f"executions table is missing expected integer-unit columns: {sorted(missing_columns)} "
-            "-- this looks like a pre-corrective-cycle (float-based) physical schema."
-        )
+    for table, expected_columns in _EXPECTED_COLUMNS.items():
+        info_rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        actual_by_name = {row["name"]: row for row in info_rows}
+
+        missing_columns = set(expected_columns) - set(actual_by_name)
+        if missing_columns:
+            raise DecisionAuditSchemaIntegrityError(f"{table} is missing expected columns: {sorted(missing_columns)}")
+
+        for column, (expected_type, expected_not_null) in expected_columns.items():
+            row = actual_by_name[column]
+            actual_type = (row["type"] or "").upper()
+            if actual_type != expected_type:
+                raise DecisionAuditSchemaIntegrityError(
+                    f"{table}.{column} has declared type {actual_type!r}, expected {expected_type!r} "
+                    "-- money/price/quantity/rate fields must be INTEGER, never REAL, per the "
+                    "corrective-cycle exact-numerics fix."
+                )
+            if bool(row["notnull"]) != expected_not_null:
+                raise DecisionAuditSchemaIntegrityError(
+                    f"{table}.{column} has NOT NULL={bool(row['notnull'])}, expected {expected_not_null}"
+                )
+
+        actual_pk_columns = [row["name"] for row in info_rows if row["pk"] == 1]
+        expected_pk = _EXPECTED_PRIMARY_KEYS[table]
+        if actual_pk_columns != [expected_pk]:
+            raise DecisionAuditSchemaIntegrityError(
+                f"{table} has primary key columns {actual_pk_columns}, expected [{expected_pk!r}]"
+            )
+
+        forbidden_present = _FORBIDDEN_COLUMNS.get(table, set()) & set(actual_by_name)
+        if forbidden_present:
+            raise DecisionAuditSchemaIntegrityError(
+                f"{table} has forbidden reverse-reference column(s) {sorted(forbidden_present)} -- this "
+                "would reintroduce the foreign-key cycle Section 8.1's design deliberately avoids."
+            )
+
+        actual_indexes = {row["name"] for row in conn.execute(f"PRAGMA index_list({table})").fetchall()}
+        missing_indexes = _EXPECTED_INDEXES.get(table, set()) - actual_indexes
+        if missing_indexes:
+            raise DecisionAuditSchemaIntegrityError(f"{table} is missing expected index(es): {sorted(missing_indexes)}")
+
+        for unique_columns in _EXPECTED_UNIQUE_COLUMN_SETS.get(table, []):
+            if not _has_unique_constraint(conn, table, unique_columns):
+                raise DecisionAuditSchemaIntegrityError(
+                    f"{table} is missing a UNIQUE constraint on {unique_columns}"
+                )
+
+        actual_fks = {row["from"]: row["table"] for row in conn.execute(f"PRAGMA foreign_key_list({table})").fetchall()}
+        expected_fks = _EXPECTED_OUTBOUND_FKS.get(table, {})
+        if actual_fks != expected_fks:
+            raise DecisionAuditSchemaIntegrityError(
+                f"{table} has outbound foreign keys {actual_fks}, expected exactly {expected_fks} -- an "
+                "unexpected or missing/reversed foreign key breaks the one-directional reference design."
+            )
+
+    for table in _TABLES_REQUIRING_CHECK_CONSTRAINT:
+        row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name = ?", (table,)).fetchone()
+        # Best-effort structural check only: SQLite exposes no PRAGMA for CHECK
+        # constraints, so this inspects the table's own recorded DDL text for the
+        # CHECK keyword rather than verifying the constraint's semantics.
+        if row is None or "CHECK" not in row["sql"].upper():
+            raise DecisionAuditSchemaIntegrityError(
+                f"{table}'s recorded definition does not appear to declare any CHECK constraint"
+            )
+
+    fk_violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+    if fk_violations:
+        raise DecisionAuditSchemaIntegrityError(f"foreign key integrity check failed: {list(fk_violations)}")
 
 
 def init_exp005_schema(conn: sqlite3.Connection) -> None:
