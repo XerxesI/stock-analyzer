@@ -41,6 +41,20 @@ is a resume, not a rerun. The contract:
   - A configuration mismatch (different code/model/data/date-boundaries) is rejected
     outright by _require_matching_configuration -- resume never continues a different
     configuration into a partially-populated database.
+  - A NULL last_completed_date (no date has completed a full processing cycle since
+    this replay_metadata row was created) is normally the ordinary state of a fresh
+    RUNNING replay that died before finishing its first date -- safe to reprocess the
+    full trading_dates list from the start. But a database migrated up from a schema
+    version older than v3 (see infrastructure/schema.py) also has a NULL
+    last_completed_date on its (possibly not actually empty) replay_metadata row,
+    since the watermark simply did not exist before v3. There is no way to
+    distinguish "genuinely nothing done yet" from "migrated from a pre-watermark
+    schema with real, partially-done work" by the watermark alone, so resume checks
+    whether ANY domain table already has rows (has_any_domain_state()): if so, resume
+    is refused outright (UntrustworthyResumeWatermarkError) rather than guessed at
+    (e.g. via MAX(as_of_date), which is unsafe because the maximum persisted date
+    could itself be an incompletely-processed boundary day). The only correct
+    recovery is a new replay_id with a fresh isolated database.
   - The end result of an interrupted-then-resumed replay must be identical (modulo
     non-deterministic timestamp columns) to an uninterrupted run of the same
     configuration -- see tests/test_sandbox_replay_service.py's comparison test.
@@ -99,6 +113,23 @@ class ReplayInputError(ValueError):
     documented contract (sorted, unique, within the registered period)."""
 
 
+class UntrustworthyResumeWatermarkError(RuntimeError):
+    """Raised when resuming a RUNNING/FAILED replay that already has persisted
+    domain state but no trustworthy resume watermark (last_completed_date is NULL).
+    This happens when a replay's database was migrated from a schema version that
+    predates the watermark (v1 or v2 -- see infrastructure/schema.py) while it still
+    had unfinished work in progress. Guessing a watermark (e.g. from
+    MAX(as_of_date) across the domain tables) cannot be proven safe: that date might
+    itself be a partially-processed boundary day, not a fully committed one -- the
+    exact point-in-time contamination the watermark exists to prevent (see
+    test_interrupted_and_resumed_replay_matches_uninterrupted_replay for what goes
+    wrong without it). The correct recovery is to start a new replay under a new
+    replay_id, in practice with a fresh isolated database file -- not to resume this
+    one. Deliberately raised OUTSIDE the try/except around _process_dates, so
+    rejecting a resume this way does not call fail_replay() and mark an otherwise
+    untouched replay's status as freshly failed by this attempt."""
+
+
 @dataclass
 class ReplayDayResult:
     as_of_date: date
@@ -153,6 +184,27 @@ class ReplayService:
             # code/model/data could silently continue into a database populated
             # under a different configuration.
             self._require_matching_configuration(replay, stored)
+            resume_from = stored.last_completed_date
+            if resume_from is None and self._repo.has_any_domain_state():
+                # A NULL watermark normally means "nothing has completed yet" (a
+                # fresh RUNNING replay whose first date is still in progress) -- safe
+                # to reprocess the full list from the start. But a database migrated
+                # from a pre-watermark schema (v1/v2) also has a NULL
+                # last_completed_date even if it already has real, partially-done
+                # work persisted. There is no way to distinguish the two cases from
+                # the watermark alone, and guessing (e.g. MAX(as_of_date)) is exactly
+                # the point-in-time risk the watermark exists to prevent -- so refuse
+                # outright rather than reprocess history that might contaminate an
+                # earlier date's view with later-dated state.
+                raise UntrustworthyResumeWatermarkError(
+                    f"Replay '{replay.replay_id}' (status={stored.status}) has no resume "
+                    "watermark (last_completed_date is NULL) but already has persisted domain "
+                    "state -- likely a database migrated from a schema version that predates "
+                    "the watermark while work was still in progress. Resuming it would require "
+                    "guessing which dates already completed, which cannot be proven safe. "
+                    "Start a new replay under a new replay_id (with a fresh isolated database) "
+                    "instead of resuming this one."
+                )
             # Resume watermark: every date up to and including last_completed_date
             # committed its FULL processing before the prior attempt stopped (crashed
             # or failed) -- skip those entirely and only reprocess the date after it
@@ -161,7 +213,6 @@ class ReplayService:
             # idempotency handles that), but no already-completed date is ever
             # touched again, so it can never "see" state from dates that, from its
             # own point in time, had not happened yet.
-            resume_from = stored.last_completed_date
 
         try:
             day_results = self._process_dates(replay, trading_dates, progress_every, resume_from)

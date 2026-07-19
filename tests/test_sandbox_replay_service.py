@@ -17,12 +17,19 @@ from stock_analyzer.sandbox.application.replay_service import (
     ReplayConfigurationMismatchError,
     ReplayInputError,
     ReplayService,
+    UntrustworthyResumeWatermarkError,
 )
 from stock_analyzer.sandbox.config import SandboxConfig
 from stock_analyzer.sandbox.domain.candidate import RankedCandidate
-from stock_analyzer.sandbox.domain.replay import COMPLETED, DEVELOPMENT_HISTORICAL_REPLAY, ReplayMetadata
+from stock_analyzer.sandbox.domain.replay import (
+    COMPLETED,
+    DEVELOPMENT_HISTORICAL_REPLAY,
+    FAILED,
+    RUNNING,
+    ReplayMetadata,
+)
 from stock_analyzer.sandbox.domain.run import SandboxRun
-from stock_analyzer.sandbox.infrastructure.schema import init_db
+from stock_analyzer.sandbox.infrastructure.schema import connect, init_db
 from stock_analyzer.sandbox.infrastructure.sqlite_repository import RankedCandidateConflictError, SandboxRepository
 from stock_analyzer.sandbox.reporting.replay_metrics import build_replay_metrics
 
@@ -408,22 +415,21 @@ def test_exception_during_replay_marks_metadata_failed(repo: SandboxRepository, 
 
 
 def test_resume_after_genuine_partial_signal_day_succeeds(repo: SandboxRepository, monkeypatch):
-    """Reproduces the defect: a replay whose FIRST signal date was genuinely
-    processed and persisted (not just a RUNNING metadata row) must resume
-    successfully when called again with the original, full trading_dates list --
-    exactly what a real crash-and-restart looks like. Before the fix, CandidateService
-    Phase 3 raised RuntimeError on the resumed date's re-insertion of identical
-    candidates, and that exception then marked the replay FAILED.
+    """Reproduces the defect: a replay whose FIRST signal date genuinely completed
+    (processed through ReplayService's own _process_dates, which advances the resume
+    watermark on success -- exactly what a real crash-and-restart leaves behind) must
+    resume successfully when called again with the original, full trading_dates list.
+    Before the resume-conflict fix, CandidateService Phase 3 raised RuntimeError on
+    ANY reprocessing of an already-persisted candidate; the watermark now avoids
+    reprocessing dates[0] at all on resume (the stronger fix -- see
+    test_interrupted_and_resumed_replay_matches_uninterrupted_replay for the case
+    where a date genuinely IS reprocessed), verified here by confirming dates[0]'s
+    candidates are untouched (same count, not duplicated or altered) after resume.
 
-    The "crash" is simulated realistically: dates[0] is processed through
-    ReplayService's own _process_dates (which sets the resume watermark on success,
-    exactly as a real run would), then dates[0] is processed a SECOND time directly
-    through the sub-services -- mimicking a process that died after redoing some of
-    dates[0]'s work a second time before the watermark-setting run ever returned
-    (e.g. retried locally, or the prior attempt's own watermark write never
-    committed). This is the realistic worst case for the boundary date: its own
-    persistence must be idempotent even under direct re-invocation, not just under
-    ReplayService's watermark skip."""
+    A replay whose watermark is NULL but which already has persisted domain state
+    (e.g. built by calling the sub-services directly, bypassing _process_dates
+    entirely) is a DIFFERENT, deliberately unsafe scenario -- see
+    test_resume_is_rejected_when_watermark_is_null_but_domain_state_exists."""
 
     symbols = [f"SYM{i}" for i in range(5)]
     dates = _business_days(date(2026, 1, 5), 10)
@@ -431,23 +437,63 @@ def test_resume_after_genuine_partial_signal_day_succeeds(repo: SandboxRepositor
     replay = _replay_metadata("replay-partial-resume", dates, signal_end=dates[-1])
 
     repo.create_replay_metadata(replay)
-    entries.process_entries(dates[0])
-    monitoring.monitor(dates[0])
-    candidates.generate_candidates(dates[0])
+    # Simulate a crash right after dates[0] finished: process it through the real
+    # _process_dates (which advances last_completed_date on success, exactly like a
+    # real run), then stop -- never call run() to completion.
+    service._process_dates(replay, [dates[0]], progress_every=None)
 
     persisted_before_resume = len(repo.get_candidates_for_date(dates[0]))
     assert persisted_before_resume == len(symbols)
+    assert repo.get_replay_metadata("replay-partial-resume").last_completed_date == dates[0]
 
     result = service.run(replay, dates)  # resume: the original, complete date list
 
     assert result.replay_id == "replay-partial-resume"
     stored = repo.get_replay_metadata("replay-partial-resume")
     assert stored.status == COMPLETED
-    # dates[0]'s candidates were reprocessed idempotently, not duplicated.
+    # dates[0] was skipped entirely on resume (already past the watermark), not
+    # reprocessed -- so its candidates are exactly what the first pass produced.
     assert len(repo.get_candidates_for_date(dates[0])) == persisted_before_resume
     # Every date, including the already-processed one, ended up with candidates.
     for d in dates:
         assert len(repo.get_candidates_for_date(d)) == len(symbols)
+
+
+def test_resume_is_rejected_when_watermark_is_null_but_domain_state_exists(repo: SandboxRepository, monkeypatch):
+    """A RUNNING/FAILED replay with persisted domain state but NO resume watermark
+    (last_completed_date is NULL) cannot be trusted to resume: there is no way to
+    tell whether "NULL" means "genuinely nothing done yet" or "migrated from a
+    schema version older than v3, which never had a watermark, while real work was
+    in progress" (see infrastructure/schema.py's v1/v2/v3 history). This must fail
+    closed with a specific, understandable exception rather than guessing -- and the
+    rejection itself must not mutate anything (no fail_replay() call, no domain
+    writes)."""
+
+    symbols = [f"SYM{i}" for i in range(5)]
+    dates = _business_days(date(2026, 1, 5), 10)
+    service, candidates, entries, monitoring = _make_replay_components(repo, symbols, dates, monkeypatch)
+    replay = _replay_metadata("replay-untrustworthy-watermark", dates, signal_end=dates[-1])
+
+    repo.create_replay_metadata(replay)
+    # Domain state exists (dates[0] fully processed), but NOT through _process_dates
+    # -- so last_completed_date is never advanced. This is deliberately how a
+    # database migrated from a pre-watermark schema (v1/v2) looks: real work
+    # persisted, watermark column present but NULL.
+    entries.process_entries(dates[0])
+    monitoring.monitor(dates[0])
+    candidates.generate_candidates(dates[0])
+
+    candidates_before = repo.get_candidates_for_date(dates[0])
+    status_before = repo.get_replay_metadata("replay-untrustworthy-watermark").status
+    assert repo.get_replay_metadata("replay-untrustworthy-watermark").last_completed_date is None
+
+    with pytest.raises(UntrustworthyResumeWatermarkError, match="watermark"):
+        service.run(replay, dates)
+
+    # The rejection did not mutate anything: no reprocessing, no fail_replay() call.
+    stored_after = repo.get_replay_metadata("replay-untrustworthy-watermark")
+    assert stored_after.status == status_before  # not flipped to FAILED by the rejection itself
+    assert repo.get_candidates_for_date(dates[0]) == candidates_before
 
 
 def test_interrupted_and_resumed_replay_matches_uninterrupted_replay(monkeypatch):
@@ -548,3 +594,220 @@ def test_conflicting_ranked_candidate_content_is_rejected(repo: SandboxRepositor
 
     # An IDENTICAL repeat -- the actual resume case -- is a safe no-op, not an error.
     assert repo.insert_ranked_candidate(replace(original)) is False
+
+
+# ---------------------------------------------------------------------------------
+# Legacy (migrated) database resume-safety: a v1 database (no last_completed_date at
+# all) migrated up to v3 gets that column added as NULL for any pre-existing
+# replay_metadata row. These tests build a REAL migrated database file (not just a
+# fresh v3 database with the watermark manually nulled) to prove ReplayService
+# handles each of the three legacy states correctly -- see
+# UntrustworthyResumeWatermarkError in application/replay_service.py.
+# ---------------------------------------------------------------------------------
+
+_LEGACY_V1_DDL = """
+CREATE TABLE IF NOT EXISTS sandbox_runs (
+    run_id TEXT PRIMARY KEY, as_of_date TEXT NOT NULL, command TEXT NOT NULL,
+    started_at TEXT NOT NULL, completed_at TEXT,
+    status TEXT NOT NULL CHECK (status IN ('RUNNING','COMPLETED','FAILED')),
+    model_version TEXT, data_snapshot_id TEXT, code_commit_sha TEXT,
+    configuration_hash TEXT NOT NULL, error_message TEXT
+);
+CREATE TABLE IF NOT EXISTS ranked_candidates (
+    candidate_id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES sandbox_runs(run_id),
+    as_of_date TEXT NOT NULL, symbol TEXT NOT NULL, daily_rank INTEGER NOT NULL,
+    model_score REAL NOT NULL, signal_close REAL NOT NULL, atr14 REAL, max_entry_price REAL,
+    shadow_top10 INTEGER NOT NULL CHECK (shadow_top10 IN (0,1)),
+    actionable INTEGER NOT NULL CHECK (actionable IN (0,1)),
+    exclusion_reason TEXT, adv_quintile TEXT, market_regime TEXT, created_at TEXT NOT NULL,
+    UNIQUE(symbol, as_of_date)
+);
+CREATE INDEX IF NOT EXISTS idx_ranked_candidates_as_of_date ON ranked_candidates(as_of_date);
+CREATE TABLE IF NOT EXISTS entry_orders (
+    order_id TEXT PRIMARY KEY, candidate_id TEXT NOT NULL UNIQUE REFERENCES ranked_candidates(candidate_id),
+    symbol TEXT NOT NULL, signal_date TEXT NOT NULL, created_date TEXT NOT NULL,
+    valid_until TEXT NOT NULL, max_entry_price REAL NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('PENDING','FILLED','EXPIRED','SKIPPED')),
+    fill_date TEXT, fill_price REAL, fill_reason TEXT, no_fill_reason TEXT,
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_entry_orders_status ON entry_orders(status);
+CREATE TABLE IF NOT EXISTS virtual_positions (
+    position_id TEXT PRIMARY KEY, symbol TEXT NOT NULL,
+    candidate_id TEXT NOT NULL REFERENCES ranked_candidates(candidate_id),
+    order_id TEXT NOT NULL REFERENCES entry_orders(order_id), signal_date TEXT NOT NULL,
+    entry_date TEXT NOT NULL, entry_price REAL NOT NULL, quantity REAL NOT NULL,
+    initial_rank INTEGER NOT NULL, initial_model_score REAL NOT NULL, signal_close REAL NOT NULL,
+    max_entry_price REAL NOT NULL, initial_adv_quintile TEXT, initial_market_regime TEXT,
+    status TEXT NOT NULL CHECK (status IN ('OPEN','CLOSED')),
+    current_holding_day_count INTEGER NOT NULL DEFAULT 0, current_close REAL,
+    unrealized_return REAL, mfe REAL NOT NULL DEFAULT 0, mae REAL NOT NULL DEFAULT 0,
+    target_price REAL NOT NULL, planned_time_exit_date TEXT NOT NULL, exit_date TEXT,
+    exit_price REAL, exit_reason TEXT, realized_return REAL, created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL, UNIQUE(symbol, entry_date)
+);
+CREATE INDEX IF NOT EXISTS idx_virtual_positions_status ON virtual_positions(status);
+CREATE TABLE IF NOT EXISTS entry_order_attempts (
+    attempt_id TEXT PRIMARY KEY, order_id TEXT NOT NULL REFERENCES entry_orders(order_id),
+    symbol TEXT NOT NULL, attempt_date TEXT NOT NULL, session_open REAL, session_high REAL,
+    session_low REAL, session_close REAL, max_entry_price REAL NOT NULL,
+    outcome TEXT NOT NULL CHECK (outcome IN ('FILLED_AT_OPEN','FILLED_AT_CEILING','NO_FILL')),
+    fill_price REAL, reason TEXT, created_at TEXT NOT NULL, UNIQUE(order_id, attempt_date)
+);
+CREATE TABLE IF NOT EXISTS position_snapshots (
+    snapshot_id TEXT PRIMARY KEY, position_id TEXT NOT NULL REFERENCES virtual_positions(position_id),
+    symbol TEXT NOT NULL, as_of_date TEXT NOT NULL, close_price REAL, daily_return REAL,
+    cumulative_unrealized_return REAL, holding_day_count INTEGER NOT NULL, mfe REAL NOT NULL,
+    mae REAL NOT NULL, distance_to_target REAL, current_rank INTEGER, current_model_score REAL,
+    rank_change_from_entry INTEGER, current_adv_quintile TEXT, current_market_regime TEXT,
+    data_quality_status TEXT NOT NULL, recommendation TEXT NOT NULL, created_at TEXT NOT NULL,
+    UNIQUE(position_id, as_of_date)
+);
+CREATE TABLE IF NOT EXISTS recommendations (
+    recommendation_id TEXT PRIMARY KEY,
+    entity_type TEXT NOT NULL CHECK (entity_type IN ('candidate','position')),
+    entity_id TEXT NOT NULL, symbol TEXT NOT NULL, as_of_date TEXT NOT NULL,
+    recommendation TEXT NOT NULL, reason TEXT, created_at TEXT NOT NULL,
+    UNIQUE(entity_type, entity_id, as_of_date)
+);
+CREATE TABLE IF NOT EXISTS virtual_transactions (
+    transaction_id TEXT PRIMARY KEY, position_id TEXT NOT NULL REFERENCES virtual_positions(position_id),
+    symbol TEXT NOT NULL, transaction_type TEXT NOT NULL CHECK (transaction_type IN ('BUY','SELL')),
+    transaction_date TEXT NOT NULL, price REAL NOT NULL, quantity REAL NOT NULL,
+    notional REAL NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL,
+    UNIQUE(position_id, transaction_type, transaction_date)
+);
+CREATE TABLE IF NOT EXISTS data_quality_events (
+    event_id TEXT PRIMARY KEY, symbol TEXT NOT NULL, as_of_date TEXT NOT NULL,
+    event_type TEXT NOT NULL, details TEXT, created_at TEXT NOT NULL,
+    UNIQUE(symbol, as_of_date, event_type)
+);
+CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS replay_metadata (
+    replay_id TEXT PRIMARY KEY, classification TEXT NOT NULL, code_commit_sha TEXT,
+    model_version TEXT, feature_snapshot_id TEXT, market_data_snapshot_id TEXT,
+    signal_start_date TEXT NOT NULL, signal_end_date TEXT NOT NULL,
+    outcome_data_end_date TEXT NOT NULL, configuration_json TEXT NOT NULL,
+    configuration_hash TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('RUNNING','COMPLETED','FAILED')),
+    started_at TEXT NOT NULL, completed_at TEXT
+);
+"""
+
+
+def _build_legacy_v1_replay_fixture(
+    db_path: str, replay: ReplayMetadata, *, status: str, with_domain_state: bool
+) -> None:
+    """A physical v1 database (no last_completed_date column at all -- predates the
+    watermark entirely) containing one replay_metadata row matching `replay`'s
+    identity fields exactly, and optionally one persisted candidate (simulating
+    "this legacy replay already had work in progress when it was migrated")."""
+
+    conn = sqlite3.connect(db_path)
+    conn.executescript(_LEGACY_V1_DDL)
+    conn.execute("INSERT INTO schema_meta(key, value) VALUES ('schema_version', '1')")
+    conn.execute(
+        "INSERT INTO replay_metadata (replay_id, classification, code_commit_sha, model_version, "
+        " feature_snapshot_id, market_data_snapshot_id, signal_start_date, signal_end_date, "
+        " outcome_data_end_date, configuration_json, configuration_hash, status, started_at, "
+        " completed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            replay.replay_id, replay.classification, replay.code_commit_sha, replay.model_version,
+            replay.feature_snapshot_id, replay.market_data_snapshot_id,
+            replay.signal_start_date.isoformat(), replay.signal_end_date.isoformat(),
+            replay.outcome_data_end_date.isoformat(), replay.configuration_json,
+            replay.configuration_hash, status, replay.started_at.isoformat(),
+            replay.started_at.isoformat() if status == COMPLETED else None,
+        ),
+    )
+    if with_domain_state:
+        conn.execute(
+            "INSERT INTO sandbox_runs (run_id, as_of_date, command, started_at, completed_at, "
+            " status, model_version, data_snapshot_id, code_commit_sha, configuration_hash, "
+            " error_message) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            ("run-legacy", replay.signal_start_date.isoformat(), "generate-candidates",
+             replay.started_at.isoformat(), None, "COMPLETED", "v1", None, None, "hash", None),
+        )
+        conn.execute(
+            "INSERT INTO ranked_candidates (candidate_id, run_id, as_of_date, symbol, daily_rank, "
+            " model_score, signal_close, atr14, max_entry_price, shadow_top10, actionable, "
+            " exclusion_reason, adv_quintile, market_regime, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                RankedCandidate.make_id(replay.signal_start_date, "AAA"), "run-legacy",
+                replay.signal_start_date.isoformat(), "AAA", 1, 5.0, 100.0, 2.0, 101.0, 1, 1,
+                None, "adv_q3", "Bull_Normal", replay.started_at.isoformat(),
+            ),
+        )
+    conn.commit()
+    conn.close()
+
+
+def test_migrated_completed_legacy_replay_rerun_still_rejected(tmp_path, monkeypatch):
+    symbols = ["AAA"]
+    dates = _business_days(date(2026, 1, 5), 5)
+    replay = _replay_metadata("replay-legacy-completed", dates, dates[-1])
+
+    db_path = str(tmp_path / "legacy_completed.db")
+    _build_legacy_v1_replay_fixture(db_path, replay, status=COMPLETED, with_domain_state=True)
+
+    conn = connect(db_path)  # migrates v1 -> v3
+    repo = SandboxRepository(conn)
+    service = _make_replay_service(repo, symbols, dates, monkeypatch)
+
+    # A COMPLETED replay is rejected regardless of its (NULL) watermark -- it can
+    # never be resumed at all, migrated or not.
+    with pytest.raises(ReplayAlreadyCompletedError):
+        service.run(replay, dates)
+
+    conn.close()
+
+
+def test_migrated_running_legacy_replay_with_no_domain_state_resumes_from_start(tmp_path, monkeypatch):
+    symbols = ["AAA"]
+    dates = _business_days(date(2026, 1, 5), 5)
+    replay = _replay_metadata("replay-legacy-empty", dates, dates[-1])
+
+    db_path = str(tmp_path / "legacy_empty.db")
+    _build_legacy_v1_replay_fixture(db_path, replay, status=RUNNING, with_domain_state=False)
+
+    conn = connect(db_path)  # migrates v1 -> v3; last_completed_date is NULL
+    repo = SandboxRepository(conn)
+    assert repo.get_replay_metadata("replay-legacy-empty").last_completed_date is None
+    assert repo.has_any_domain_state() is False
+    service = _make_replay_service(repo, symbols, dates, monkeypatch)
+
+    # NULL watermark + genuinely no domain state -- this is the ordinary "died before
+    # finishing its first date" case, safe to reprocess the full list from scratch.
+    result = service.run(replay, dates)
+
+    assert repo.get_replay_metadata("replay-legacy-empty").status == COMPLETED
+    assert len(result.dates_processed) == len(dates)
+
+    conn.close()
+
+
+def test_migrated_failed_legacy_replay_with_domain_state_rejects_resume(tmp_path, monkeypatch):
+    symbols = ["AAA"]
+    dates = _business_days(date(2026, 1, 5), 5)
+    replay = _replay_metadata("replay-legacy-partial", dates, dates[-1])
+
+    db_path = str(tmp_path / "legacy_partial.db")
+    _build_legacy_v1_replay_fixture(db_path, replay, status=FAILED, with_domain_state=True)
+
+    conn = connect(db_path)  # migrates v1 -> v3; last_completed_date is NULL
+    repo = SandboxRepository(conn)
+    assert repo.get_replay_metadata("replay-legacy-partial").last_completed_date is None
+    assert repo.has_any_domain_state() is True
+    candidates_before = repo.get_candidates_for_date(dates[0])
+    service = _make_replay_service(repo, symbols, dates, monkeypatch)
+
+    with pytest.raises(UntrustworthyResumeWatermarkError, match="watermark"):
+        service.run(replay, dates)
+
+    # Rejection did not mutate anything.
+    stored_after = repo.get_replay_metadata("replay-legacy-partial")
+    assert stored_after.status == FAILED  # not further altered by the rejection
+    assert repo.get_candidates_for_date(dates[0]) == candidates_before
+
+    conn.close()

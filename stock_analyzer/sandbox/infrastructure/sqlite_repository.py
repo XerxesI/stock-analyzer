@@ -856,6 +856,31 @@ class SandboxRepository:
         )
         self._conn.commit()
 
+    _DOMAIN_TABLES = (
+        "ranked_candidates",
+        "entry_orders",
+        "entry_order_attempts",
+        "virtual_positions",
+        "position_snapshots",
+        "recommendations",
+        "virtual_transactions",
+        "data_quality_events",
+    )
+
+    def has_any_domain_state(self) -> bool:
+        """True if ANY row exists in ANY domain table. Used to decide whether a
+        RUNNING/FAILED replay with an unknown (NULL) resume watermark -- e.g. a
+        database migrated from a schema version that predates last_completed_date --
+        can be safely assumed to have done no work yet (empty domain tables, safe to
+        resume from the beginning) or must reject resume outright (see
+        application/replay_service.py's UntrustworthyResumeWatermarkError)."""
+
+        for table in self._DOMAIN_TABLES:
+            row = self._conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
+            if row is not None:
+                return True
+        return False
+
     def mark_date_completed(self, replay_id: str, completed_date: date) -> None:
         """Advances the resume watermark after a date's FULL processing (entries +
         monitoring + candidate generation, if a signal day) has committed
