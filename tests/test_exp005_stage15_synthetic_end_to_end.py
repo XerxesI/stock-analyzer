@@ -352,12 +352,20 @@ def test_synthetic_end_to_end_pipeline(tmp_path, monkeypatch):
     feasibility_criteria = context.manifest.feasibility_criteria
     # No Variant D seeds were run in this synthetic fixture (out of scope for
     # Stage 15 -- see the completion report), so the percentile comparison is
-    # explicitly undetermined, which must make the overall verdict undetermined
-    # too, never a silent pass.
+    # explicitly undetermined (None). With exactly one closed trade, that same
+    # trade is necessarily 100% of net P&L -- a CONFIRMED failure of the
+    # largest-winner concentration criterion (threshold 50%). Per the
+    # three-tier verdict logic (Stage 11-15 second closure, finding 2), a
+    # confirmed failure always wins over an unrelated undetermined criterion,
+    # so the overall verdict must be False here, not None.
     verdict = compute_feasibility_verdict(financial_report, [], feasibility_criteria)
     percentile_criterion = next(c for c in verdict.criteria if c.name == "beats_control_percentile")
     assert percentile_criterion.passed is None
-    assert verdict.verdict is None
+    concentration_criterion = next(
+        c for c in verdict.criteria if c.name == "largest_winner_concentration_within_threshold"
+    )
+    assert concentration_criterion.passed is False
+    assert verdict.verdict is False
     positive_pnl_criterion = next(c for c in verdict.criteria if c.name == "positive_net_pnl")
     assert positive_pnl_criterion.passed is True
 

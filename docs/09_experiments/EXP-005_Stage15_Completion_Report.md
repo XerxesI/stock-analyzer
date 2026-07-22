@@ -1,5 +1,55 @@
 # EXP-005 Stage 15 Completion Report
 
+## Update (2026-07-22): Stage 11-15 second closure cycle
+
+The first closure cycle's five fixes were confirmed substantively correct by
+the reviewer. A second independent review found 6 further integrity
+findings -- none disputed the first round's fixes, but each of these
+directly affects whether the eventual real-run verdict on "does Model 2's
+ranking make money" can be trusted. All six are now fixed; full root-cause
+detail lives in the implementation checklist's own "Stage 11-15 independent
+review, second round" note (`docs/09_experiments/EXP-005_Implementation_Checklist.md`);
+in short:
+
+1. `compute_feasibility_verdict` now requires the control group to be
+   exactly the 50 `DEFAULT_CONTROL_SEEDS` Variant D seeds (no
+   fewer/more/duplicated/foreign seeds) before computing a determined
+   `beats_control_percentile` criterion -- an incomplete group now yields an
+   undetermined criterion, never a percentile from a partial sample.
+2. The three-tier verdict logic now guarantees a confirmed `False` criterion
+   always wins over an unrelated undetermined (`None`) one, instead of the
+   old logic sometimes returning an overall `None` despite an outright
+   failure already being known.
+3. Open-position cost basis now uses the ledger's exact signed cash flow
+   (`-buy_execution.net_cash_flow_units`), which folds in slippage
+   automatically, instead of `gross_notional + commission`; "largest open
+   unrealized gain" is now restricted to genuinely positive positions.
+4. Profit factor is now summed in exact integer money units end to end,
+   converting to a float only once at the very end, removing a
+   float-non-associativity risk.
+5. `compute_opportunity_cost` now fails closed with
+   `MissingEquitySnapshotError` the moment a COMPLETED replay is missing an
+   expected day's equity snapshot, instead of silently continuing.
+6. `load_diagnostics_context` now re-verifies that the persisted
+   `configuration_hash` actually equals `sha256(configuration_json)` --
+   mirroring `real_run.py`'s own write-time relationship -- before trusting
+   anything inside that JSON, so either field being tampered with
+   independently of the other now fails closed.
+
+`tests/test_exp005_stage15_synthetic_end_to_end.py`'s feasibility-verdict
+assertion was updated to match the corrected three-tier logic (its one
+closed trade's 100% winner-concentration is a confirmed failure, so the
+overall verdict is now `False`, not the old `None`); the same fixture's
+happy path already exercises finding 6's self-consistency check, since the
+real `run_real_experiment` pipeline overwrites the placeholder
+`configuration_hash` it starts with. 617/617 tests pass (525 sandbox+exp005,
+92 unrelated); EXP-004's checksum is unchanged
+(`9f4d579df1c39f436ca28a35f768d201d89005fca36b43db3872fbf658c28882`).
+
+**No real EXP-005 replay or P&L has been produced.** This second corrective
+cycle must also pass another independent review before Stages 11-15 can be
+closed. The branch has not been pushed.
+
 ## Update (2026-07-20): Stage 11-15 closure cycle
 
 The first independent review of Stages 11-15 found 4 confirmed P1 defects, the

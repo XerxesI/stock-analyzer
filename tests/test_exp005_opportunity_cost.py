@@ -26,6 +26,7 @@ from stock_analyzer.sandbox.domain.run import SandboxRun
 from stock_analyzer.sandbox.exp005.diagnostics._shared import END_OF_EXPERIMENT, full_market_calendar
 from stock_analyzer.sandbox.exp005.diagnostics.opportunity_cost import (
     CapacityOccupancyReconciliationError,
+    MissingEquitySnapshotError,
     OpportunityCostComputationError,
     compute_opportunity_cost,
 )
@@ -332,22 +333,27 @@ def test_hand_computed_horizons_and_hypothetical_fill():
     assert h20.sessions_observed == 5
 
 
-def test_missing_equity_snapshot_gives_none_and_skips_reconciliation():
+def test_missing_equity_snapshot_fails_closed():
+    """Stage 11-15 second closure, finding 5: a COMPLETED replay persists one
+    equity snapshot per processed day (Section 8.5), including a NO_CAPACITY
+    admission's own day -- a missing one is a genuine data-integrity gap, never
+    silently continued with None counts."""
+
     sandbox_repo, portfolio_repo = _repos()
     candidate = _insert_candidate(sandbox_repo, "c2", "AAA", date(2026, 1, 5), rank=11)
     admission = _insert_admission(portfolio_repo, candidate, date(2026, 1, 5), rank=11, decision=NO_CAPACITY)
     context = _FakeContext(PRICES, date(2026, 1, 10), sandbox_repo, portfolio_repo)
+    # No equity snapshot inserted for date(2026, 1, 5) at all.
 
-    result = compute_opportunity_cost(context, admission, CALENDAR)
-
-    assert result.open_position_count is None
-    assert result.reserved_order_count is None
+    with pytest.raises(MissingEquitySnapshotError):
+        compute_opportunity_cost(context, admission, CALENDAR)
 
 
 def test_no_fill_within_validity_window():
     sandbox_repo, portfolio_repo = _repos()
     candidate = _insert_candidate(sandbox_repo, "c3", "AAA", date(2026, 1, 5), rank=11, signal_close=10.0, max_entry_price=9.0)
     admission = _insert_admission(portfolio_repo, candidate, date(2026, 1, 5), rank=11, decision=NO_CAPACITY)
+    _insert_equity_snapshot(portfolio_repo, date(2026, 1, 5), open_position_count=0, reserved_order_count=0)
     context = _FakeContext(PRICES, date(2026, 1, 10), sandbox_repo, portfolio_repo)
 
     result = compute_opportunity_cost(context, admission, CALENDAR)
@@ -361,6 +367,7 @@ def test_none_max_entry_price_never_fills_and_does_not_raise():
     sandbox_repo, portfolio_repo = _repos()
     candidate = _insert_candidate(sandbox_repo, "c4", "AAA", date(2026, 1, 5), rank=11, signal_close=10.0, max_entry_price=None)
     admission = _insert_admission(portfolio_repo, candidate, date(2026, 1, 5), rank=11, decision=NO_CAPACITY)
+    _insert_equity_snapshot(portfolio_repo, date(2026, 1, 5), open_position_count=0, reserved_order_count=0)
     context = _FakeContext(PRICES, date(2026, 1, 10), sandbox_repo, portfolio_repo)
 
     result = compute_opportunity_cost(context, admission, CALENDAR)

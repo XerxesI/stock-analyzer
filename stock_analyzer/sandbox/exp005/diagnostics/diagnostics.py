@@ -33,6 +33,7 @@ or any core sandbox table.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from dataclasses import dataclass
@@ -146,6 +147,24 @@ def load_diagnostics_context(
         raise DiagnosticsProvenanceError(
             f"replay {replay_id!r}'s persisted configuration_json is not valid JSON: {e}."
         ) from e
+
+    # Self-consistency (Stage 11-15 second closure, finding 6): configuration_hash
+    # is `real_run.py`'s own `_configuration_identity` -- sha256 of the EXACT
+    # persisted configuration_json string, verbatim, using the SAME canonical
+    # serialization already baked into that string (never re-serialized here,
+    # which could silently accept a semantically-identical but differently-
+    # formatted tampering of the JSON text). Recomputing and requiring equality
+    # catches EITHER field being edited independently of the other after the
+    # fact -- not just the narrower manifest_artifact_hash check below.
+    recomputed_configuration_hash = hashlib.sha256(replay.configuration_json.encode("utf-8")).hexdigest()
+    if recomputed_configuration_hash != replay.configuration_hash:
+        raise DiagnosticsProvenanceError(
+            f"replay {replay_id!r}'s persisted configuration_hash ({replay.configuration_hash!r}) does "
+            f"not match sha256(configuration_json) recomputed just now "
+            f"({recomputed_configuration_hash!r}) -- configuration_json and/or configuration_hash was "
+            "modified independently after the replay was written."
+        )
+
     actual_manifest_artifact_hash = configuration.get("manifest_artifact_hash")
     if actual_manifest_artifact_hash != manifest_artifact_hash:
         raise DiagnosticsProvenanceError(

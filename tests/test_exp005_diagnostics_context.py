@@ -10,6 +10,7 @@ at the loading step, not just documented.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import sqlite3
 from datetime import date, datetime, timezone
@@ -98,7 +99,7 @@ def _valid_replay_metadata(manifest: ExperimentManifest, manifest_artifact_hash:
         signal_end_date=manifest.signal_end_date,
         outcome_data_end_date=manifest.outcome_data_end_date,
         configuration_json=configuration_json,
-        configuration_hash="irrelevant-to-this-boundary",
+        configuration_hash=hashlib.sha256(configuration_json.encode("utf-8")).hexdigest(),
         started_at=NOW,
         status=COMPLETED,
         code_commit_sha=manifest.code_commit_sha,
@@ -108,6 +109,14 @@ def _valid_replay_metadata(manifest: ExperimentManifest, manifest_artifact_hash:
         completed_at=NOW,
     )
     base.update(overrides)
+    # Callers that override `configuration_json` alone (to test some OTHER boundary,
+    # e.g. a missing/wrong manifest_artifact_hash inside it) want a self-consistent
+    # hash so the new configuration_hash re-verification (finding 6) doesn't fire
+    # first and mask the boundary they're actually targeting. Callers testing
+    # finding 6 itself override `configuration_hash` explicitly too, which this
+    # leaves untouched.
+    if "configuration_json" in overrides and "configuration_hash" not in overrides:
+        base["configuration_hash"] = hashlib.sha256(base["configuration_json"].encode("utf-8")).hexdigest()
     return ReplayMetadata(**base)
 
 
@@ -237,4 +246,45 @@ def test_replay_malformed_configuration_json_rejected(tmp_path):
     )
 
     with pytest.raises(DiagnosticsProvenanceError, match="not valid JSON"):
+        load_diagnostics_context(conn, manifest_path, feature_dir, REPLAY_ID)
+
+
+# ------------------------------------- configuration_hash self-consistency (finding 6)
+
+
+def test_configuration_json_tampered_independently_of_hash_rejected(tmp_path):
+    """configuration_json was edited after the replay was written, but
+    configuration_hash was left as the (now stale) hash of the ORIGINAL json --
+    must fail closed before any diagnostic runs, not just before the narrower
+    manifest_artifact_hash check."""
+    feature_dir, manifest, manifest_path, manifest_artifact_hash, conn = _setup(tmp_path)
+    original_configuration_json = json.dumps({"manifest_artifact_hash": manifest_artifact_hash}, sort_keys=True)
+    stale_configuration_hash = hashlib.sha256(original_configuration_json.encode("utf-8")).hexdigest()
+    tampered_configuration_json = json.dumps(
+        {"manifest_artifact_hash": manifest_artifact_hash, "tampered": True}, sort_keys=True
+    )
+    SandboxRepository(conn).create_replay_metadata(
+        _valid_replay_metadata(
+            manifest,
+            manifest_artifact_hash,
+            configuration_json=tampered_configuration_json,
+            configuration_hash=stale_configuration_hash,
+        )
+    )
+
+    with pytest.raises(DiagnosticsProvenanceError, match="configuration_hash"):
+        load_diagnostics_context(conn, manifest_path, feature_dir, REPLAY_ID)
+
+
+def test_configuration_hash_tampered_independently_of_json_rejected(tmp_path):
+    """configuration_hash was edited after the replay was written, but
+    configuration_json itself is untouched -- must fail closed just as surely as
+    the json-tampered case above, since either field alone being wrong means the
+    persisted pair is no longer provably self-consistent."""
+    feature_dir, manifest, manifest_path, manifest_artifact_hash, conn = _setup(tmp_path)
+    SandboxRepository(conn).create_replay_metadata(
+        _valid_replay_metadata(manifest, manifest_artifact_hash, configuration_hash="0" * 64)
+    )
+
+    with pytest.raises(DiagnosticsProvenanceError, match="configuration_hash"):
         load_diagnostics_context(conn, manifest_path, feature_dir, REPLAY_ID)

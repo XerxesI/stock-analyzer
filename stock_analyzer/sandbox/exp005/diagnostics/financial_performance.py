@@ -54,6 +54,7 @@ from dataclasses import dataclass
 from datetime import date
 
 from stock_analyzer.sandbox.domain.position import CLOSED
+from stock_analyzer.sandbox.exp005.config import DEFAULT_CONTROL_SEEDS, VARIANT_B, VARIANT_D
 from stock_analyzer.sandbox.exp005.diagnostics.diagnostics import DiagnosticsContext
 from stock_analyzer.sandbox.exp005.diagnostics.report_generator import percentile_rank
 from stock_analyzer.sandbox.exp005.domain.execution import BUY
@@ -71,6 +72,17 @@ class FinancialPerformanceComputationError(RuntimeError):
     performance report at all (no equity snapshots for this replay)."""
 
 
+class ControlGroupValidationError(RuntimeError):
+    """Raised when the Variant D reports handed to `compute_feasibility_verdict`
+    are structurally invalid -- a duplicate seed, a seed outside the frozen
+    `DEFAULT_CONTROL_SEEDS` list, a "control" report that isn't actually Variant
+    D with a seed, or a Variant B report that isn't actually Variant B without
+    one. This is never silently tolerated; a caller assembling the wrong set of
+    reports is a genuine integrity problem, not a "not enough data yet" case
+    (see the module docstring's distinction from an merely INCOMPLETE, but
+    otherwise valid, control group)."""
+
+
 @dataclass(frozen=True)
 class ClosedTradeResult:
     position_id: str
@@ -78,6 +90,7 @@ class ClosedTradeResult:
     symbol: str
     entry_date: date
     exit_date: date
+    net_pnl_units: int
     net_pnl: float
     is_win: bool
 
@@ -108,6 +121,7 @@ class OpenPositionMarkResult:
     candidate_id: str
     symbol: str
     entry_date: date
+    unrealized_gain_units: int
     unrealized_gain: float
 
 
@@ -213,7 +227,7 @@ def _closed_trades(context: DiagnosticsContext, replay_id: str) -> tuple[ClosedT
             ClosedTradeResult(
                 position_id=position.position_id, candidate_id=position.candidate_id, symbol=position.symbol,
                 entry_date=position.entry_date, exit_date=position.exit_date,
-                net_pnl=money_units_to_float(net_pnl_units), is_win=net_pnl_units > 0,
+                net_pnl_units=net_pnl_units, net_pnl=money_units_to_float(net_pnl_units), is_win=net_pnl_units > 0,
             )
         )
     return tuple(sorted(trades, key=lambda t: (t.exit_date, t.position_id)))
@@ -229,12 +243,17 @@ def _open_positions_marked(context: DiagnosticsContext) -> tuple[OpenPositionMar
             continue
         mark_price = position.current_close if position.current_close is not None else position.entry_price
         market_value_units = to_money_units(position.quantity * mark_price)
-        cost_basis_units = buy_execution.gross_notional_units + buy_execution.commission_units
+        # The exact total cash that left the portfolio for this BUY, including
+        # slippage -- `gross_notional + commission` alone omits it (Stage
+        # 11-15 second closure, finding 3). `net_cash_flow_units` is already
+        # negative for a BUY (cash leaving), so negate it for a cost basis.
+        cost_basis_units = -buy_execution.net_cash_flow_units
         unrealized_gain_units = market_value_units - cost_basis_units
         results.append(
             OpenPositionMarkResult(
                 position_id=position.position_id, candidate_id=position.candidate_id, symbol=position.symbol,
-                entry_date=position.entry_date, unrealized_gain=money_units_to_float(unrealized_gain_units),
+                entry_date=position.entry_date, unrealized_gain_units=unrealized_gain_units,
+                unrealized_gain=money_units_to_float(unrealized_gain_units),
             )
         )
     return tuple(results)
@@ -261,17 +280,21 @@ def compute_financial_performance(
 
     trades = _closed_trades(context, replay_id)
     wins = [t for t in trades if t.is_win]
-    losses = [t for t in trades if t.net_pnl < 0]
-    gross_wins = sum(t.net_pnl for t in wins)
-    gross_losses = sum(-t.net_pnl for t in losses)
+    losses = [t for t in trades if t.net_pnl_units < 0]
+    # Integer-first (Stage 11-15 second closure, finding 4): gross wins/losses
+    # are summed in exact integer money units; the division into a float ratio
+    # is the ONE, final presentation-layer conversion -- never a running sum of
+    # already-rounded floats.
+    gross_wins_units = sum(t.net_pnl_units for t in wins)
+    gross_losses_units = sum(-t.net_pnl_units for t in losses)
     if not trades:
         profit_factor = None
-    elif gross_losses == 0:
-        profit_factor = float("inf") if gross_wins > 0 else None
+    elif gross_losses_units == 0:
+        profit_factor = float("inf") if gross_wins_units > 0 else None
     else:
-        profit_factor = gross_wins / gross_losses
+        profit_factor = gross_wins_units / gross_losses_units
 
-    largest_winner = max(wins, key=lambda t: t.net_pnl) if wins else None
+    largest_winner = max(wins, key=lambda t: t.net_pnl_units) if wins else None
     if largest_winner is not None and net_pnl > 0:
         largest_winner_pct = largest_winner.net_pnl / net_pnl
         net_pnl_minus_largest_winner = net_pnl - largest_winner.net_pnl
@@ -286,7 +309,12 @@ def compute_financial_performance(
         remains_positive = None
 
     open_marks = _open_positions_marked(context)
-    largest_open = max(open_marks, key=lambda p: p.unrealized_gain) if open_marks else None
+    # Only a genuinely UNREALIZED-GAIN position can be "the largest winner" --
+    # Stage 11-15 second closure, finding 3: if every open position is
+    # currently underwater, there is no unresolved winner to report, and the
+    # field must be undetermined (None), never "the least-bad loss."
+    positive_open_marks = [p for p in open_marks if p.unrealized_gain_units > 0]
+    largest_open = max(positive_open_marks, key=lambda p: p.unrealized_gain_units) if positive_open_marks else None
     largest_open_pct = (largest_open.unrealized_gain / net_pnl) if (largest_open is not None and net_pnl > 0) else None
     open_value_pct_of_ending_equity = (
         snapshots[-1].open_position_market_value_units / ending_equity_units if ending_equity_units != 0 else None
@@ -337,6 +365,49 @@ def _criterion(name: str, value: float | None, threshold: float, comparison: str
     return FeasibilityCriterionResult(name=name, value=value, threshold=threshold, comparison=comparison, passed=passed)
 
 
+def _validate_control_group(variant_b: FinancialPerformanceReport, variant_d_reports: list[FinancialPerformanceReport]) -> None:
+    """Structural validity only -- never tolerated, regardless of count (Stage
+    11-15 second closure, finding 1). A merely INCOMPLETE but otherwise valid
+    control group (fewer than 50 seeds, no duplicates, no foreign seeds) is NOT
+    an error here -- see `_is_complete_control_group`, checked separately -- it
+    is the ordinary state before all 50 seeds have run."""
+
+    if variant_b.variant_id != VARIANT_B:
+        raise ControlGroupValidationError(
+            f"the Variant B report's own variant_id is {variant_b.variant_id!r}, not {VARIANT_B!r}."
+        )
+    if variant_b.control_seed is not None:
+        raise ControlGroupValidationError(
+            f"the Variant B report carries a control_seed ({variant_b.control_seed!r}) -- Variant B must not."
+        )
+
+    seen_seeds: set[int] = set()
+    for report in variant_d_reports:
+        if report.variant_id != VARIANT_D:
+            raise ControlGroupValidationError(
+                f"control report {report.replay_id!r} has variant_id {report.variant_id!r}, not {VARIANT_D!r}."
+            )
+        if report.control_seed is None:
+            raise ControlGroupValidationError(f"control report {report.replay_id!r} has no control_seed.")
+        if report.control_seed in seen_seeds:
+            raise ControlGroupValidationError(f"duplicate control_seed {report.control_seed!r} in the control group.")
+        seen_seeds.add(report.control_seed)
+        if report.control_seed not in DEFAULT_CONTROL_SEEDS:
+            raise ControlGroupValidationError(
+                f"control_seed {report.control_seed!r} (report {report.replay_id!r}) is not in the frozen "
+                f"{len(DEFAULT_CONTROL_SEEDS)}-seed DEFAULT_CONTROL_SEEDS list."
+            )
+
+
+def _is_complete_control_group(variant_d_reports: list[FinancialPerformanceReport]) -> bool:
+    """True only if `variant_d_reports` is EXACTLY the frozen 50-seed set --
+    never an arbitrary count (Stage 11-15 second closure, finding 1). Callers
+    must run `_validate_control_group` first so "exactly 50" also implies
+    unique and all-frozen-seeds by construction."""
+
+    return len(variant_d_reports) == len(DEFAULT_CONTROL_SEEDS)
+
+
 def compute_feasibility_verdict(
     variant_b: FinancialPerformanceReport,
     variant_d_reports: list[FinancialPerformanceReport],
@@ -347,18 +418,34 @@ def compute_feasibility_verdict(
     database) into the final pass/fail verdict against the frozen
     `feasibility_criteria` (as recorded on the Experiment Manifest -- see the
     module docstring on why this dict, not an invented threshold, is the
-    authoritative source). `variant_d_reports` should ordinarily be the full
-    50-seed set; percentile_rank degrades gracefully (returns None) for an
-    empty or partial list, so a partial verdict is still computable, but is
-    explicitly None (never a false pass) when the comparison cannot be made."""
+    authoritative source).
+
+    `variant_d_reports` is validated structurally (raising `ControlGroupValidationError`
+    for a duplicate seed, a seed outside the frozen 50, or a report that isn't
+    genuinely Variant B/D) and then checked for EXACT completeness against the
+    frozen 50-seed `DEFAULT_CONTROL_SEEDS` list -- an incomplete-but-otherwise-
+    valid control group never produces a percentile result (Stage 11-15 second
+    closure, finding 1): `beats_control_percentile` is reported as
+    undetermined, not computed from whatever subset happens to be available.
+
+    Verdict logic is three-tier (Stage 11-15 second closure, finding 2): ANY
+    confirmed failure makes the whole verdict `False`, even if another
+    criterion is merely undetermined -- a known failure is never masked by an
+    unrelated unknown. Only once no criterion is `False` does an undetermined
+    criterion make the verdict `None`. `True` requires every criterion `True`."""
+
+    _validate_control_group(variant_b, variant_d_reports)
 
     max_drawdown_threshold = float(feasibility_criteria["max_drawdown_threshold"])
     largest_win_pct_threshold = float(feasibility_criteria["largest_win_pct_of_net_profit_threshold"])
     control_percentile_threshold = float(feasibility_criteria["control_percentile_threshold"])
     min_profit_factor = float(feasibility_criteria["min_profit_factor"])
 
-    d_returns = [r.net_return_pct for r in variant_d_reports]
-    b_percentile = percentile_rank(variant_b.net_return_pct, d_returns) if d_returns else None
+    if _is_complete_control_group(variant_d_reports):
+        d_returns = [r.net_return_pct for r in variant_d_reports]
+        b_percentile = percentile_rank(variant_b.net_return_pct, d_returns)
+    else:
+        b_percentile = None
 
     criteria = (
         _criterion(CRITERION_POSITIVE_NET_PNL, variant_b.net_pnl, 0.0, ">"),
@@ -373,10 +460,13 @@ def compute_feasibility_verdict(
         ),
     )
 
-    if any(c.passed is None for c in criteria):
+    # Three-tier: a confirmed failure always wins over an unrelated unknown.
+    if any(c.passed is False for c in criteria):
+        verdict = False
+    elif any(c.passed is None for c in criteria):
         verdict = None
     else:
-        verdict = all(c.passed for c in criteria)
+        verdict = True
 
     return FeasibilityVerdict(
         variant_b_replay_id=variant_b.replay_id, variant_d_seed_count=len(variant_d_reports),

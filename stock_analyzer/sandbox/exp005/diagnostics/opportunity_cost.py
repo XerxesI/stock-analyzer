@@ -88,6 +88,14 @@ class CapacityOccupancyReconciliationError(RuntimeError):
     data-integrity problem, never silently accepted."""
 
 
+class MissingEquitySnapshotError(RuntimeError):
+    """Raised when no portfolio_equity_snapshots row exists for a NO_CAPACITY
+    admission's own as_of_date (Stage 11-15 second closure, finding 5). A
+    COMPLETED replay persists exactly one snapshot per processed day (Section
+    8.5) -- a missing one is a genuine data-integrity gap, never silently
+    treated as "capacity state unknown, continue anyway.\""""
+
+
 def _evaluate_hypothetical_fill(open_price: float, low_price: float, max_entry_price: float) -> tuple[str, float | None]:
     """Verbatim mirror of EntryService._evaluate_execution's ADR-007 rule -- see
     the module docstring on why this is duplicated, not imported."""
@@ -258,8 +266,9 @@ def _reconstruct_occupants(
 def _reconcile_occupancy_with_equity_snapshot(
     context: DiagnosticsContext, admission: PortfolioAdmission, equity_snapshot,
 ) -> None:
-    if equity_snapshot is None:
-        return
+    """`equity_snapshot` must already be known non-None -- callers are
+    responsible for the fail-closed `MissingEquitySnapshotError` check (Stage
+    11-15 second closure, finding 5); this function only ever reconciles."""
 
     full_day_reservations, full_day_positions = _reconstruct_occupants(
         context, admission.replay_id, admission.as_of_date, same_day_rank_cutoff=None,
@@ -306,8 +315,15 @@ def compute_opportunity_cost(
         raise OpportunityCostComputationError(f"no ranked_candidates row for {admission.candidate_id}.")
 
     equity_snapshot = context.portfolio_repo.get_equity_snapshot(admission.replay_id, admission.as_of_date)
-    open_position_count = equity_snapshot.open_position_count if equity_snapshot is not None else None
-    reserved_order_count = equity_snapshot.reserved_order_count if equity_snapshot is not None else None
+    if equity_snapshot is None:
+        raise MissingEquitySnapshotError(
+            f"no portfolio_equity_snapshots row exists for replay_id={admission.replay_id!r} on "
+            f"{admission.as_of_date} -- a COMPLETED replay persists one snapshot per processed day "
+            "(Section 8.5), including a NO_CAPACITY admission's own day. Opportunity-cost "
+            "diagnostics cannot proceed without it."
+        )
+    open_position_count = equity_snapshot.open_position_count
+    reserved_order_count = equity_snapshot.reserved_order_count
     _reconcile_occupancy_with_equity_snapshot(context, admission, equity_snapshot)
 
     occupying_reservations, occupying_positions = _reconstruct_occupants(

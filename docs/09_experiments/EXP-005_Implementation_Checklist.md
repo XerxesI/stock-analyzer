@@ -417,3 +417,106 @@ different names. This is a naming difference only, not a behavioral deviation.
       review before Stages 11-15 can be closed; only after that passes may a
       final manifest be generated for the commit with which a real Variant B
       or Variant D run is actually executed.
+
+      **Stage 11-15 independent review, second round (2026-07-22): the first
+      round's five fixes were confirmed substantively correct; 6 further
+      integrity findings, closed in a second corrective cycle.** All six were
+      genuine implementation gaps, not test-only issues -- the reviewer noted
+      59/59 targeted tests were passing beforehand precisely because none of
+      them exercised these specific edge cases.
+
+      1. **`compute_feasibility_verdict` accepted an arbitrary number of
+         Variant D runs as "the" control group**, so a partial or even
+         foreign/duplicated seed set could silently produce a determined
+         percentile verdict. Fixed: `_validate_control_group` now requires
+         `variant_b.variant_id == VARIANT_B` with no `control_seed`, and
+         every D report to have `variant_id == VARIANT_D` with a
+         `control_seed` drawn from `DEFAULT_CONTROL_SEEDS` with no
+         duplicates or unknown seeds -- raising `ControlGroupValidationError`
+         otherwise. A separate `_is_complete_control_group` check (exactly
+         `len(DEFAULT_CONTROL_SEEDS)` valid reports) gates whether
+         `beats_control_percentile` is computed at all; an incomplete group
+         yields an undetermined (`None`) criterion, never a computed
+         percentile from a partial sample. Regression tests cover exactly
+         1/5/49/50/51 control reports, plus duplicated and unknown seeds.
+      2. **The three-tier feasibility verdict could return `None` even when
+         one criterion was a CONFIRMED failure**, because the old logic
+         short-circuited on the first `None` it encountered regardless of
+         whether a `False` also existed. Fixed: verdict is `False` if ANY
+         criterion is `False` (checked first, unconditionally), else `None`
+         if ANY criterion is `None`, else `True` only if ALL are `True` --
+         a confirmed failure now always wins over an unrelated undetermined
+         criterion. Regression test: net P&L negative (confirmed failure)
+         with winner-concentration undeterminable (no closed trades) must
+         yield `False`, not `None`.
+      3. **Open-position cost basis used `gross_notional + commission`,
+         omitting slippage** -- not the actual cash that left the portfolio.
+         Fixed: `cost_basis_units = -buy_execution.net_cash_flow_units`, the
+         ledger's own exact signed cash flow for the BUY (already negative,
+         so negated for a cost basis), which folds in slippage automatically
+         since it's part of `net_cash_flow_units` by construction. Also:
+         "largest open unrealized gain" previously could select the
+         *smallest loss* when every open position was underwater; now
+         restricted to positions with `unrealized_gain_units > 0`, and is
+         `None` (undetermined) when none qualify. Regression tests use
+         non-zero commission and slippage and assert against a value derived
+         from the real `compute_buy_accounting`/`compute_sell_accounting`
+         functions, not hand-picked literals; a companion test proves an
+         all-losses portfolio reports no largest-open-winner.
+      4. **Profit factor summed pre-converted floats**, risking the same
+         float-non-associativity class of bug documented in Stage 2-5's
+         corrective cycle (`(0.1+0.2)/0.3 != 1.0` exactly). Fixed:
+         `gross_wins_units`/`gross_losses_units` are summed in exact integer
+         money units from each trade's own `net_pnl_units`; the division to
+         a float `profit_factor` happens exactly once, at the end. Regression
+         test uses sell prices producing exact +$0.10/+$0.20/-$0.30 trades
+         and asserts `profit_factor == 1.0` with exact equality (not
+         `pytest.approx`).
+      5. **`compute_opportunity_cost` silently returned `None`-ish zero
+         counts when a day's `portfolio_equity_snapshots` row was missing**,
+         instead of treating a gap in a COMPLETED replay's supposedly
+         complete daily snapshot record as the data-integrity violation it
+         is. Fixed: raises `MissingEquitySnapshotError` immediately once
+         `get_equity_snapshot` returns `None`, before any reconciliation or
+         occupancy reconstruction runs. Regression test: a COMPLETED replay
+         with a `NO_CAPACITY` admission whose day has no equity snapshot now
+         fails closed with a clear error instead of silently continuing.
+      6. **`load_diagnostics_context` verified the manifest-artifact hash
+         embedded inside `configuration_json`, but never verified
+         `configuration_json` and `configuration_hash` were still
+         self-consistent with each other** -- either field could be edited
+         independently after the replay was written (e.g. a stale hash left
+         over from a since-edited json, or vice versa) and diagnostics would
+         proceed regardless. Fixed: recomputes
+         `hashlib.sha256(replay.configuration_json.encode("utf-8")).hexdigest()`
+         -- the exact same relationship `real_run.py`'s own
+         `_configuration_identity` establishes at write time, using the
+         persisted json string verbatim, never re-serialized -- and requires
+         equality with the persisted `configuration_hash` before the
+         manifest-artifact-hash check (or anything else) runs. Regression
+         tests cover configuration_json tampered independently (stale hash
+         left behind) and configuration_hash tampered independently (json
+         left correct); both fail closed with `DiagnosticsProvenanceError`
+         before analysis.
+
+      All six fixes are covered by dedicated regression tests reproducing
+      the reviewer's exact scenarios (`tests/test_exp005_financial_
+      performance.py`, `tests/test_exp005_opportunity_cost.py`,
+      `tests/test_exp005_diagnostics_context.py`), plus the pre-existing
+      `tests/test_exp005_stage15_synthetic_end_to_end.py` mutation-guard
+      fixture re-verified against the corrected three-tier verdict logic
+      (its single closed trade's 100% winner-concentration is now a
+      CONFIRMED failure, so the overall verdict is `False`, not the old
+      `None`) and confirmed to exercise finding 6's self-consistency check
+      on its happy path (the real `run_real_experiment` pipeline already
+      overwrites the placeholder `configuration_hash` with a genuinely
+      matching one). 617/617 tests pass (525 sandbox+exp005, 92 unrelated);
+      EXP-004's checksum is unchanged
+      (`9f4d579df1c39f436ca28a35f768d201d89005fca36b43db3872fbf658c28882`).
+
+      **No real EXP-005 replay or P&L has been produced.** Per the standing
+      authorization, this second corrective cycle must also pass ANOTHER
+      independent review before Stages 11-15 can be closed; only after that
+      passes may a final manifest be generated for the commit with which a
+      real Variant B or Variant D run is actually executed. The branch has
+      not been pushed.
