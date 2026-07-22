@@ -151,6 +151,62 @@ Unchanged from Revision 2 (Section 4's table stands as-is).
 
 Unchanged from Revision 2.
 
+**Documented deviation (2026-07-22, restoring a missing frozen value from the
+strongest available project source -- licensed by the Status section's own
+"genuine contradiction... documented deviation, not a silent edit" clause):**
+Revision 2's own period text is not independently recoverable from this
+repository's git history -- only one commit ever added this document,
+already at Revision 5. The real EXP-005 run's period is therefore fixed,
+before any real EXP-005 result has been viewed, to EXP-004's own
+already-frozen, already-executed period exactly:
+
+```text
+signal_start_date     = 2024-11-18
+signal_end_date       = 2025-09-03
+outcome_data_end_date = 2025-10-20
+```
+
+**Rationale:**
+- This period spans Model 2's own SWING_20 validation split exactly -- the
+  identical period EXP-004's Historical Sandbox Replay already ran against.
+- EXP-005's purpose is to isolate the effect of the PORTFOLIO POLICY and
+  EXIT POLICY from the model's ranking, on the SAME historical observation
+  window already used for EXP-004's decision-mechanics validation -- not to
+  establish a new independent out-of-sample confirmation. Results are
+  therefore directly comparable to EXP-004's.
+- The frozen SWING_20 OHLCV artifact covers the full period.
+- 33 additional real trading sessions after `signal_end_date` cover the
+  20-session holding horizon, the 2-session order-validity window, and every
+  diagnostic horizon (up to 20 sessions).
+- The full replay spans 230 real trading sessions -- confirmed against
+  EXP-004's own already-computed total for this identical period
+  (`docs/09_experiments/EXP-004_Sandbox_Historical_Replay.md`: "total dates
+  processed: 230").
+
+**Explicit limitation:** this is a feasibility pilot conducted on an
+already-used validation period, not an independent out-of-sample
+confirmation. A positive feasibility result here does not by itself
+establish the policy would perform out-of-sample; if the result is
+positive, a separate confirmatory experiment on a different, still-unused
+period (e.g. EXP-003's Locked Test window, 2025-09-04 through 2026-06-17,
+"previously completely unused in any prior SWING_20 work") is required
+before any stronger claim.
+
+**Candidate-generation/monitoring boundary** (unchanged from Revision 2 and
+from EXP-004's own convention, restated here for the avoidance of doubt): no
+candidate is generated for any date after `signal_end_date`; entry
+processing and position monitoring continue through `outcome_data_end_date`
+so already-created positions can still resolve.
+
+**Trading calendar:** the exact session sequence is derived from the frozen
+SWING_20 prices artifact's own observed dates within
+`[signal_start_date, outcome_data_end_date]` (`manifest.compute_frozen_
+calendar`, Stage 9's existing mechanism) -- never constructed from a generic
+business-day calendar. The real run must independently re-derive this same
+230-session count before proceeding; a mismatch means the frozen artifact's
+data coverage has changed since EXP-004 and the real run must stop rather
+than proceed on a silently different calendar.
+
 # 6. Execution semantics
 
 Unchanged from Revision 2.
