@@ -137,7 +137,12 @@ def main() -> None:
     print("[gate] validate_freeze: PASSED")
 
     lineage = verify_frozen_lineage(FEATURE_SNAPSHOT_DIR)
-    trading_dates, calendar_version = compute_frozen_calendar(lineage.prices_df, SIGNAL_START, OUTCOME_END)
+    trading_dates_tuple, calendar_version = compute_frozen_calendar(lineage.prices_df, SIGNAL_START, OUTCOME_END)
+    # ReplayService._validate_trading_dates does `trading_dates != sorted(trading_dates)`
+    # with no type coercion -- a tuple never equals sorted()'s list even with
+    # identical elements, so this MUST be a real list, not the tuple
+    # compute_frozen_calendar returns.
+    trading_dates = list(trading_dates_tuple)
     print(f"[gate] re-derived trading_dates: {len(trading_dates)} sessions "
           f"({trading_dates[0]} .. {trading_dates[-1]})")
     if len(trading_dates) != EXPECTED_SESSION_COUNT:
