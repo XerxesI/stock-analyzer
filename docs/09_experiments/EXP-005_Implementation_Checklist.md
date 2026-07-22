@@ -596,3 +596,69 @@ different names. This is a naming difference only, not a behavioral deviation.
       passes may a final manifest be generated for the commit with which a
       real Variant B or Variant D run is actually executed. The branch has
       not been pushed.
+
+      **Stage 11-15 independent review, fourth round (2026-07-22): all
+      third-round fixes confirmed correct; one further P1 provenance finding
+      closed in a fourth, narrow corrective cycle.** Root cause: the third
+      closure's `configuration_hash` self-consistency check (second closure,
+      finding 6) only ever proved `configuration_json`'s OWN text was not
+      edited AFTER being persisted -- it says nothing about whether the
+      `exp005_config`/`manifest` sub-objects embedded INSIDE that text were
+      ever actually anchored to the real, on-disk manifest in the first
+      place. A wholesale-regenerated `configuration_json`, hashed correctly
+      from the start, could embed different feasibility thresholds (or a
+      different manifest snapshot entirely) while still citing the correct
+      `manifest_artifact_hash` -- `load_diagnostics_context` never actually
+      compared the embedded objects' CONTENT against the manifest it had
+      already loaded and verified.
+
+      Fixed, all in `load_diagnostics_context`, immediately after the
+      existing `configuration_hash`/`manifest_artifact_hash` checks:
+      1. `configuration["manifest"]` must now equal `manifest.canonical_dict()`
+         (the manifest freshly re-verified from its own persisted artifact
+         file) byte-for-byte, as parsed dicts.
+      2. `configuration["exp005_config"]["feasibility_criteria"]` must equal
+         `manifest.feasibility_criteria` exactly.
+      3. `DiagnosticsContext.feasibility_criteria` is now populated from a
+         defensive copy of the MANIFEST's own `feasibility_criteria` (never
+         the configuration dict, even though the two are now proven equal by
+         (2) -- the manifest is the authoritative source, not a value that
+         happens to currently agree with it).
+      4. A Variant D `control_seed` must now be a genuine `int` (not a JSON
+         boolean, which Python's `isinstance(x, int)` would otherwise accept
+         since `bool` subclasses `int`) AND a member of
+         `manifest.control_seed_list` -- not merely "not None."
+      5. `exp005_config.experiment_id` must equal `manifest.experiment_id`,
+         and `exp005_config`'s own `portfolio`/`admission_rules` sub-dicts
+         must hash (via the same formula `Exp005Config.portfolio_
+         configuration_hash()` uses) to `manifest.portfolio_configuration_hash`
+         -- the same two checks `real_run.py`'s own `verify_real_run_
+         preconditions` gate applies at run-start time, now re-verified when
+         the persisted configuration is read back, since that gate only ever
+         ran once, before this JSON was written.
+
+      Five new regression tests (`tests/test_exp005_diagnostics_context.py`)
+      reproduce the reviewer's exact scenarios: feasibility thresholds
+      altered with a correctly recomputed `configuration_hash` still rejected
+      (via the manifest-anchoring check, not the hash check); the embedded
+      manifest object altered with a correctly recomputed hash still
+      rejected; a Variant D replay with an unknown or non-integer seed AND
+      zero executions rejected (proving this fails at load time, not merely
+      via the execution cross-check); a genuinely correct, fully manifest-
+      anchored configuration/manifest pair passes; and the Stage 15 real
+      end-to-end pipeline explicitly asserts the final verdict's own
+      thresholds equal `manifest.feasibility_criteria`. The four existing
+      malformed-`exp005_config` tests were adjusted to build each bad payload
+      from an otherwise-fully-valid base (rather than a minimal hand-built
+      dict), since the new experiment_id/portfolio-hash checks would
+      otherwise fire before the specific field each test targets. 642/642
+      tests pass (550 sandbox+exp005, 92 unrelated); EXP-004's checksum is
+      unchanged
+      (`9f4d579df1c39f436ca28a35f768d201d89005fca36b43db3872fbf658c28882`).
+
+      **No real EXP-005 replay or P&L has been produced.** Per the standing
+      authorization, this fourth corrective cycle must also pass ANOTHER
+      independent review before Stages 11-15 can be closed; only after that
+      passes may a final manifest be generated for the commit with which a
+      real Variant B or Variant D run is actually executed. The branch has
+      not been pushed.

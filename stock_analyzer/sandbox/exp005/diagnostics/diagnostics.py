@@ -42,7 +42,7 @@ from pathlib import Path
 import pandas as pd
 
 from stock_analyzer.sandbox.domain.replay import COMPLETED
-from stock_analyzer.sandbox.exp005.config import SUPPORTED_VARIANTS, VARIANT_B, VARIANT_D
+from stock_analyzer.sandbox.exp005.config import SUPPORTED_VARIANTS, VARIANT_B, VARIANT_D, canonical_json
 from stock_analyzer.sandbox.exp005.infrastructure.frozen_artifacts import sha256_of_file, verify_frozen_lineage
 from stock_analyzer.sandbox.exp005.infrastructure.repository import PortfolioRepository
 from stock_analyzer.sandbox.exp005.manifest import ExperimentManifest, read_manifest_artifact
@@ -189,6 +189,23 @@ def load_diagnostics_context(
             "provably run against this exact manifest artifact."
         )
 
+    # Embedded-manifest anchoring (Stage 11-15 fourth closure, finding 1):
+    # `configuration_hash` only proves configuration_json's OWN internal text
+    # was not edited -- it says nothing about whether the `manifest` object
+    # embedded inside that same JSON blob is still the actual manifest this
+    # `manifest_artifact_hash` points to. A configuration_json that was
+    # regenerated wholesale (new hash and all) could embed a DIFFERENT
+    # manifest snapshot while still citing the correct manifest_artifact_hash
+    # by coincidence or tampering. Requiring byte-for-byte equality against
+    # the manifest freshly re-verified above closes that gap.
+    embedded_manifest = configuration.get("manifest")
+    if embedded_manifest != manifest.canonical_dict():
+        raise DiagnosticsProvenanceError(
+            f"replay {replay_id!r}'s persisted configuration_json's embedded 'manifest' object does "
+            "not exactly match the manifest re-verified from its own persisted artifact file -- the "
+            "configuration and the manifest it claims to be tied to have diverged."
+        )
+
     # Variant/seed/feasibility identity (Stage 11-15 third closure): derived
     # EXCLUSIVELY from this already hash-verified configuration_json, never
     # accepted as a parameter downstream -- so a Variant D run's report can
@@ -214,16 +231,67 @@ def load_diagnostics_context(
             f"replay {replay_id!r}'s persisted configuration_json records variant_id={VARIANT_B!r} "
             f"together with a control_seed ({control_seed!r}) -- Variant B must never carry one."
         )
-    if variant_id == VARIANT_D and control_seed is None:
+    if variant_id == VARIANT_D:
+        # A real integer, not merely "not None" -- JSON's boolean True/False
+        # would otherwise pass a bare `is not None` check (bool is an int
+        # subclass in Python), and a seed must also be one of the manifest's
+        # OWN approved seeds, not merely any integer (Stage 11-15 fourth
+        # closure, finding 4).
+        if not isinstance(control_seed, int) or isinstance(control_seed, bool):
+            raise DiagnosticsProvenanceError(
+                f"replay {replay_id!r}'s persisted configuration_json records variant_id={VARIANT_D!r} "
+                f"with a non-integer control_seed ({control_seed!r}) -- every Variant D run requires "
+                "one, drawn from the manifest's approved control_seed_list."
+            )
+        if control_seed not in manifest.control_seed_list:
+            raise DiagnosticsProvenanceError(
+                f"replay {replay_id!r}'s persisted configuration_json records control_seed "
+                f"{control_seed!r}, which is not in the manifest's approved "
+                f"control_seed_list ({manifest.control_seed_list!r})."
+            )
+
+    # Cross-checks against the manifest using the SAME rules `real_run.py`'s
+    # own `verify_real_run_preconditions` gate applies at run-start time
+    # (Stage 11-15 fourth closure, finding 5) -- re-verified here because that
+    # gate only ever ran once, before this configuration_json was persisted;
+    # nothing re-confirms the relationship still holds when reading it back.
+    if exp005_config_payload.get("experiment_id") != manifest.experiment_id:
         raise DiagnosticsProvenanceError(
-            f"replay {replay_id!r}'s persisted configuration_json records variant_id={VARIANT_D!r} "
-            "with no control_seed -- every Variant D run requires one."
+            f"replay {replay_id!r}'s persisted configuration_json's exp005_config.experiment_id "
+            f"({exp005_config_payload.get('experiment_id')!r}) does not match the manifest's "
+            f"experiment_id ({manifest.experiment_id!r})."
         )
-    feasibility_criteria = exp005_config_payload.get("feasibility_criteria")
-    if not isinstance(feasibility_criteria, dict) or not feasibility_criteria:
+    embedded_portfolio_hash = hashlib.sha256(
+        canonical_json(
+            {
+                "portfolio": exp005_config_payload.get("portfolio"),
+                "admission_rules": exp005_config_payload.get("admission_rules"),
+            }
+        ).encode("utf-8")
+    ).hexdigest()
+    if embedded_portfolio_hash != manifest.portfolio_configuration_hash:
         raise DiagnosticsProvenanceError(
-            f"replay {replay_id!r}'s persisted configuration_json has no usable feasibility_criteria."
+            f"replay {replay_id!r}'s persisted configuration_json's exp005_config.portfolio/"
+            f"admission_rules hash to {embedded_portfolio_hash!r}, which does not match the "
+            f"manifest's recorded portfolio_configuration_hash ({manifest.portfolio_configuration_hash!r})."
         )
+
+    # Feasibility criteria (Stage 11-15 fourth closure, finding 2): the
+    # configuration's OWN copy must exactly equal the manifest's frozen
+    # feasibility_criteria -- `configuration_hash` alone only proves this
+    # configuration_json's text wasn't edited after the fact, not that its
+    # embedded criteria still agree with the manifest they are supposed to
+    # come from. `DiagnosticsContext.feasibility_criteria` is then populated
+    # from the MANIFEST's own copy (finding 3), a defensive copy so no caller
+    # can mutate the manifest's dict through it, never from the configuration
+    # dict even though the two are now proven equal.
+    if exp005_config_payload.get("feasibility_criteria") != manifest.feasibility_criteria:
+        raise DiagnosticsProvenanceError(
+            f"replay {replay_id!r}'s persisted configuration_json's exp005_config.feasibility_criteria "
+            f"({exp005_config_payload.get('feasibility_criteria')!r}) does not match the manifest's "
+            f"own frozen feasibility_criteria ({manifest.feasibility_criteria!r})."
+        )
+    feasibility_criteria = dict(manifest.feasibility_criteria)
 
     # Cross-check every execution this replay actually produced against that
     # same config-derived identity -- a disagreement (e.g. a database whose

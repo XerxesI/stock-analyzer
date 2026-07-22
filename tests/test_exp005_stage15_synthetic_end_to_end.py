@@ -375,6 +375,15 @@ def test_synthetic_end_to_end_pipeline(tmp_path, monkeypatch):
     positive_pnl_criterion = next(c for c in verdict.criteria if c.name == "positive_net_pnl")
     assert positive_pnl_criterion.passed is True
 
+    # --- The verdict's own thresholds are provably the manifest's frozen
+    # feasibility_criteria (Stage 11-15 fourth closure, findings 2-3), not
+    # merely whatever the replay's configuration_json happened to claim.
+    assert financial_report.feasibility_criteria == context.manifest.feasibility_criteria
+    max_drawdown_criterion = next(c for c in verdict.criteria if c.name == "max_drawdown_within_threshold")
+    assert max_drawdown_criterion.threshold == pytest.approx(
+        float(context.manifest.feasibility_criteria["max_drawdown_threshold"])
+    )
+
     # --- No diagnostic call above mutated any decision-time/accounting table.
     fingerprint_after = _table_fingerprint(conn)
     assert fingerprint_after == fingerprint_before

@@ -1,5 +1,36 @@
 # EXP-005 Stage 15 Completion Report
 
+## Update (2026-07-22): Stage 11-15 fourth closure cycle
+
+The third closure cycle's fixes were confirmed correct. A fourth independent
+review found one further, narrow P1 provenance gap: `configuration_hash`
+only ever proved `configuration_json`'s own text wasn't edited after being
+written -- it never proved the `exp005_config`/`manifest` objects embedded
+inside that text were actually anchored to the real manifest in the first
+place. A wholesale-regenerated (but internally self-consistent)
+`configuration_json` could in principle embed different feasibility
+thresholds, or a different manifest snapshot, while still citing the correct
+`manifest_artifact_hash`.
+
+Fixed in `load_diagnostics_context`, immediately after the existing hash
+checks: the embedded `manifest` object must now equal the freshly
+re-verified manifest's own canonical dict exactly; the embedded
+`feasibility_criteria` must equal the manifest's own `feasibility_criteria`
+exactly (and `DiagnosticsContext.feasibility_criteria` is now sourced from a
+defensive copy of the MANIFEST, never the configuration dict); a Variant D
+`control_seed` must be a genuine integer drawn from `manifest.control_
+seed_list`; and `exp005_config`'s `experiment_id` and recomputed `portfolio_
+configuration_hash` must match the manifest, mirroring the same checks
+`real_run.py`'s own pre-run gate applies at write time.
+
+642/642 tests pass (550 sandbox+exp005, 92 unrelated); EXP-004's checksum is
+unchanged
+(`9f4d579df1c39f436ca28a35f768d201d89005fca36b43db3872fbf658c28882`).
+
+**No real EXP-005 replay or P&L has been produced.** This fourth corrective
+cycle must also pass another independent review before Stages 11-15 can be
+closed. The branch has not been pushed.
+
 ## Update (2026-07-22): Stage 11-15 third closure cycle
 
 The second closure cycle's six fixes were confirmed correctly resolved by the

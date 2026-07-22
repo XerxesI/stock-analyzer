@@ -144,6 +144,21 @@ def _valid_replay_metadata(
     return ReplayMetadata(**base)
 
 
+def _build_configuration_json_and_hash(exp005_config_dict: dict, manifest_dict: dict, manifest_artifact_hash: str) -> tuple[str, str]:
+    """Mirrors `real_run.py`'s own `_configuration_identity` payload shape and
+    hash relationship exactly, but lets a test construct/tamper with each
+    sub-object independently and still recompute a genuinely self-consistent
+    `configuration_hash` -- proving Stage 11-15 fourth closure's checks catch
+    a mismatch that only manifests INSIDE an internally-consistent blob, which
+    the second closure's configuration_hash self-check alone cannot see."""
+
+    payload = {
+        "exp005_config": exp005_config_dict, "manifest": manifest_dict, "manifest_artifact_hash": manifest_artifact_hash,
+    }
+    configuration_json = json.dumps(payload, sort_keys=True)
+    return configuration_json, hashlib.sha256(configuration_json.encode("utf-8")).hexdigest()
+
+
 def _setup(tmp_path):
     feature_dir = _build_fixture_snapshots(tmp_path)
     config = Exp005Config()
@@ -366,7 +381,12 @@ def test_replay_configuration_json_missing_exp005_config_rejected(tmp_path):
     SandboxRepository(conn).create_replay_metadata(
         _valid_replay_metadata(
             manifest, manifest_artifact_hash,
-            configuration_json=json.dumps({"manifest_artifact_hash": manifest_artifact_hash}),
+            # The embedded 'manifest' object is correct here -- this isolates
+            # the MISSING exp005_config boundary from the (separately tested)
+            # embedded-manifest-mismatch boundary.
+            configuration_json=json.dumps(
+                {"manifest": manifest.canonical_dict(), "manifest_artifact_hash": manifest_artifact_hash}
+            ),
         )
     )
 
@@ -375,16 +395,23 @@ def test_replay_configuration_json_missing_exp005_config_rejected(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "bad_exp005_config,expected_match",
+    "overrides,expected_match",
     [
-        ({"variant_id": "X", "control_seed": None, "feasibility_criteria": {"a": "1"}}, "approved variants"),
-        ({"variant_id": "B", "control_seed": 5, "feasibility_criteria": {"a": "1"}}, "must never carry one"),
-        ({"variant_id": "D", "control_seed": None, "feasibility_criteria": {"a": "1"}}, "requires one"),
-        ({"variant_id": "B", "control_seed": None, "feasibility_criteria": {}}, "feasibility_criteria"),
+        ({"variant_id": "X", "control_seed": None}, "approved variants"),
+        ({"variant_id": "B", "control_seed": 5}, "must never carry one"),
+        ({"variant_id": "D", "control_seed": None}, "requires one"),
+        ({"feasibility_criteria": {}}, "feasibility_criteria"),
     ],
 )
-def test_replay_configuration_json_malformed_exp005_config_rejected(tmp_path, bad_exp005_config, expected_match):
+def test_replay_configuration_json_malformed_exp005_config_rejected(tmp_path, overrides, expected_match):
+    """Each case starts from an otherwise fully valid `exp005_config` payload
+    (Stage 11-15 fourth closure added several MORE cross-checks against the
+    manifest -- experiment_id, portfolio_configuration_hash -- so a minimal
+    hand-built dict missing those would trip the wrong check first) and
+    overrides only the ONE field the case actually targets."""
+
     feature_dir, manifest, manifest_path, manifest_artifact_hash, conn = _setup(tmp_path)
+    bad_exp005_config = {**Exp005Config().canonical_dict(), **overrides}
     configuration_json = json.dumps(
         {
             "exp005_config": bad_exp005_config,
@@ -466,3 +493,108 @@ def test_execution_control_seed_mismatch_with_configuration_fails_closed(tmp_pat
 
     with pytest.raises(DiagnosticsProvenanceError, match="does not match this replay's own configuration-derived identity"):
         load_diagnostics_context(conn, manifest_path, feature_dir, REPLAY_ID)
+
+
+# ------------------------------- feasibility/manifest anchoring (fourth closure)
+
+
+def test_altered_feasibility_thresholds_with_recomputed_hash_still_rejected(tmp_path):
+    """Even a WHOLESALE regenerated configuration_json, with a genuinely
+    self-consistent configuration_hash (proving only that this exact blob's
+    text was not edited afterward, per the second closure's finding 6), must
+    still be rejected if its exp005_config.feasibility_criteria disagrees
+    with the manifest's own frozen criteria -- Stage 11-15 fourth closure,
+    finding 2. The prior configuration_hash check alone cannot catch this,
+    since the tampering happened BEFORE the hash was computed."""
+
+    feature_dir, manifest, manifest_path, manifest_artifact_hash, conn = _setup(tmp_path)
+    tampered_exp005_config = dict(Exp005Config().canonical_dict())
+    tampered_exp005_config["feasibility_criteria"] = {
+        "max_drawdown_threshold": "0.99", "largest_win_pct_of_net_profit_threshold": "0.99",
+        "control_percentile_threshold": "1.0", "min_profit_factor": "0.01",
+    }
+    configuration_json, configuration_hash = _build_configuration_json_and_hash(
+        tampered_exp005_config, manifest.canonical_dict(), manifest_artifact_hash
+    )
+    SandboxRepository(conn).create_replay_metadata(
+        _valid_replay_metadata(
+            manifest, manifest_artifact_hash, configuration_json=configuration_json, configuration_hash=configuration_hash,
+        )
+    )
+
+    with pytest.raises(DiagnosticsProvenanceError, match="feasibility_criteria"):
+        load_diagnostics_context(conn, manifest_path, feature_dir, REPLAY_ID)
+
+
+def test_altered_embedded_manifest_with_recomputed_hash_still_rejected(tmp_path):
+    """Same class of gap as above, for the embedded manifest snapshot itself:
+    a configuration_json whose exp005_config still cites the CORRECT
+    manifest_artifact_hash, but whose embedded 'manifest' object was
+    independently altered (e.g. a different model_version) before the hash
+    was (correctly) recomputed, must still be rejected -- Stage 11-15 fourth
+    closure, finding 1."""
+
+    feature_dir, manifest, manifest_path, manifest_artifact_hash, conn = _setup(tmp_path)
+    tampered_manifest_dict = dict(manifest.canonical_dict())
+    tampered_manifest_dict["model_version"] = "a-different-model-version"
+    configuration_json, configuration_hash = _build_configuration_json_and_hash(
+        Exp005Config().canonical_dict(), tampered_manifest_dict, manifest_artifact_hash
+    )
+    SandboxRepository(conn).create_replay_metadata(
+        _valid_replay_metadata(
+            manifest, manifest_artifact_hash, configuration_json=configuration_json, configuration_hash=configuration_hash,
+        )
+    )
+
+    with pytest.raises(DiagnosticsProvenanceError, match="embedded 'manifest'"):
+        load_diagnostics_context(conn, manifest_path, feature_dir, REPLAY_ID)
+
+
+@pytest.mark.parametrize("bad_control_seed", [99_999, "5"], ids=["unknown_seed", "non_integer_seed"])
+def test_variant_d_unknown_or_non_integer_seed_with_zero_executions_rejected(tmp_path, bad_control_seed):
+    """A Variant D configuration with a seed that is either not one of the
+    manifest's approved seeds, or not even an integer, must be rejected
+    purely from the configuration itself -- no executions exist for this
+    replay at all, so this cannot be "caught later" by the execution
+    cross-check; it must fail at load time (Stage 11-15 fourth closure,
+    finding 4)."""
+
+    feature_dir, manifest, manifest_path, manifest_artifact_hash, conn = _setup(tmp_path)
+    bad_exp005_config = dict(Exp005Config().canonical_dict())
+    bad_exp005_config["variant_id"] = VARIANT_D
+    bad_exp005_config["control_seed"] = bad_control_seed
+    configuration_json, configuration_hash = _build_configuration_json_and_hash(
+        bad_exp005_config, manifest.canonical_dict(), manifest_artifact_hash
+    )
+    SandboxRepository(conn).create_replay_metadata(
+        _valid_replay_metadata(
+            manifest, manifest_artifact_hash, configuration_json=configuration_json, configuration_hash=configuration_hash,
+        )
+    )
+
+    with pytest.raises(DiagnosticsProvenanceError):
+        load_diagnostics_context(conn, manifest_path, feature_dir, REPLAY_ID)
+
+
+def test_correct_configuration_manifest_pair_passes(tmp_path):
+    """A genuinely correct, self-consistent, manifest-anchored
+    configuration/manifest pair must NOT be rejected by any of the fourth
+    closure's new checks -- the positive case alongside all the negative ones
+    above."""
+
+    feature_dir, manifest, manifest_path, manifest_artifact_hash, conn = _setup(tmp_path)
+    exp005_config = Exp005Config(variant_id=VARIANT_D, control_seed=12)
+    configuration_json, configuration_hash = _build_configuration_json_and_hash(
+        exp005_config.canonical_dict(), manifest.canonical_dict(), manifest_artifact_hash
+    )
+    SandboxRepository(conn).create_replay_metadata(
+        _valid_replay_metadata(
+            manifest, manifest_artifact_hash, configuration_json=configuration_json, configuration_hash=configuration_hash,
+        )
+    )
+
+    context = load_diagnostics_context(conn, manifest_path, feature_dir, REPLAY_ID)
+
+    assert context.variant_id == VARIANT_D
+    assert context.control_seed == 12
+    assert context.feasibility_criteria == manifest.feasibility_criteria
