@@ -401,9 +401,8 @@ class CapacityQualitySummary:
     rejected_mean_horizon20_return_pct: float | None
 
 
-def compute_capacity_quality_summary(
-    context: DiagnosticsContext, replay_id: str, calendar: tuple[date, ...]
-) -> CapacityQualitySummary:
+def compute_capacity_quality_summary(context: DiagnosticsContext, calendar: tuple[date, ...]) -> CapacityQualitySummary:
+    replay_id = context.replay_id
     admissions = context.portfolio_repo.list_admissions_for_experiment(replay_id)
     no_capacity_admissions = [a for a in admissions if a.decision == "NO_CAPACITY"]
     results = [opportunity_cost.compute_opportunity_cost(context, a, calendar) for a in no_capacity_admissions]
@@ -459,17 +458,20 @@ class RunQualitySummary:
     capacity: CapacityQualitySummary
 
 
-def compute_run_summary(
-    context: DiagnosticsContext, replay_id: str, variant_id: str, control_seed: int | None, calendar: tuple[date, ...]
-) -> RunQualitySummary:
+def compute_run_summary(context: DiagnosticsContext, calendar: tuple[date, ...]) -> RunQualitySummary:
+    """`replay_id`/`variant_id`/`control_seed` are never caller-supplied (Stage
+    11-15 third closure, applying the same principle as `financial_
+    performance.compute_financial_performance`) -- all identity comes from the
+    already hash-verified `context`."""
+
     return RunQualitySummary(
-        replay_id=replay_id,
-        variant_id=variant_id,
-        control_seed=control_seed,
+        replay_id=context.replay_id,
+        variant_id=context.variant_id,
+        control_seed=context.control_seed,
         buy=compute_buy_quality_summary(context, calendar),
         hold=compute_hold_quality_summary(context, calendar),
         sell=compute_sell_quality_summary(context, calendar),
-        capacity=compute_capacity_quality_summary(context, replay_id, calendar),
+        capacity=compute_capacity_quality_summary(context, calendar),
     )
 
 

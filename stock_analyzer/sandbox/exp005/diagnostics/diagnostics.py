@@ -42,6 +42,7 @@ from pathlib import Path
 import pandas as pd
 
 from stock_analyzer.sandbox.domain.replay import COMPLETED
+from stock_analyzer.sandbox.exp005.config import SUPPORTED_VARIANTS, VARIANT_B, VARIANT_D
 from stock_analyzer.sandbox.exp005.infrastructure.frozen_artifacts import sha256_of_file, verify_frozen_lineage
 from stock_analyzer.sandbox.exp005.infrastructure.repository import PortfolioRepository
 from stock_analyzer.sandbox.exp005.manifest import ExperimentManifest, read_manifest_artifact
@@ -62,10 +63,24 @@ class DiagnosticsContext:
     verified against the manifest -- Section 30's three named inputs, and nothing
     else. `portfolio_repo`/`sandbox_repo` wrap the completed replay's own SQLite
     connection for READ-ONLY access (nothing in the diagnostics package ever
-    calls an insert/update method on either)."""
+    calls an insert/update method on either).
+
+    `variant_id`/`control_seed`/`feasibility_criteria`/`manifest_artifact_hash`/
+    `configuration_hash` are NEVER caller-supplied (Stage 11-15 third closure) --
+    they are derived exclusively from this replay's own verified
+    `configuration_json` (the same hash-verified payload `real_run.py`'s
+    `_configuration_identity` wrote), so a downstream report built from this
+    context cannot be mislabeled as a different variant/seed than the one that
+    actually produced it, nor scored against thresholds other than the ones
+    frozen at run time."""
 
     manifest: ExperimentManifest
     replay_id: str
+    variant_id: str
+    control_seed: int | None
+    manifest_artifact_hash: str
+    configuration_hash: str
+    feasibility_criteria: dict
     prices_df: pd.DataFrame
     portfolio_repo: PortfolioRepository
     sandbox_repo: SandboxRepository
@@ -174,10 +189,70 @@ def load_diagnostics_context(
             "provably run against this exact manifest artifact."
         )
 
+    # Variant/seed/feasibility identity (Stage 11-15 third closure): derived
+    # EXCLUSIVELY from this already hash-verified configuration_json, never
+    # accepted as a parameter downstream -- so a Variant D run's report can
+    # never be relabeled Variant B (or assigned a different seed) by a caller
+    # after the fact, and the feasibility thresholds a report is later judged
+    # against can never be substituted for a different dict post-hoc.
+    exp005_config_payload = configuration.get("exp005_config")
+    if not isinstance(exp005_config_payload, dict):
+        raise DiagnosticsProvenanceError(
+            f"replay {replay_id!r}'s persisted configuration_json has no 'exp005_config' object -- "
+            "this replay's variant/seed identity and feasibility criteria can only be trusted from "
+            "the verified configuration, never supplied separately by a caller."
+        )
+    variant_id = exp005_config_payload.get("variant_id")
+    control_seed = exp005_config_payload.get("control_seed")
+    if variant_id not in SUPPORTED_VARIANTS:
+        raise DiagnosticsProvenanceError(
+            f"replay {replay_id!r}'s persisted configuration_json records variant_id {variant_id!r}, "
+            f"which is not one of the approved variants {SUPPORTED_VARIANTS!r}."
+        )
+    if variant_id == VARIANT_B and control_seed is not None:
+        raise DiagnosticsProvenanceError(
+            f"replay {replay_id!r}'s persisted configuration_json records variant_id={VARIANT_B!r} "
+            f"together with a control_seed ({control_seed!r}) -- Variant B must never carry one."
+        )
+    if variant_id == VARIANT_D and control_seed is None:
+        raise DiagnosticsProvenanceError(
+            f"replay {replay_id!r}'s persisted configuration_json records variant_id={VARIANT_D!r} "
+            "with no control_seed -- every Variant D run requires one."
+        )
+    feasibility_criteria = exp005_config_payload.get("feasibility_criteria")
+    if not isinstance(feasibility_criteria, dict) or not feasibility_criteria:
+        raise DiagnosticsProvenanceError(
+            f"replay {replay_id!r}'s persisted configuration_json has no usable feasibility_criteria."
+        )
+
+    # Cross-check every execution this replay actually produced against that
+    # same config-derived identity -- a disagreement (e.g. a database whose
+    # own executions were written under a different variant/seed than its
+    # configuration claims) fails closed rather than silently trusting
+    # whichever source a caller happened to read first. A replay with ZERO
+    # executions is not a special case: its identity still comes from the
+    # verified configuration above, never from (necessarily absent) execution
+    # rows -- there is simply nothing to cross-check in that case.
+    portfolio_repo = PortfolioRepository(conn)
+    for execution in portfolio_repo.list_executions_for_experiment(replay_id):
+        if execution.variant_id != variant_id or execution.control_seed != control_seed:
+            raise DiagnosticsProvenanceError(
+                f"execution {execution.execution_id!r} in replay {replay_id!r} carries "
+                f"variant_id={execution.variant_id!r}/control_seed={execution.control_seed!r}, which "
+                f"does not match this replay's own configuration-derived identity "
+                f"(variant_id={variant_id!r}, control_seed={control_seed!r}) -- the database's "
+                "execution rows disagree with its own persisted configuration."
+            )
+
     return DiagnosticsContext(
         manifest=manifest,
         replay_id=replay_id,
+        variant_id=variant_id,
+        control_seed=control_seed,
+        manifest_artifact_hash=manifest_artifact_hash,
+        configuration_hash=replay.configuration_hash,
+        feasibility_criteria=feasibility_criteria,
         prices_df=lineage.prices_df,
-        portfolio_repo=PortfolioRepository(conn),
+        portfolio_repo=portfolio_repo,
         sandbox_repo=SandboxRepository(conn),
     )

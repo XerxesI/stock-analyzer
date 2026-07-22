@@ -18,13 +18,19 @@ from datetime import date, datetime, timezone
 import pandas as pd
 import pytest
 
+from stock_analyzer.sandbox.domain.candidate import RankedCandidate
 from stock_analyzer.sandbox.domain.replay import COMPLETED, DEVELOPMENT_HISTORICAL_REPLAY, FAILED, ReplayMetadata
-from stock_analyzer.sandbox.exp005.config import Exp005Config
+from stock_analyzer.sandbox.domain.run import SandboxRun
+from stock_analyzer.sandbox.exp005.config import VARIANT_B, VARIANT_D, Exp005Config
 from stock_analyzer.sandbox.exp005.diagnostics.diagnostics import (
     DiagnosticsProvenanceError,
     load_diagnostics_context,
 )
+from stock_analyzer.sandbox.exp005.domain.accounting import compute_sell_accounting
+from stock_analyzer.sandbox.exp005.domain.execution import SELL, Execution
+from stock_analyzer.sandbox.exp005.domain.units import to_price_units
 from stock_analyzer.sandbox.exp005.infrastructure.frozen_artifacts import sha256_of_dataframe, sha256_of_file
+from stock_analyzer.sandbox.exp005.infrastructure.repository import PortfolioRepository
 from stock_analyzer.sandbox.exp005.infrastructure.schema import init_exp005_schema
 from stock_analyzer.sandbox.exp005.manifest import ExperimentManifest, build_experiment_manifest, write_manifest_artifact
 from stock_analyzer.sandbox.infrastructure.schema import init_db
@@ -90,8 +96,26 @@ def _make_connection() -> sqlite3.Connection:
     return conn
 
 
-def _valid_replay_metadata(manifest: ExperimentManifest, manifest_artifact_hash: str, **overrides) -> ReplayMetadata:
-    configuration_json = json.dumps({"manifest_artifact_hash": manifest_artifact_hash}, sort_keys=True)
+def _valid_replay_metadata(
+    manifest: ExperimentManifest, manifest_artifact_hash: str, exp005_config: Exp005Config | None = None, **overrides
+) -> ReplayMetadata:
+    """`configuration_json`'s shape mirrors `real_run.py`'s own
+    `_configuration_identity` payload exactly (`exp005_config`/`manifest`/
+    `manifest_artifact_hash`) -- Stage 11-15 third closure: `load_diagnostics_
+    context` now derives this replay's variant/seed identity and feasibility
+    criteria from the `exp005_config` sub-object here, never from a caller
+    argument, so the fixture must actually carry one to exercise the real
+    code path."""
+
+    exp005_config = exp005_config or Exp005Config()
+    configuration_json = json.dumps(
+        {
+            "exp005_config": exp005_config.canonical_dict(),
+            "manifest": manifest.canonical_dict(),
+            "manifest_artifact_hash": manifest_artifact_hash,
+        },
+        sort_keys=True,
+    )
     base = dict(
         replay_id=REPLAY_ID,
         classification=DEVELOPMENT_HISTORICAL_REPLAY,
@@ -131,15 +155,59 @@ def _setup(tmp_path):
     return feature_dir, manifest, manifest_path, manifest_artifact_hash, conn
 
 
+def _insert_minimal_sell_execution(
+    conn: sqlite3.Connection, candidate_id: str, symbol: str, variant_id: str, control_seed: int | None, execution_date: date
+) -> None:
+    """A minimal, FK/CHECK-satisfying `executions` row -- SELL side needs no
+    `entry_orders` row (unlike BUY), so a `ranked_candidates` row is the only
+    other table this needs to exist first."""
+
+    sandbox_repo = SandboxRepository(conn)
+    portfolio_repo = PortfolioRepository(conn)
+    run_id = f"run-{candidate_id}"
+    sandbox_repo.create_run(
+        SandboxRun(run_id=run_id, as_of_date=execution_date, command="generate-candidates", started_at=NOW, configuration_hash="t")
+    )
+    sandbox_repo.insert_ranked_candidate(
+        RankedCandidate(
+            candidate_id=candidate_id, run_id=run_id, as_of_date=execution_date, symbol=symbol, daily_rank=1,
+            model_score=0.5, signal_close=10.0, atr14=1.0, max_entry_price=10.1, shadow_top10=True,
+            actionable=True, exclusion_reason=None, adv_quintile="adv_q1", market_regime="Bull_Normal",
+        )
+    )
+    sell_accounting = compute_sell_accounting(raw_fill_price=10.0, quantity=1.0, commission=0.0, slippage_rate=0.0)
+    portfolio_repo.append_execution(
+        Execution(
+            execution_id=f"{candidate_id}:SELL", replay_id=REPLAY_ID, variant_id=variant_id, control_seed=control_seed,
+            order_id=None, candidate_id=candidate_id, position_id=None, symbol=symbol, side=SELL,
+            decision_date=execution_date, execution_date=execution_date,
+            raw_market_fill_price_units=to_price_units(10.0),
+            effective_fill_price_units=sell_accounting.effective_fill_price_units,
+            quantity_units=sell_accounting.quantity_units, gross_notional_units=sell_accounting.gross_notional_units,
+            commission_units=0, slippage_rate_units=0, slippage_cost_units=sell_accounting.slippage_cost_units,
+            net_cash_flow_units=sell_accounting.net_cash_flow_units, fill_reason="SELL_TIME",
+            market_data_snapshot_id="snap-1", created_at=NOW,
+        )
+    )
+
+
 def test_load_diagnostics_context_succeeds_for_consistent_manifest_and_completed_replay(tmp_path):
     feature_dir, manifest, manifest_path, manifest_artifact_hash, conn = _setup(tmp_path)
-    SandboxRepository(conn).create_replay_metadata(_valid_replay_metadata(manifest, manifest_artifact_hash))
+    replay_metadata = _valid_replay_metadata(manifest, manifest_artifact_hash)
+    SandboxRepository(conn).create_replay_metadata(replay_metadata)
 
     context = load_diagnostics_context(conn, manifest_path, feature_dir, REPLAY_ID)
 
     assert context.manifest == manifest
     assert context.replay_id == REPLAY_ID
     assert not context.prices_df.empty
+    # Stage 11-15 third closure: variant/seed/feasibility identity is derived
+    # from the verified configuration_json, never left unpopulated.
+    assert context.variant_id == VARIANT_B
+    assert context.control_seed is None
+    assert context.manifest_artifact_hash == manifest_artifact_hash
+    assert context.configuration_hash == replay_metadata.configuration_hash
+    assert context.feasibility_criteria == Exp005Config().feasibility_criteria.canonical()
     assert context.portfolio_repo is not None
     assert context.sandbox_repo is not None
 
@@ -287,4 +355,114 @@ def test_configuration_hash_tampered_independently_of_json_rejected(tmp_path):
     )
 
     with pytest.raises(DiagnosticsProvenanceError, match="configuration_hash"):
+        load_diagnostics_context(conn, manifest_path, feature_dir, REPLAY_ID)
+
+
+# --------------------------- verified variant/seed/feasibility identity (third closure)
+
+
+def test_replay_configuration_json_missing_exp005_config_rejected(tmp_path):
+    feature_dir, manifest, manifest_path, manifest_artifact_hash, conn = _setup(tmp_path)
+    SandboxRepository(conn).create_replay_metadata(
+        _valid_replay_metadata(
+            manifest, manifest_artifact_hash,
+            configuration_json=json.dumps({"manifest_artifact_hash": manifest_artifact_hash}),
+        )
+    )
+
+    with pytest.raises(DiagnosticsProvenanceError, match="exp005_config"):
+        load_diagnostics_context(conn, manifest_path, feature_dir, REPLAY_ID)
+
+
+@pytest.mark.parametrize(
+    "bad_exp005_config,expected_match",
+    [
+        ({"variant_id": "X", "control_seed": None, "feasibility_criteria": {"a": "1"}}, "approved variants"),
+        ({"variant_id": "B", "control_seed": 5, "feasibility_criteria": {"a": "1"}}, "must never carry one"),
+        ({"variant_id": "D", "control_seed": None, "feasibility_criteria": {"a": "1"}}, "requires one"),
+        ({"variant_id": "B", "control_seed": None, "feasibility_criteria": {}}, "feasibility_criteria"),
+    ],
+)
+def test_replay_configuration_json_malformed_exp005_config_rejected(tmp_path, bad_exp005_config, expected_match):
+    feature_dir, manifest, manifest_path, manifest_artifact_hash, conn = _setup(tmp_path)
+    configuration_json = json.dumps(
+        {
+            "exp005_config": bad_exp005_config,
+            "manifest": manifest.canonical_dict(),
+            "manifest_artifact_hash": manifest_artifact_hash,
+        },
+        sort_keys=True,
+    )
+    SandboxRepository(conn).create_replay_metadata(
+        _valid_replay_metadata(manifest, manifest_artifact_hash, configuration_json=configuration_json)
+    )
+
+    with pytest.raises(DiagnosticsProvenanceError, match=expected_match):
+        load_diagnostics_context(conn, manifest_path, feature_dir, REPLAY_ID)
+
+
+def test_zero_transaction_replay_gets_identity_from_configuration_not_executions(tmp_path):
+    """No executions exist for this replay at all -- proves the identity comes
+    entirely from the verified configuration, never defaulted or left
+    undetermined just because there is nothing to cross-check it against
+    (Stage 11-15 third closure, finding 1). Uses Variant D specifically so a
+    passing assertion cannot be explained away as "just the default"."""
+
+    feature_dir, manifest, manifest_path, manifest_artifact_hash, conn = _setup(tmp_path)
+    exp005_config = Exp005Config(variant_id=VARIANT_D, control_seed=7)
+    SandboxRepository(conn).create_replay_metadata(
+        _valid_replay_metadata(manifest, manifest_artifact_hash, exp005_config=exp005_config)
+    )
+
+    context = load_diagnostics_context(conn, manifest_path, feature_dir, REPLAY_ID)
+
+    assert context.variant_id == VARIANT_D
+    assert context.control_seed == 7
+
+
+def test_execution_matching_configuration_identity_succeeds(tmp_path):
+    feature_dir, manifest, manifest_path, manifest_artifact_hash, conn = _setup(tmp_path)
+    SandboxRepository(conn).create_replay_metadata(_valid_replay_metadata(manifest, manifest_artifact_hash))
+    _insert_minimal_sell_execution(
+        conn, candidate_id="match-1", symbol="AAA", variant_id=VARIANT_B, control_seed=None, execution_date=SIGNAL_START
+    )
+
+    context = load_diagnostics_context(conn, manifest_path, feature_dir, REPLAY_ID)
+
+    assert context.variant_id == VARIANT_B
+    assert context.control_seed is None
+
+
+def test_execution_variant_mismatch_with_configuration_fails_closed(tmp_path):
+    """A database whose own `executions` rows were written under a DIFFERENT
+    variant than its `configuration_json` claims must fail closed -- a Variant
+    D run's executions can never masquerade as (or be silently accepted
+    alongside) a Variant B configuration (Stage 11-15 third closure,
+    finding 1)."""
+
+    feature_dir, manifest, manifest_path, manifest_artifact_hash, conn = _setup(tmp_path)
+    SandboxRepository(conn).create_replay_metadata(_valid_replay_metadata(manifest, manifest_artifact_hash))  # Variant B
+    _insert_minimal_sell_execution(
+        conn, candidate_id="mismatch-1", symbol="AAA", variant_id=VARIANT_D, control_seed=3, execution_date=SIGNAL_START
+    )
+
+    with pytest.raises(DiagnosticsProvenanceError, match="does not match this replay's own configuration-derived identity"):
+        load_diagnostics_context(conn, manifest_path, feature_dir, REPLAY_ID)
+
+
+def test_execution_control_seed_mismatch_with_configuration_fails_closed(tmp_path):
+    """Same class of defect as above, but with the variant matching and only
+    the SEED disagreeing -- one Variant D seed's executions can never be
+    silently attributed to a different seed's configuration."""
+
+    feature_dir, manifest, manifest_path, manifest_artifact_hash, conn = _setup(tmp_path)
+    exp005_config = Exp005Config(variant_id=VARIANT_D, control_seed=5)
+    SandboxRepository(conn).create_replay_metadata(
+        _valid_replay_metadata(manifest, manifest_artifact_hash, exp005_config=exp005_config)
+    )
+    _insert_minimal_sell_execution(
+        conn, candidate_id="mismatch-2", symbol="AAA", variant_id=VARIANT_D, control_seed=6, execution_date=SIGNAL_START
+    )
+
+    with pytest.raises(DiagnosticsProvenanceError, match="does not match this replay's own configuration-derived identity"):
         load_diagnostics_context(conn, manifest_path, feature_dir, REPLAY_ID)

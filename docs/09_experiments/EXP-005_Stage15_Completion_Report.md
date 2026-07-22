@@ -1,5 +1,47 @@
 # EXP-005 Stage 15 Completion Report
 
+## Update (2026-07-22): Stage 11-15 third closure cycle
+
+The second closure cycle's six fixes were confirmed correctly resolved by the
+reviewer (59/59 targeted tests passing). A third independent review found one
+further P1 provenance finding with two related parts: report identity
+(`variant_id`/`control_seed`/`feasibility_criteria`) was accepted as a plain
+caller argument rather than derived from the replay's own verified
+configuration, and `FinancialPerformanceReport` carried no proof that a
+Variant B report and its Variant D control group actually came from the same
+frozen manifest/model/period. Both are now fixed; full root-cause detail
+lives in the implementation checklist's own "Stage 11-15 independent review,
+third round" note; in short:
+
+1. `load_diagnostics_context` now derives `variant_id`/`control_seed`/
+   `feasibility_criteria` from the same hash-verified `configuration_json` it
+   already checks (never a caller argument), stores them on `DiagnosticsContext`,
+   and cross-checks every `executions` row for the replay against that
+   identity, failing closed on disagreement. `compute_financial_performance`
+   and `compute_run_summary` no longer accept `replay_id`/`variant_id`/
+   `control_seed` as parameters at all -- there is no argument through which a
+   Variant D report could be relabeled Variant B or reassigned to a different
+   seed.
+2. `FinancialPerformanceReport` now carries its manifest artifact hash,
+   configuration hash, model version, feature snapshot ID, market data hash,
+   signal/outcome dates, and feasibility criteria, all from the verified
+   context. `compute_feasibility_verdict` no longer accepts a
+   `feasibility_criteria` dict -- it derives thresholds from the Variant B
+   report itself -- and requires every one of those provenance fields to be
+   identical across Variant B and every Variant D report before comparing
+   them (only `variant_id`/`control_seed` may differ), raising
+   `ExperimentIdentityMismatchError` naming the specific mismatched field
+   otherwise.
+
+The Stage 15 end-to-end fixture no longer passes variant/seed/criteria
+manually to any of the three functions. 637/637 tests pass (545
+sandbox+exp005, 92 unrelated); EXP-004's checksum is unchanged
+(`9f4d579df1c39f436ca28a35f768d201d89005fca36b43db3872fbf658c28882`).
+
+**No real EXP-005 replay or P&L has been produced.** This third corrective
+cycle must also pass another independent review before Stages 11-15 can be
+closed. The branch has not been pushed.
+
 ## Update (2026-07-22): Stage 11-15 second closure cycle
 
 The first closure cycle's five fixes were confirmed substantively correct by

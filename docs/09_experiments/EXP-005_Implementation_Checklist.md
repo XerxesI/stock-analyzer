@@ -520,3 +520,79 @@ different names. This is a naming difference only, not a behavioral deviation.
       passes may a final manifest be generated for the commit with which a
       real Variant B or Variant D run is actually executed. The branch has
       not been pushed.
+
+      **Stage 11-15 independent review, third round (2026-07-22): all six
+      second-round findings confirmed correctly resolved (59/59 targeted
+      tests passing); one further P1 provenance finding, with two related
+      parts, closed in a third corrective cycle.** Both parts share one root
+      cause: `compute_financial_performance`/`compute_feasibility_verdict`/
+      `compute_run_summary` accepted `variant_id`/`control_seed`/
+      `feasibility_criteria` as plain caller arguments, never verified
+      against anything -- a Variant D run's report could be labeled Variant B
+      (or assigned a different seed) by whoever called the function, and the
+      thresholds a verdict was scored against could be silently swapped after
+      results were already visible, entirely independent of what the replay's
+      own frozen configuration actually recorded.
+
+      1. **Report identity was caller-supplied, not derived from verified
+         configuration.** Fixed: `load_diagnostics_context` now parses the
+         SAME `exp005_config` sub-object it already hash-verifies as part of
+         `configuration_json` (`real_run.py`'s own `_configuration_identity`
+         payload) and derives `variant_id`/`control_seed`/
+         `feasibility_criteria` from it -- never from a caller. These are new
+         `DiagnosticsContext` fields. Every `executions` row for the replay is
+         cross-checked against this same config-derived identity, failing
+         closed on any disagreement; a replay with zero executions is not a
+         special case -- its identity still comes entirely from the verified
+         configuration, since there is simply nothing to cross-check in that
+         case, never a fallback default. `compute_financial_performance` and
+         `compute_run_summary` (`report_generator.py`, the same principle
+         applied to Stage 14's report generator per the reviewer's explicit
+         instruction) now take only a `context` (`compute_run_summary` also
+         only a `calendar`) -- `replay_id`/`variant_id`/`control_seed` are no
+         longer parameters at all, so there is no argument through which a
+         Variant D report could be relabeled Variant B or reassigned to a
+         different seed.
+      2. **`FinancialPerformanceReport` carried no proof that a Variant B
+         report and its Variant D control group came from the same frozen
+         experiment.** Fixed: every report now carries
+         `manifest_artifact_hash`/`configuration_hash`/`model_version`/
+         `feature_snapshot_id`/`market_data_snapshot_id`/`signal_start_date`/
+         `signal_end_date`/`outcome_data_end_date`/`feasibility_criteria`,
+         all populated from the verified `DiagnosticsContext`, never a caller
+         argument. `compute_feasibility_verdict` no longer accepts a
+         `feasibility_criteria` dict at all -- it derives thresholds from
+         `variant_b.feasibility_criteria` -- and a new
+         `_validate_comparable_provenance` check requires every one of those
+         fields to be IDENTICAL between Variant B and every Variant D report
+         before any comparison runs (`variant_id`/`control_seed` are the only
+         fields allowed to differ), raising the new
+         `ExperimentIdentityMismatchError` on any mismatch, naming the
+         specific field that disagreed.
+
+      Regression tests (`tests/test_exp005_diagnostics_context.py`,
+      `tests/test_exp005_financial_performance.py`) cover: a report's
+      variant/seed cannot be supplied by a caller (no parameter exists to do
+      so); a zero-transaction replay still gets its identity from
+      configuration; an `executions` row whose variant or control_seed
+      disagrees with the replay's own configuration fails closed; malformed
+      `exp005_config` payloads (unsupported variant, B-with-seed,
+      D-without-seed, empty feasibility_criteria) are rejected; a control
+      report with a different `manifest_artifact_hash`, `model_version`,
+      `feature_snapshot_id`, `market_data_snapshot_id`, or signal/outcome
+      date is rejected; an altered `feasibility_criteria` threshold is
+      rejected; and the full 50-seed control group with common provenance
+      still produces a determined verdict exactly as before. The Stage 15
+      end-to-end fixture (`tests/test_exp005_stage15_synthetic_end_to_end.py`)
+      no longer passes variant/seed/criteria manually to any of the three
+      functions, relying entirely on the real pipeline's own verified
+      configuration. 637/637 tests pass (545 sandbox+exp005, 92 unrelated);
+      EXP-004's checksum is unchanged
+      (`9f4d579df1c39f436ca28a35f768d201d89005fca36b43db3872fbf658c28882`).
+
+      **No real EXP-005 replay or P&L has been produced.** Per the standing
+      authorization, this third corrective cycle must also pass ANOTHER
+      independent review before Stages 11-15 can be closed; only after that
+      passes may a final manifest be generated for the commit with which a
+      real Variant B or Variant D run is actually executed. The branch has
+      not been pushed.

@@ -83,6 +83,17 @@ class ControlGroupValidationError(RuntimeError):
     otherwise valid, control group)."""
 
 
+class ExperimentIdentityMismatchError(RuntimeError):
+    """Raised when a Variant B report and the Variant D reports it is being
+    compared against do not provably originate from the same frozen experiment
+    (Stage 11-15 third closure) -- same manifest artifact, same model, same
+    feature/OHLC lineage, same signal/outcome period, and the same feasibility
+    criteria. The ONLY fields allowed to differ between reports being compared
+    are `variant_id` and `control_seed`; everything else must be identical, or
+    the comparison is scientifically meaningless even when every individual
+    number in it was computed correctly."""
+
+
 @dataclass(frozen=True)
 class ClosedTradeResult:
     position_id: str
@@ -130,6 +141,21 @@ class FinancialPerformanceReport:
     replay_id: str
     variant_id: str
     control_seed: int | None
+    # Provenance identity (Stage 11-15 third closure) -- all taken from the
+    # already-verified DiagnosticsContext, never a caller argument, so two
+    # reports can be checked for genuine comparability before ever being
+    # compared (see `_validate_comparable_provenance`). Only `variant_id`/
+    # `control_seed` above are expected to differ between a Variant B report
+    # and its Variant D control group; everything below must be identical.
+    manifest_artifact_hash: str
+    configuration_hash: str
+    model_version: str
+    feature_snapshot_id: str
+    market_data_snapshot_id: str
+    signal_start_date: date
+    signal_end_date: date
+    outcome_data_end_date: date
+    feasibility_criteria: dict
     starting_equity: float
     ending_equity: float
     net_pnl: float
@@ -213,7 +239,7 @@ def _compute_quarterly_returns(snapshots) -> tuple[QuarterlyReturn, ...]:
     return tuple(results)
 
 
-def _closed_trades(context: DiagnosticsContext, replay_id: str) -> tuple[ClosedTradeResult, ...]:
+def _closed_trades(context: DiagnosticsContext) -> tuple[ClosedTradeResult, ...]:
     closed_positions = [p for p in context.sandbox_repo.list_all_positions() if p.status == CLOSED]
     trades = []
     for position in closed_positions:
@@ -259,9 +285,13 @@ def _open_positions_marked(context: DiagnosticsContext) -> tuple[OpenPositionMar
     return tuple(results)
 
 
-def compute_financial_performance(
-    context: DiagnosticsContext, replay_id: str, variant_id: str, control_seed: int | None,
-) -> FinancialPerformanceReport:
+def compute_financial_performance(context: DiagnosticsContext) -> FinancialPerformanceReport:
+    """`replay_id`/`variant_id`/`control_seed` are never caller-supplied (Stage
+    11-15 third closure) -- all identity comes from the already hash-verified
+    `context`, so a Variant D run's report can never be mislabeled Variant B
+    (or assigned a different seed) after the fact."""
+
+    replay_id = context.replay_id
     snapshots = context.portfolio_repo.list_equity_snapshots(replay_id)
     if not snapshots:
         raise FinancialPerformanceComputationError(
@@ -278,7 +308,7 @@ def compute_financial_performance(
     drawdown = _compute_drawdown(snapshots)
     quarterly_returns = _compute_quarterly_returns(snapshots)
 
-    trades = _closed_trades(context, replay_id)
+    trades = _closed_trades(context)
     wins = [t for t in trades if t.is_win]
     losses = [t for t in trades if t.net_pnl_units < 0]
     # Integer-first (Stage 11-15 second closure, finding 4): gross wins/losses
@@ -321,7 +351,12 @@ def compute_financial_performance(
     )
 
     return FinancialPerformanceReport(
-        replay_id=replay_id, variant_id=variant_id, control_seed=control_seed,
+        replay_id=replay_id, variant_id=context.variant_id, control_seed=context.control_seed,
+        manifest_artifact_hash=context.manifest_artifact_hash, configuration_hash=context.configuration_hash,
+        model_version=context.manifest.model_version, feature_snapshot_id=context.manifest.feature_snapshot_id,
+        market_data_snapshot_id=context.manifest.ohlc_hash, signal_start_date=context.manifest.signal_start_date,
+        signal_end_date=context.manifest.signal_end_date, outcome_data_end_date=context.manifest.outcome_data_end_date,
+        feasibility_criteria=context.feasibility_criteria,
         starting_equity=money_units_to_float(starting_equity_units), ending_equity=money_units_to_float(ending_equity_units),
         net_pnl=net_pnl, net_return_pct=net_return_pct, drawdown=drawdown, quarterly_returns=quarterly_returns,
         closed_trade_count=len(trades), win_count=len(wins), loss_count=len(losses), profit_factor=profit_factor,
@@ -408,17 +443,59 @@ def _is_complete_control_group(variant_d_reports: list[FinancialPerformanceRepor
     return len(variant_d_reports) == len(DEFAULT_CONTROL_SEEDS)
 
 
+# The provenance fields that must be IDENTICAL between a Variant B report and
+# every Variant D report it is compared against (Stage 11-15 third closure) --
+# `variant_id`/`control_seed` are deliberately excluded, since those are
+# exactly the two fields that are SUPPOSED to differ.
+_COMPARABLE_PROVENANCE_FIELDS = (
+    "manifest_artifact_hash",
+    "model_version",
+    "feature_snapshot_id",
+    "market_data_snapshot_id",
+    "signal_start_date",
+    "signal_end_date",
+    "outcome_data_end_date",
+    "feasibility_criteria",
+)
+
+
+def _validate_comparable_provenance(
+    variant_b: FinancialPerformanceReport, variant_d_reports: list[FinancialPerformanceReport]
+) -> None:
+    """Every report being compared must provably come from the same frozen
+    manifest artifact, model, feature/OHLC lineage, and period -- checked field
+    by field rather than relying on `manifest_artifact_hash` equality alone to
+    imply the rest, so a mismatch in any one of them fails closed with a
+    specific, identifiable reason (Stage 11-15 third closure, finding 2's
+    sibling: a scientifically meaningless comparison must never look like a
+    computed one)."""
+
+    for field_name in _COMPARABLE_PROVENANCE_FIELDS:
+        expected = getattr(variant_b, field_name)
+        for report in variant_d_reports:
+            actual = getattr(report, field_name)
+            if actual != expected:
+                raise ExperimentIdentityMismatchError(
+                    f"control report {report.replay_id!r}'s {field_name} ({actual!r}) does not match "
+                    f"Variant B report {variant_b.replay_id!r}'s {field_name} ({expected!r}) -- reports "
+                    "being compared must come from the exact same frozen manifest, period, model, and "
+                    "artifacts; only variant_id and control_seed may differ."
+                )
+
+
 def compute_feasibility_verdict(
     variant_b: FinancialPerformanceReport,
     variant_d_reports: list[FinancialPerformanceReport],
-    feasibility_criteria: dict,
 ) -> FeasibilityVerdict:
     """Composes an already-computed Variant B `FinancialPerformanceReport` with a
     list of Variant D seed reports (each necessarily its own isolated replay
-    database) into the final pass/fail verdict against the frozen
-    `feasibility_criteria` (as recorded on the Experiment Manifest -- see the
-    module docstring on why this dict, not an invented threshold, is the
-    authoritative source).
+    database) into the final pass/fail verdict against the frozen feasibility
+    criteria BAKED INTO each report at `compute_financial_performance` time
+    (Stage 11-15 third closure, finding 3) -- never a dict a caller could swap
+    out after seeing the results. `_validate_comparable_provenance` requires
+    Variant B's own `feasibility_criteria` to already equal every Variant D
+    report's, so using `variant_b.feasibility_criteria` here is not an
+    arbitrary choice of one report over another.
 
     `variant_d_reports` is validated structurally (raising `ControlGroupValidationError`
     for a duplicate seed, a seed outside the frozen 50, or a report that isn't
@@ -435,7 +512,9 @@ def compute_feasibility_verdict(
     criterion make the verdict `None`. `True` requires every criterion `True`."""
 
     _validate_control_group(variant_b, variant_d_reports)
+    _validate_comparable_provenance(variant_b, variant_d_reports)
 
+    feasibility_criteria = variant_b.feasibility_criteria
     max_drawdown_threshold = float(feasibility_criteria["max_drawdown_threshold"])
     largest_win_pct_threshold = float(feasibility_criteria["largest_win_pct_of_net_profit_threshold"])
     control_percentile_threshold = float(feasibility_criteria["control_percentile_threshold"])

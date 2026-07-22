@@ -226,7 +226,9 @@ def _build_fixture():
     calendar = full_market_calendar(prices)
     manifest = _FakeManifest(date(2026, 1, 10))
     context = DiagnosticsContext(
-        manifest=manifest, replay_id=REPLAY_ID, prices_df=prices,
+        manifest=manifest, replay_id=REPLAY_ID, variant_id="B", control_seed=None,
+        manifest_artifact_hash="manifest-hash-1", configuration_hash="config-hash-1",
+        feasibility_criteria={"max_drawdown_threshold": "0.20"}, prices_df=prices,
         portfolio_repo=portfolio_repo, sandbox_repo=sandbox_repo,
     )
     return context, calendar, effective_entry_price, effective_exit_price
@@ -236,7 +238,7 @@ def test_compute_run_summary_end_to_end_counts_and_key_means():
     context, calendar, effective_entry_price, effective_exit_price = _build_fixture()
     expected_realized_return_pct = (effective_exit_price - effective_entry_price) / effective_entry_price
 
-    summary = compute_run_summary(context, REPLAY_ID, "B", None, calendar)
+    summary = compute_run_summary(context, calendar)
 
     assert summary.buy.filled_count == 1
     assert summary.buy.expired_count == 1
@@ -271,7 +273,7 @@ def test_ambiguous_target_exit_excludes_exit_session_but_not_the_known_exit_pric
     price, never understated below what the position demonstrably reached."""
 
     context, calendar, effective_entry_price, effective_exit_price = _build_fixture()
-    summary = compute_run_summary(context, REPLAY_ID, "B", None, calendar)
+    summary = compute_run_summary(context, calendar)
 
     expected_mfe_pct = (effective_exit_price - effective_entry_price) / effective_entry_price
     assert summary.sell.mean_mfe_captured_pct == pytest.approx(expected_mfe_pct)
@@ -369,11 +371,13 @@ def test_censored_horizon_observation_never_distorts_the_complete_horizon_mean()
     prices = pd.DataFrame(rows)
     calendar = full_market_calendar(prices)
     context = DiagnosticsContext(
-        manifest=_FakeManifest(date(2026, 1, 13)), replay_id=REPLAY_ID, prices_df=prices,
+        manifest=_FakeManifest(date(2026, 1, 13)), replay_id=REPLAY_ID, variant_id="B", control_seed=None,
+        manifest_artifact_hash="manifest-hash-1", configuration_hash="config-hash-1",
+        feasibility_criteria={"max_drawdown_threshold": "0.20"}, prices_df=prices,
         portfolio_repo=portfolio_repo, sandbox_repo=sandbox_repo,
     )
 
-    summary = compute_run_summary(context, REPLAY_ID, "B", None, calendar)
+    summary = compute_run_summary(context, calendar)
 
     h5 = 5
     assert summary.sell.horizon_complete_count[h5] == 1

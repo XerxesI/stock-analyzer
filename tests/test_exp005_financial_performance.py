@@ -34,6 +34,7 @@ from stock_analyzer.sandbox.exp005.diagnostics.financial_performance import (
     CRITERION_PROFIT_FACTOR_WITHIN_THRESHOLD,
     ControlGroupValidationError,
     DrawdownResult,
+    ExperimentIdentityMismatchError,
     FinancialPerformanceReport,
     _compute_drawdown,
     _compute_quarterly_returns,
@@ -58,9 +59,21 @@ from stock_analyzer.sandbox.infrastructure.sqlite_repository import SandboxRepos
 REPLAY_ID = "replay-1"
 NOW = datetime.now(timezone.utc)
 
+FEASIBILITY_CRITERIA = {
+    "max_drawdown_threshold": "0.20",
+    "largest_win_pct_of_net_profit_threshold": "0.50",
+    "control_percentile_threshold": "80.0",
+    "min_profit_factor": "1.0",
+}
+
 
 class _FakeManifest:
     def __init__(self) -> None:
+        self.model_version = "model-v1"
+        self.feature_snapshot_id = "feat-snap-1"
+        self.ohlc_hash = "ohlc-hash-1"
+        self.signal_start_date = date(2026, 1, 1)
+        self.signal_end_date = date(2026, 1, 2)
         self.outcome_data_end_date = date(2026, 12, 31)
 
 
@@ -312,11 +325,13 @@ def test_compute_financial_performance_hand_computed_trades_and_open_winner():
     )
 
     context = DiagnosticsContext(
-        manifest=_FakeManifest(), replay_id=REPLAY_ID, prices_df=None,
+        manifest=_FakeManifest(), replay_id=REPLAY_ID, variant_id="B", control_seed=None,
+        manifest_artifact_hash="manifest-hash-1", configuration_hash="config-hash-1",
+        feasibility_criteria=FEASIBILITY_CRITERIA, prices_df=None,
         portfolio_repo=portfolio_repo, sandbox_repo=sandbox_repo,
     )
 
-    report = compute_financial_performance(context, REPLAY_ID, "B", None)
+    report = compute_financial_performance(context)
 
     expected_net_pnl = money_units_to_float(realized_units + unrealized_units)
     assert report.starting_equity == pytest.approx(10_000.0)
@@ -375,11 +390,13 @@ def test_positive_net_pnl_flips_negative_after_removing_dominant_winner():
     )
 
     context = DiagnosticsContext(
-        manifest=_FakeManifest(), replay_id=REPLAY_ID, prices_df=None,
+        manifest=_FakeManifest(), replay_id=REPLAY_ID, variant_id="B", control_seed=None,
+        manifest_artifact_hash="manifest-hash-1", configuration_hash="config-hash-1",
+        feasibility_criteria=FEASIBILITY_CRITERIA, prices_df=None,
         portfolio_repo=portfolio_repo, sandbox_repo=sandbox_repo,
     )
 
-    report = compute_financial_performance(context, REPLAY_ID, "B", None)
+    report = compute_financial_performance(context)
 
     assert report.net_pnl == pytest.approx(100.0)
     assert report.largest_closed_winning_trade.net_pnl == pytest.approx(500.0)
@@ -410,10 +427,12 @@ def test_open_position_cost_basis_includes_slippage_not_just_gross_notional_and_
     )
 
     context = DiagnosticsContext(
-        manifest=_FakeManifest(), replay_id=REPLAY_ID, prices_df=None,
+        manifest=_FakeManifest(), replay_id=REPLAY_ID, variant_id="B", control_seed=None,
+        manifest_artifact_hash="manifest-hash-1", configuration_hash="config-hash-1",
+        feasibility_criteria=FEASIBILITY_CRITERIA, prices_df=None,
         portfolio_repo=portfolio_repo, sandbox_repo=sandbox_repo,
     )
-    report = compute_financial_performance(context, REPLAY_ID, "B", None)
+    report = compute_financial_performance(context)
 
     assert report.largest_open_position is not None
     assert report.largest_open_position.unrealized_gain == pytest.approx(expected_unrealized_gain)
@@ -445,10 +464,12 @@ def test_all_open_positions_underwater_gives_no_largest_open_winner():
     )
 
     context = DiagnosticsContext(
-        manifest=_FakeManifest(), replay_id=REPLAY_ID, prices_df=None,
+        manifest=_FakeManifest(), replay_id=REPLAY_ID, variant_id="B", control_seed=None,
+        manifest_artifact_hash="manifest-hash-1", configuration_hash="config-hash-1",
+        feasibility_criteria=FEASIBILITY_CRITERIA, prices_df=None,
         portfolio_repo=portfolio_repo, sandbox_repo=sandbox_repo,
     )
-    report = compute_financial_performance(context, REPLAY_ID, "B", None)
+    report = compute_financial_performance(context)
 
     assert report.largest_open_position is None
     assert report.largest_open_position_pct_of_net_pnl is None
@@ -484,10 +505,12 @@ def test_profit_factor_integer_first_summation_avoids_float_rounding():
     )
 
     context = DiagnosticsContext(
-        manifest=_FakeManifest(), replay_id=REPLAY_ID, prices_df=None,
+        manifest=_FakeManifest(), replay_id=REPLAY_ID, variant_id="B", control_seed=None,
+        manifest_artifact_hash="manifest-hash-1", configuration_hash="config-hash-1",
+        feasibility_criteria=FEASIBILITY_CRITERIA, prices_df=None,
         portfolio_repo=portfolio_repo, sandbox_repo=sandbox_repo,
     )
-    report = compute_financial_performance(context, REPLAY_ID, "B", None)
+    report = compute_financial_performance(context)
 
     assert report.profit_factor == 1.0  # exact equality, not pytest.approx -- this is the whole point
 
@@ -495,11 +518,28 @@ def test_profit_factor_integer_first_summation_avoids_float_rounding():
 # ---------------------------------------------------------------- feasibility verdict
 
 
-def _report(net_pnl: float, net_return_pct: float, max_drawdown_pct: float = 0.05, profit_factor: float | None = 2.0,
-            largest_win_pct: float | None = 0.1, replay_id: str = "r",
-            variant_id: str = VARIANT_B, control_seed: int | None = None) -> FinancialPerformanceReport:
+def _report(
+    net_pnl: float, net_return_pct: float, max_drawdown_pct: float = 0.05, profit_factor: float | None = 2.0,
+    largest_win_pct: float | None = 0.1, replay_id: str = "r",
+    variant_id: str = VARIANT_B, control_seed: int | None = None,
+    # Provenance identity (Stage 11-15 third closure) -- every `_report(...)`
+    # call defaults to the SAME values, so any two reports built without
+    # overriding these are comparable by construction; a test targeting the
+    # comparability check itself overrides exactly one of these fields.
+    manifest_artifact_hash: str = "manifest-hash-1", configuration_hash: str = "config-hash-1",
+    model_version: str = "model-v1", feature_snapshot_id: str = "feat-snap-1",
+    market_data_snapshot_id: str = "ohlc-hash-1",
+    signal_start_date: date = date(2026, 1, 1), signal_end_date: date = date(2026, 1, 2),
+    outcome_data_end_date: date = date(2026, 3, 31),
+    feasibility_criteria: dict | None = None,
+) -> FinancialPerformanceReport:
     return FinancialPerformanceReport(
         replay_id=replay_id, variant_id=variant_id, control_seed=control_seed,
+        manifest_artifact_hash=manifest_artifact_hash, configuration_hash=configuration_hash,
+        model_version=model_version, feature_snapshot_id=feature_snapshot_id,
+        market_data_snapshot_id=market_data_snapshot_id, signal_start_date=signal_start_date,
+        signal_end_date=signal_end_date, outcome_data_end_date=outcome_data_end_date,
+        feasibility_criteria=feasibility_criteria if feasibility_criteria is not None else FEASIBILITY_CRITERIA,
         starting_equity=10_000.0, ending_equity=10_000.0 + net_pnl, net_pnl=net_pnl, net_return_pct=net_return_pct,
         drawdown=DrawdownResult(max_drawdown_pct=max_drawdown_pct, peak_date=None, peak_equity=None, trough_date=None, trough_equity=None),
         quarterly_returns=(), closed_trade_count=1, win_count=1, loss_count=0, profit_factor=profit_factor,
@@ -508,14 +548,6 @@ def _report(net_pnl: float, net_return_pct: float, max_drawdown_pct: float = 0.0
         largest_open_position=None, largest_open_position_pct_of_net_pnl=None,
         open_position_market_value_pct_of_ending_equity=None,
     )
-
-
-FEASIBILITY_CRITERIA = {
-    "max_drawdown_threshold": "0.20",
-    "largest_win_pct_of_net_profit_threshold": "0.50",
-    "control_percentile_threshold": "80.0",
-    "min_profit_factor": "1.0",
-}
 
 
 def _full_control_group(returns_by_rank=None) -> list[FinancialPerformanceReport]:
@@ -541,7 +573,7 @@ def test_feasibility_verdict_variant_b_above_control_percentile_passes():
     variant_d = _full_control_group({rank: 0.01 * rank for rank in range(1, 51)})
     variant_b = _report(net_pnl=1000.0, net_return_pct=0.99)
 
-    verdict = compute_feasibility_verdict(variant_b, variant_d, FEASIBILITY_CRITERIA)
+    verdict = compute_feasibility_verdict(variant_b, variant_d)
 
     percentile_criterion = next(c for c in verdict.criteria if c.name == CRITERION_BEATS_CONTROL_PERCENTILE)
     assert percentile_criterion.value == pytest.approx(100.0)
@@ -553,7 +585,7 @@ def test_feasibility_verdict_variant_b_below_control_percentile_fails():
     variant_d = _full_control_group({rank: 0.01 * rank for rank in range(1, 51)})
     variant_b = _report(net_pnl=10.0, net_return_pct=0.001)  # below every D value (min is 0.01)
 
-    verdict = compute_feasibility_verdict(variant_b, variant_d, FEASIBILITY_CRITERIA)
+    verdict = compute_feasibility_verdict(variant_b, variant_d)
 
     percentile_criterion = next(c for c in verdict.criteria if c.name == CRITERION_BEATS_CONTROL_PERCENTILE)
     assert percentile_criterion.value == pytest.approx(0.0)
@@ -566,7 +598,7 @@ def test_feasibility_verdict_variant_b_exactly_at_control_percentile_passes():
     variant_d = _full_control_group({rank: 0.01 * rank for rank in range(1, 51)})
     variant_b = _report(net_pnl=1000.0, net_return_pct=0.40)
 
-    verdict = compute_feasibility_verdict(variant_b, variant_d, FEASIBILITY_CRITERIA)
+    verdict = compute_feasibility_verdict(variant_b, variant_d)
 
     percentile_criterion = next(c for c in verdict.criteria if c.name == CRITERION_BEATS_CONTROL_PERCENTILE)
     assert percentile_criterion.value == pytest.approx(80.0)
@@ -577,7 +609,7 @@ def test_feasibility_verdict_all_criteria_pass():
     variant_d = _full_control_group()
     variant_b = _report(net_pnl=1000.0, net_return_pct=0.20, max_drawdown_pct=0.10, profit_factor=2.0, largest_win_pct=0.30)
 
-    verdict = compute_feasibility_verdict(variant_b, variant_d, FEASIBILITY_CRITERIA)
+    verdict = compute_feasibility_verdict(variant_b, variant_d)
 
     assert {c.name: c.passed for c in verdict.criteria} == {
         CRITERION_POSITIVE_NET_PNL: True,
@@ -593,7 +625,7 @@ def test_feasibility_verdict_drawdown_and_profit_factor_failures():
     variant_d = _full_control_group()
     variant_b = _report(net_pnl=1000.0, net_return_pct=0.20, max_drawdown_pct=0.35, profit_factor=0.5, largest_win_pct=0.80)
 
-    verdict = compute_feasibility_verdict(variant_b, variant_d, FEASIBILITY_CRITERIA)
+    verdict = compute_feasibility_verdict(variant_b, variant_d)
 
     by_name = {c.name: c.passed for c in verdict.criteria}
     assert by_name[CRITERION_MAX_DRAWDOWN_WITHIN_THRESHOLD] is False
@@ -610,7 +642,7 @@ def test_feasibility_verdict_undetermined_criterion_never_silently_passes():
     variant_d = _full_control_group()
     variant_b = _report(net_pnl=1000.0, net_return_pct=0.20, largest_win_pct=None)
 
-    verdict = compute_feasibility_verdict(variant_b, variant_d, FEASIBILITY_CRITERIA)
+    verdict = compute_feasibility_verdict(variant_b, variant_d)
 
     by_name = {c.name: c.passed for c in verdict.criteria}
     assert by_name[CRITERION_LARGEST_WINNER_CONCENTRATION_WITHIN_THRESHOLD] is None
@@ -621,7 +653,7 @@ def test_feasibility_verdict_infinite_profit_factor_passes():
     variant_d = _full_control_group()
     variant_b = _report(net_pnl=1000.0, net_return_pct=0.20, profit_factor=float("inf"))
 
-    verdict = compute_feasibility_verdict(variant_b, variant_d, FEASIBILITY_CRITERIA)
+    verdict = compute_feasibility_verdict(variant_b, variant_d)
 
     by_name = {c.name: c.passed for c in verdict.criteria}
     assert by_name[CRITERION_PROFIT_FACTOR_WITHIN_THRESHOLD] is True
@@ -630,7 +662,7 @@ def test_feasibility_verdict_infinite_profit_factor_passes():
 def test_feasibility_verdict_empty_variant_d_gives_undetermined_percentile():
     variant_b = _report(net_pnl=1000.0, net_return_pct=0.20)
 
-    verdict = compute_feasibility_verdict(variant_b, [], FEASIBILITY_CRITERIA)
+    verdict = compute_feasibility_verdict(variant_b, [])
 
     by_name = {c.name: c.passed for c in verdict.criteria}
     assert by_name[CRITERION_BEATS_CONTROL_PERCENTILE] is None
@@ -649,7 +681,7 @@ def test_incomplete_control_group_gives_undetermined_percentile_not_an_error(see
     variant_d = _full_control_group()[:seed_count]
     variant_b = _report(net_pnl=1000.0, net_return_pct=0.20)
 
-    verdict = compute_feasibility_verdict(variant_b, variant_d, FEASIBILITY_CRITERIA)
+    verdict = compute_feasibility_verdict(variant_b, variant_d)
 
     by_name = {c.name: c.passed for c in verdict.criteria}
     assert by_name[CRITERION_BEATS_CONTROL_PERCENTILE] is None
@@ -660,7 +692,7 @@ def test_exactly_50_valid_seeds_gives_a_determined_percentile():
     assert len(variant_d) == 50
     variant_b = _report(net_pnl=1000.0, net_return_pct=0.99)
 
-    verdict = compute_feasibility_verdict(variant_b, variant_d, FEASIBILITY_CRITERIA)
+    verdict = compute_feasibility_verdict(variant_b, variant_d)
 
     by_name = {c.name: c.passed for c in verdict.criteria}
     assert by_name[CRITERION_BEATS_CONTROL_PERCENTILE] is not None
@@ -674,7 +706,7 @@ def test_51_control_reports_is_structurally_invalid():
     variant_b = _report(net_pnl=1000.0, net_return_pct=0.20)
 
     with pytest.raises(ControlGroupValidationError):
-        compute_feasibility_verdict(variant_b, variant_d, FEASIBILITY_CRITERIA)
+        compute_feasibility_verdict(variant_b, variant_d)
 
 
 def test_duplicated_seed_is_rejected():
@@ -682,7 +714,7 @@ def test_duplicated_seed_is_rejected():
     variant_b = _report(net_pnl=1000.0, net_return_pct=0.20)
 
     with pytest.raises(ControlGroupValidationError, match="duplicate control_seed"):
-        compute_feasibility_verdict(variant_b, variant_d, FEASIBILITY_CRITERIA)
+        compute_feasibility_verdict(variant_b, variant_d)
 
 
 def test_unknown_seed_is_rejected():
@@ -692,7 +724,7 @@ def test_unknown_seed_is_rejected():
     variant_b = _report(net_pnl=1000.0, net_return_pct=0.20)
 
     with pytest.raises(ControlGroupValidationError, match="not in the frozen"):
-        compute_feasibility_verdict(variant_b, variant_d, FEASIBILITY_CRITERIA)
+        compute_feasibility_verdict(variant_b, variant_d)
 
 
 def test_control_report_missing_variant_id_d_is_rejected():
@@ -700,7 +732,7 @@ def test_control_report_missing_variant_id_d_is_rejected():
     variant_b = _report(net_pnl=1000.0, net_return_pct=0.20)
 
     with pytest.raises(ControlGroupValidationError):
-        compute_feasibility_verdict(variant_b, variant_d, FEASIBILITY_CRITERIA)
+        compute_feasibility_verdict(variant_b, variant_d)
 
 
 def test_control_report_missing_control_seed_is_rejected():
@@ -708,21 +740,21 @@ def test_control_report_missing_control_seed_is_rejected():
     variant_b = _report(net_pnl=1000.0, net_return_pct=0.20)
 
     with pytest.raises(ControlGroupValidationError):
-        compute_feasibility_verdict(variant_b, variant_d, FEASIBILITY_CRITERIA)
+        compute_feasibility_verdict(variant_b, variant_d)
 
 
 def test_variant_b_report_with_a_control_seed_is_rejected():
     variant_b = _report(net_pnl=1000.0, net_return_pct=0.20, variant_id=VARIANT_B, control_seed=1)
 
     with pytest.raises(ControlGroupValidationError):
-        compute_feasibility_verdict(variant_b, [], FEASIBILITY_CRITERIA)
+        compute_feasibility_verdict(variant_b, [])
 
 
 def test_variant_b_report_with_wrong_variant_id_is_rejected():
     variant_b = _report(net_pnl=1000.0, net_return_pct=0.20, variant_id=VARIANT_D, control_seed=None)
 
     with pytest.raises(ControlGroupValidationError):
-        compute_feasibility_verdict(variant_b, [], FEASIBILITY_CRITERIA)
+        compute_feasibility_verdict(variant_b, [])
 
 
 # --------------------------------------------------- three-tier verdict logic (finding 2)
@@ -736,10 +768,153 @@ def test_confirmed_failure_wins_over_unrelated_undetermined_criterion():
 
     variant_b = _report(net_pnl=-100.0, net_return_pct=-0.01, largest_win_pct=None)
 
-    verdict = compute_feasibility_verdict(variant_b, [], FEASIBILITY_CRITERIA)
+    verdict = compute_feasibility_verdict(variant_b, [])
 
     by_name = {c.name: c.passed for c in verdict.criteria}
     assert by_name[CRITERION_POSITIVE_NET_PNL] is False
     assert by_name[CRITERION_LARGEST_WINNER_CONCENTRATION_WITHIN_THRESHOLD] is None
     assert by_name[CRITERION_BEATS_CONTROL_PERCENTILE] is None
     assert verdict.verdict is False
+
+
+# --------------------------------------- proven experiment identity (third closure)
+
+
+def test_report_identity_comes_from_context_never_a_caller_argument():
+    """Stage 11-15 third closure, finding 1: compute_financial_performance no
+    longer accepts variant_id/control_seed as parameters at all -- there is no
+    argument through which a caller could relabel a Variant D run's report as
+    Variant B, or substitute a different seed. The report's identity is
+    whatever the (already hash-verified) context says it is."""
+
+    sandbox_repo, portfolio_repo = _repos()
+    portfolio_repo.append_equity_snapshot(
+        PortfolioEquitySnapshot(
+            snapshot_id=f"{REPLAY_ID}:2026-01-05", replay_id=REPLAY_ID, as_of_date=date(2026, 1, 5),
+            cash_units=1_000_000, reserved_capital_units=0, open_position_market_value_units=0,
+            total_equity_units=1_000_000, open_position_count=0, reserved_order_count=0,
+            cumulative_commissions_units=0, cumulative_slippage_cost_units=0, created_at=NOW,
+        )
+    )
+    context = DiagnosticsContext(
+        manifest=_FakeManifest(), replay_id=REPLAY_ID, variant_id=VARIANT_D, control_seed=17,
+        manifest_artifact_hash="manifest-hash-1", configuration_hash="config-hash-1",
+        feasibility_criteria=FEASIBILITY_CRITERIA, prices_df=None,
+        portfolio_repo=portfolio_repo, sandbox_repo=sandbox_repo,
+    )
+
+    report = compute_financial_performance(context)
+
+    assert report.variant_id == VARIANT_D
+    assert report.control_seed == 17
+
+
+def test_zero_transaction_replay_still_gets_identity_from_context():
+    """A replay with no executions at all is not a special case -- its
+    variant/seed identity still comes entirely from the context (itself
+    derived from the replay's own verified configuration), never left
+    undetermined or defaulted just because there is nothing to cross-check it
+    against."""
+
+    sandbox_repo, portfolio_repo = _repos()
+    portfolio_repo.append_equity_snapshot(
+        PortfolioEquitySnapshot(
+            snapshot_id=f"{REPLAY_ID}:2026-01-05", replay_id=REPLAY_ID, as_of_date=date(2026, 1, 5),
+            cash_units=1_000_000, reserved_capital_units=0, open_position_market_value_units=0,
+            total_equity_units=1_000_000, open_position_count=0, reserved_order_count=0,
+            cumulative_commissions_units=0, cumulative_slippage_cost_units=0, created_at=NOW,
+        )
+    )
+    context = DiagnosticsContext(
+        manifest=_FakeManifest(), replay_id=REPLAY_ID, variant_id=VARIANT_D, control_seed=42,
+        manifest_artifact_hash="manifest-hash-1", configuration_hash="config-hash-1",
+        feasibility_criteria=FEASIBILITY_CRITERIA, prices_df=None,
+        portfolio_repo=portfolio_repo, sandbox_repo=sandbox_repo,
+    )
+
+    report = compute_financial_performance(context)
+
+    assert report.variant_id == VARIANT_D
+    assert report.control_seed == 42
+    assert report.closed_trade_count == 0
+
+
+def test_control_report_with_different_manifest_artifact_hash_is_rejected():
+    """Stage 11-15 third closure, finding 2: a Variant B report and its
+    control group must provably come from the SAME frozen manifest artifact --
+    a different manifest_artifact_hash means the comparison is not scoring the
+    same experiment, no matter how correctly each individual number was
+    computed."""
+
+    variant_b = _report(net_pnl=1000.0, net_return_pct=0.20)
+    variant_d = [
+        _report(
+            net_pnl=100.0, net_return_pct=0.01, replay_id="d1", variant_id=VARIANT_D, control_seed=1,
+            manifest_artifact_hash="a-different-manifest-hash",
+        )
+    ]
+
+    with pytest.raises(ExperimentIdentityMismatchError, match="manifest_artifact_hash"):
+        compute_feasibility_verdict(variant_b, variant_d)
+
+
+@pytest.mark.parametrize(
+    "field_name,override_value",
+    [
+        ("model_version", "a-different-model-version"),
+        ("feature_snapshot_id", "a-different-feature-snapshot"),
+        ("market_data_snapshot_id", "a-different-ohlc-hash"),
+        ("signal_start_date", date(2020, 1, 1)),
+        ("signal_end_date", date(2020, 1, 2)),
+        ("outcome_data_end_date", date(2020, 1, 3)),
+    ],
+)
+def test_control_report_with_different_period_or_lineage_identity_is_rejected(field_name, override_value):
+    variant_b = _report(net_pnl=1000.0, net_return_pct=0.20)
+    variant_d = [
+        _report(
+            net_pnl=100.0, net_return_pct=0.01, replay_id="d1", variant_id=VARIANT_D, control_seed=1,
+            **{field_name: override_value},
+        )
+    ]
+
+    with pytest.raises(ExperimentIdentityMismatchError, match=field_name):
+        compute_feasibility_verdict(variant_b, variant_d)
+
+
+def test_control_report_with_altered_feasibility_threshold_is_rejected():
+    """Stage 11-15 third closure, finding 3: the feasibility criteria a report
+    is judged against are baked into the report at compute time, from the
+    verified manifest -- a control report claiming DIFFERENT thresholds than
+    Variant B's own must be rejected, not silently allowed to influence
+    whichever report's dict `compute_feasibility_verdict` happened to read."""
+
+    variant_b = _report(net_pnl=1000.0, net_return_pct=0.20)
+    altered_criteria = dict(FEASIBILITY_CRITERIA)
+    altered_criteria["max_drawdown_threshold"] = "0.99"
+    variant_d = [
+        _report(
+            net_pnl=100.0, net_return_pct=0.01, replay_id="d1", variant_id=VARIANT_D, control_seed=1,
+            feasibility_criteria=altered_criteria,
+        )
+    ]
+
+    with pytest.raises(ExperimentIdentityMismatchError, match="feasibility_criteria"):
+        compute_feasibility_verdict(variant_b, variant_d)
+
+
+def test_full_control_group_with_common_provenance_still_gives_a_determined_verdict():
+    """Confirms the comparability check does not itself get in the way of the
+    ordinary, fully-valid case: all 50 seeds sharing Variant B's own
+    provenance (the default `_report(...)`/`_full_control_group()` behavior)
+    must still produce a determined verdict, exactly as before this closure
+    cycle added the check."""
+
+    variant_d = _full_control_group()
+    variant_b = _report(net_pnl=1000.0, net_return_pct=0.99)
+
+    verdict = compute_feasibility_verdict(variant_b, variant_d)
+
+    by_name = {c.name: c.passed for c in verdict.criteria}
+    assert by_name[CRITERION_BEATS_CONTROL_PERCENTILE] is not None
+    assert verdict.verdict is not None

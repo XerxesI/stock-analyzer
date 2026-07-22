@@ -279,7 +279,9 @@ def test_synthetic_end_to_end_pipeline(tmp_path, monkeypatch):
     calendar = full_market_calendar(context.prices_df)
 
     # --- Stage 12-13/14: the real per-item diagnostics and report aggregation.
-    summary = compute_run_summary(context, REPLAY_ID, VARIANT_B, None, calendar)
+    # Stage 11-15 third closure: no variant/seed/replay_id passed manually --
+    # compute_run_summary derives all of it from the verified context.
+    summary = compute_run_summary(context, calendar)
 
     assert summary.buy.filled_count == 1
     assert summary.buy.expired_count == 0
@@ -340,7 +342,9 @@ def test_synthetic_end_to_end_pipeline(tmp_path, monkeypatch):
     # --- The new financial-performance report and feasibility verdict (Stage
     # 11-15 closure, finding 1): the module that actually answers "did this
     # policy make money," entirely absent before this closure cycle.
-    financial_report = compute_financial_performance(context, REPLAY_ID, VARIANT_B, None)
+    # Stage 11-15 third closure: no variant/seed/replay_id passed manually --
+    # compute_financial_performance derives all of it from the verified context.
+    financial_report = compute_financial_performance(context)
     assert financial_report.starting_equity == pytest.approx(20_000.0)
     assert financial_report.net_pnl > 0  # AAA's single closed trade was a gain
     assert financial_report.closed_trade_count == 1
@@ -349,7 +353,6 @@ def test_synthetic_end_to_end_pipeline(tmp_path, monkeypatch):
     assert financial_report.largest_closed_winning_trade is not None
     assert financial_report.largest_closed_winning_trade.symbol == "AAA"
 
-    feasibility_criteria = context.manifest.feasibility_criteria
     # No Variant D seeds were run in this synthetic fixture (out of scope for
     # Stage 15 -- see the completion report), so the percentile comparison is
     # explicitly undetermined (None). With exactly one closed trade, that same
@@ -357,8 +360,11 @@ def test_synthetic_end_to_end_pipeline(tmp_path, monkeypatch):
     # largest-winner concentration criterion (threshold 50%). Per the
     # three-tier verdict logic (Stage 11-15 second closure, finding 2), a
     # confirmed failure always wins over an unrelated undetermined criterion,
-    # so the overall verdict must be False here, not None.
-    verdict = compute_feasibility_verdict(financial_report, [], feasibility_criteria)
+    # so the overall verdict must be False here, not None. The feasibility
+    # criteria themselves are no longer passed manually either (Stage 11-15
+    # third closure, finding 3) -- they are baked into financial_report from
+    # the verified context.
+    verdict = compute_feasibility_verdict(financial_report, [])
     percentile_criterion = next(c for c in verdict.criteria if c.name == "beats_control_percentile")
     assert percentile_criterion.passed is None
     concentration_criterion = next(
