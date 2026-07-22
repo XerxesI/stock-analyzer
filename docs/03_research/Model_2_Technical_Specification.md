@@ -1,12 +1,18 @@
 # Model 2 Technical Specification
 
-**Status:** FROZEN ORIGINAL SPECIFICATION (Sections 1-12) + POST-HOC EMPIRICAL FINDINGS
-(Section 13), clearly separated. This document does not redefine Model 2 -- it
-consolidates four views that previously lived in separate places (the frozen
-implementation, the validation/Locked Test methodology, the sandbox inference/ranking
-process, and the economic limitations EXP-004/EXP-005 later exposed) into one
-authoritative reference, so Model 3 (or any future model) can be designed and compared
-against a fixed baseline instead of chat history.
+**Status:** FROZEN v1.0 (2026-07-22). Sections 1-12 are the FROZEN ORIGINAL
+SPECIFICATION; Section 13 is POST-HOC EMPIRICAL FINDINGS, clearly separated from it.
+This document does not redefine Model 2 -- it consolidates four views that previously
+lived in separate places (the frozen implementation, the validation/Locked Test
+methodology, the sandbox inference/ranking process, and the economic limitations
+EXP-004/EXP-005 later exposed) into one authoritative reference, so Model 3 (or any
+future model) can be designed and compared against a fixed baseline instead of chat
+history.
+
+An independent read-only audit of this document (covering Sections 1-14 and the
+post-hoc diagnostic scripts it cites) was completed 2026-07-22 and passed -- no
+remaining critical or P1 issues. This document is locked as of that audit; any future
+change requires a new revision, not a silent edit.
 
 **Date:** 2026-07-22
 **Owner:** Stock Analyzer Research
@@ -713,8 +719,9 @@ decomposition:** the ranking itself (A vs. B) already selects stocks whose close
 underperforms, even though the same score reliably identifies which stocks briefly
 TOUCH a much higher intraday level along the way (Section 13.1). Separately, and without
 implying a precise causal split, the two realized downstream outcomes -- the 108 actually-
-bought positions (C) and the real capital-constrained portfolio (D) -- were both also
-negative, and materially more negative than B. **Model 2 is not a suitable investment
+bought positions (C) and the real capital-constrained portfolio (D) -- are also negative
+under their respective definitions, but their magnitudes are not directly comparable
+with B. **Model 2 is not a suitable investment
 signal without further, materially different economic validation** -- specifically, a
 label and/or ranking validated against sustained close-price performance, not intraday
 touch, would be a prerequisite before any future model built on this same target
