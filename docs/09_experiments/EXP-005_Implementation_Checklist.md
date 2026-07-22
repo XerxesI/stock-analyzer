@@ -662,3 +662,25 @@ different names. This is a naming difference only, not a behavioral deviation.
       passes may a final manifest be generated for the commit with which a
       real Variant B or Variant D run is actually executed. The branch has
       not been pushed.
+
+      **Stage 11-15 independent review, fifth round (2026-07-22): PASSED --
+      Stages 11-15 are LOCKED.** The fifth review re-checked the actual diff
+      against 72 targeted tests, found no further critical or P1 defects, and
+      explicitly confirmed all of: the embedded configuration manifest
+      matches the disk-verified manifest exactly; feasibility criteria are
+      anchored to the manifest; the diagnostics context uses its own
+      defensive copy of the manifest's criteria; a Variant D seed must be an
+      approved integer; experiment ID and portfolio configuration hash are
+      re-verified; the final verdict uses the manifest's frozen thresholds;
+      and variant/seed identity plus cross-report provenance comparability
+      are no longer caller-supplied.
+
+      **Stages 0-15 of EXP-005's implementation are complete and closed.**
+      Per the standing authorization, a real Variant B (and, contingent on
+      Variant B's own result against the pre-registered absolute criteria,
+      the 50 frozen Variant D control seeds) may now be executed against a
+      freshly generated manifest tied to the exact commit at which Stages
+      11-15 were locked -- see the real-run record appended to
+      `docs/09_experiments/EXP-005_Stage15_Completion_Report.md` for that
+      manifest's hash, the freeze-validation gate's result, and (once run)
+      the actual replay outcome.

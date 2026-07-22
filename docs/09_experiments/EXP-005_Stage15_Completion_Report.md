@@ -1,5 +1,18 @@
 # EXP-005 Stage 15 Completion Report
 
+## Update (2026-07-22): Stage 11-15 LOCKED (fifth independent review passed)
+
+The fifth independent review checked the actual diff against 72 targeted
+tests and found no further critical or P1 defects. All of the fourth
+closure's fixes were explicitly confirmed correct. **Stages 0-15 of EXP-005's
+implementation are complete and closed as of this commit.**
+
+Per the standing authorization, this unblocks the first real run: one
+Variant B replay, followed -- only if Variant B passes every pre-registered
+absolute criterion -- by the 50 frozen Variant D control seeds. See below for
+the real-run manifest, freeze-validation gate result, and (once executed)
+the actual outcome.
+
 ## Update (2026-07-22): Stage 11-15 fourth closure cycle
 
 The third closure cycle's fixes were confirmed correct. A fourth independent
