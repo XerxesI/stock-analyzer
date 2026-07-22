@@ -38,6 +38,31 @@ Overlapping (date, symbol) observations sharing highly-correlated forward window
 NEVER described as independent trades or independent statistical observations anywhere
 in this script's naming or output -- "n" columns always report raw (date, symbol) row
 counts, not an implied effective sample size.
+
+**Reproducibility scope:** the cross-check against the production
+`Model2PredictionAdapter`, and this script's own verification against the frozen
+`close_return_20d`/`mfe_20d`/`mae_20d` columns, are both TOLERANCE-BASED, not exact
+bit-for-bit equality checks (`np.array_equal`) -- two independently-computed floating-
+point paths (a fresh `LogisticRegression` fit vs. the adapter's own fit; this script's
+forward-window arithmetic vs. the frozen dataset's own precomputed columns) are not
+guaranteed bit-identical even when both are correct, since floating-point operation
+ORDER can differ between the two code paths. `scripts/train_swing_20_logistic_baseline.py`'s
+own docstring already establishes that `lbfgs` is deterministic ACROSS RUNS of the
+same fit; exact reproduction of this diagnostic's own numbers is confirmed only in the
+current frozen dependency/runtime environment (Python 3.13.7, pandas 3.0.3, numpy
+2.2.6, scikit-learn 1.9.0) -- a different BLAS backend, OS, or dependency version
+should be expected to reproduce the same RANKING and results within the documented
+tolerance, not necessarily identical floats. Both tolerance checks FAIL CLOSED (raise
+`SystemExit(1)` before any downstream metric is computed) if exceeded.
+
+**Reproduction command:**
+```bash
+python scripts/model2_shadow_top10_post_hoc_diagnostic.py
+```
+Reads only `FEATURES_PATH`/`PRICES_PATH` below (both already frozen, committed-by-hash
+artifacts); writes its outputs under `artifacts/sandbox/model2_diagnostics/
+shadow_top10_post_hoc/` (gitignored -- generated, not committed; this script and this
+docstring are the durable, version-controlled record of how to regenerate them).
 """
 
 from __future__ import annotations
@@ -67,6 +92,14 @@ TARGET = "target_20pct_20d"
 HORIZONS = (5, 10, 20, 42)
 VERIFICATION_HORIZON = 20  # cross-checked against close_return_20d/mfe_20d/mae_20d
 FLOAT_TOLERANCE = 1e-6
+ADAPTER_SCORE_TOLERANCE = 1e-9  # tolerance-based reproducibility, NOT bit-for-bit equality
+
+
+class DuplicatePriceBarError(RuntimeError):
+    """Raised when the frozen prices artifact has more than one row for the same
+    (symbol, date) -- silently keeping the last one (as a plain drop_duplicates would)
+    would misalign every positional forward-window lookup after it without any
+    indication anything was wrong. This diagnostic fails closed instead."""
 
 OUTPUT_DIR = PROJECT_ROOT / "artifacts" / "sandbox" / "model2_diagnostics" / "shadow_top10_post_hoc"
 DAILY_TOP10_CSV = OUTPUT_DIR / "shadow_top10_daily_rows.csv"
@@ -110,9 +143,15 @@ def build_forward_outcomes(prices_df: pd.DataFrame, symbols: set[str], horizons:
 
     rows = []
     for symbol, g in prices_df[prices_df["symbol"].isin(symbols)].groupby("symbol", sort=False):
-        # Mirrors _shared.symbol_sessions's own dedup guard -- a duplicate (symbol, date)
-        # row would silently shift every positional forward-window lookup after it.
-        g = g.sort_values("date").drop_duplicates(subset="date", keep="last").reset_index(drop=True)
+        g = g.sort_values("date").reset_index(drop=True)
+        dup_count = int(g["date"].duplicated().sum())
+        if dup_count:
+            raise DuplicatePriceBarError(
+                f"symbol {symbol!r} has {dup_count} duplicate (symbol, date) row(s) in the frozen "
+                f"prices artifact ({PRICES_PATH}) -- forward-window positional arithmetic would "
+                "silently misalign every bar after the first duplicate. Investigate the artifact "
+                "before trusting any output of this diagnostic; not something to silently drop."
+            )
         out = {"symbol": symbol, "date": g["date"].to_numpy()}
         for n in horizons:
             arrs = _forward_arrays(g, n)
@@ -200,14 +239,21 @@ def main() -> None:
     X_validation = make_design_matrix(validation_df, fit, "model2")
     validation_df["model_score"] = model.predict_proba(X_validation.to_numpy())[:, 1]
 
-    print("[diag] cross-checking against the production Model2PredictionAdapter (bit-for-bit)...")
+    print("[diag] cross-checking against the production Model2PredictionAdapter "
+          "(tolerance-based reproducibility, not bit-for-bit)...")
     adapter = Model2PredictionAdapter(FEATURES_PATH)
     adapter_scores = adapter.score(validation_df).to_numpy()
-    adapter_match = bool(np.allclose(adapter_scores, validation_df["model_score"].to_numpy(), atol=1e-12, rtol=0))
-    print(f"[diag] adapter score match (bit-for-bit): {adapter_match}")
-    if not adapter_match:
-        max_diff = float(np.max(np.abs(adapter_scores - validation_df["model_score"].to_numpy())))
-        print(f"[diag] WARNING: max abs diff vs adapter = {max_diff}")
+    own_scores = validation_df["model_score"].to_numpy()
+    adapter_score_max_abs_diff = float(np.max(np.abs(adapter_scores - own_scores)))
+    adapter_scores_match_within_tolerance = bool(adapter_score_max_abs_diff <= ADAPTER_SCORE_TOLERANCE)
+    print(f"[diag] adapter score max abs diff = {adapter_score_max_abs_diff:.3e} "
+          f"(tolerance {ADAPTER_SCORE_TOLERANCE}) -- within tolerance: {adapter_scores_match_within_tolerance}")
+    if not adapter_scores_match_within_tolerance:
+        print("[diag] ABORT: this diagnostic's own re-fit score does not match the production "
+              "Model2PredictionAdapter's score within tolerance -- the design matrix, feature "
+              "order, or fit differs from production. Stopping before reporting any downstream "
+              "metric built on a possibly-wrong score.")
+        raise SystemExit(1)
 
     print("[diag] building per-symbol forward-window outcomes from the frozen prices artifact...")
     prices = pd.read_parquet(PRICES_PATH)
@@ -373,7 +419,9 @@ def main() -> None:
         },
         "model": {
             "feature_names_in_order": feature_names,
-            "adapter_score_matches_bit_for_bit": adapter_match,
+            "adapter_scores_match_within_tolerance": adapter_scores_match_within_tolerance,
+            "adapter_score_max_abs_diff": adapter_score_max_abs_diff,
+            "adapter_score_tolerance": ADAPTER_SCORE_TOLERANCE,
             "train_row_count": int(len(train_df)),
             "validation_row_count": int(len(validation_df)),
         },
@@ -423,6 +471,11 @@ def main() -> None:
         f"Validation period: {merged['date'].min().date()} .. {merged['date'].max().date()} "
         f"({merged['date'].nunique()} dates, {len(merged)} eligible (date,symbol) rows).",
         f"shadow_top_n = {shadow_top_n}.",
+        "",
+        "## Reproducibility check (tolerance-based, not bit-for-bit)",
+        f"- this diagnostic's own re-fit score vs. production Model2PredictionAdapter: "
+        f"max abs diff={adapter_score_max_abs_diff:.3e}, tolerance={ADAPTER_SCORE_TOLERANCE}, "
+        f"within tolerance={adapter_scores_match_within_tolerance}",
         "",
         "## Verification (recomputed 20-session values vs frozen close_return_20d/mfe_20d/mae_20d)",
         f"- rows compared: {verification['n_rows_compared']}",

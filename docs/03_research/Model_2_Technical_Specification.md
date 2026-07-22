@@ -9,8 +9,8 @@ authoritative reference, so Model 3 (or any future model) can be designed and co
 against a fixed baseline instead of chat history.
 
 **Date:** 2026-07-22
-**Owner:** Claude (agent), instructions relayed from ChatGPT (research lead) via Meelis
-Kivimäe.
+**Owner:** Stock Analyzer Research
+**Maintainer:** Meelis Kivimäe
 
 **Authoritative sources** (every date, row count, coefficient, hash, and metric below is
 taken programmatically from these, not from rounded conversational figures):
@@ -298,9 +298,10 @@ boosted tree model of any kind (not LightGBM, not XGBoost).** LightGBM is a plau
 candidate algorithm for a *future* Model 3, but must not be attributed to Model 2.
 
 **Exact fitted coefficients** (reproduced 2026-07-22 by re-running `fit_on_train` +
-`make_design_matrix` + `train_logistic` on the frozen train split -- bit-for-bit
-identical to what `Model2PredictionAdapter` produces at construction time, confirmed by
-direct comparison in Section 13's diagnostic):
+`make_design_matrix` + `train_logistic` on the frozen train split -- confirmed to
+reproduce `Model2PredictionAdapter`'s own construction-time scores within a documented
+tolerance, not exact bit-for-bit equality; see Section 13's "Reproducibility scope"
+note):
 
 ```text
 intercept              = -2.4219801869358757
@@ -446,13 +447,21 @@ NOT PERMITTED meaning     =  a calibrated probability of profit, or of anything 
   `Model2PredictionAdapter` is constructed -- `solver="lbfgs"` is a deterministic
   quasi-Newton optimizer (not stochastic, no seed required), so re-running
   `fit_on_train` + `make_design_matrix` + `train_logistic` on the identical frozen
-  train data and identical hyperparameters reproduces the exact EXP-002 Model 2
-  coefficients bit-for-bit.
+  train data and identical hyperparameters is expected to reproduce the exact EXP-002
+  Model 2 coefficients. **This determinism claim is confirmed in the current frozen
+  dependency/runtime environment** (Python 3.13.7, pandas 3.0.3, numpy 2.2.6,
+  scikit-learn 1.9.0) **only** -- a different BLAS backend, OS, or dependency version is
+  not guaranteed to reproduce bit-identical floats (floating-point summation order can
+  differ), though it should still reproduce the same ranking and results within a small,
+  documented tolerance.
 - **No separate serialized model binary exists or is required** -- this determinism is
-  exactly why. (Verified directly in Section 13's diagnostic: a fresh, independent
-  `fit_on_train`/`make_design_matrix`/`train_logistic` reproduction matched the
-  production `Model2PredictionAdapter`'s own scores to `atol=1e-12` across all 448,905
-  validation rows.)
+  exactly why. Section 13's diagnostic independently re-runs
+  `fit_on_train`/`make_design_matrix`/`train_logistic` and confirms the result matches
+  the production `Model2PredictionAdapter`'s own scores within a documented tolerance
+  (not exact bit-for-bit equality) across all 448,905 validation rows -- see Section
+  13's "Reproducibility scope" note for why tolerance-based, not exact, is the correct
+  and honest claim for a cross-check between two independently-computed floating-point
+  paths.
 - **Feature-order regression guard:** `Model2PredictionAdapter.FROZEN_MODEL2_FEATURE_LIST`
   (Section 5) is compared against the live `make_design_matrix` output's column tuple at
   every adapter construction; a mismatch raises `FrozenModelMismatchError` immediately.
@@ -513,15 +522,38 @@ Population D: the EXP-005 real, capital-constrained Variant B portfolio
               (single realized outcome, not a distribution)
 ```
 
+**A and B are directly, numerically comparable** -- both are means/medians of the SAME
+kind of quantity (a `(date, symbol)` row's own forward close return) over the SAME
+validation period, differing only in which rows are included. **C and D are NOT on that
+same scale** and are not treated as a continuation of the A/B comparison anywhere below:
+C is a per-position average over 108 actually-executed trades (entry timing and symbol
+overlap already baked in); D is one single realized, sequential, capital-constrained
+portfolio outcome, not a distribution at all. Section 13.8 states exactly what can and
+cannot be concluded from comparing across all four.
+
 Populations A and B were reproduced 2026-07-22 by a new, dedicated, read-only diagnostic
 (`scripts/model2_shadow_top10_post_hoc_diagnostic.py`), independently of anything
 computed in prior conversation, and verified against the frozen dataset's own
 `close_return_20d`/`mfe_20d`/`mae_20d` columns (max absolute difference ~1e-15 across all
 448,905 rows) before any of the numbers below were trusted. Full machine-readable output:
 `artifacts/sandbox/model2_diagnostics/shadow_top10_post_hoc/shadow_top10_summary.json`
-(sha256 `a90998343a62cba4b7dfbf880ba37ed540e2e1c3b0b12f82eb3439dca8416a25`). Population C
-was reproduced by `scripts/exp005_variant_b_price_path_study.py`. Population D is the
-real Variant B replay's own realized result.
+(sha256 `94feda3f35f773acdaf4a57e898228e623f1b4866d8709719e65dc73d0028c25` -- this hash
+changed from an earlier closure-cycle revision of the script that added fail-closed
+tolerance checks and honest "tolerance-based, not bit-for-bit" naming; every underlying
+NUMBER in this section is unchanged, confirmed by rerunning after that revision -- see
+the script's own git history for the exact diff). This JSON, its companion Markdown
+summary, and the per-row daily CSV are **generated outputs under `artifacts/`, gitignored
+and not committed** -- `scripts/model2_shadow_top10_post_hoc_diagnostic.py` (committed)
+is the durable, version-controlled record; regenerate with:
+```bash
+python scripts/model2_shadow_top10_post_hoc_diagnostic.py
+```
+Population C was reproduced by `scripts/exp005_variant_b_price_path_study.py`
+(similarly: committed script, gitignored generated CSV/JSON outputs). Population D is
+the real Variant B replay's own realized result
+(`artifacts/sandbox/exp005/real_runs/exp005_real_variant_b_2024_11_2025_10/`, also
+gitignored; `docs/09_experiments/EXP-005_Stage15_Completion_Report.md` is the durable
+record of that run).
 
 ### 13.1 The label measures a touch, not a sustained close-price level
 
@@ -589,9 +621,16 @@ smaller, higher-volatility names (Section 13.4).
   sigmoid -- explicitly NOT a new model, never re-fit, never promoted): the shadow
   top-10's 42-session mean return moves from **-12.37% to -11.60%**. **Removing the
   single explicit ADV term alone does not fix the negative return** -- most of the
-  effect survives, meaning the RVOL/RSI terms (which are themselves correlated with
-  low-liquidity, high-volatility names) carry the bulk of the same underlying bias, not
-  just the one explicit ADV coefficient.
+  effect survives. This diagnostic shows only that the remaining features and their
+  correlations/interactions retain most of the same selection effect once the direct
+  ADV term is subtracted out; it does **not** identify which specific term(s) cause it.
+  In particular, **attributing the residual specifically to the RVOL or RSI terms would
+  overstate what a single-term ablation can show** -- isolating RVOL's or RSI's own
+  contribution would require its own separate, pre-declared ablation (removing each
+  term or group in turn and re-measuring), which this document does not perform. The
+  correct, supportable statement is only: **the residual tilt may be encoded through
+  correlations and interactions among the remaining features; this diagnostic does not
+  identify which terms cause it.**
 
 ### 13.5 No sector, size, or fundamental information is used at all
 
@@ -626,31 +665,62 @@ feasibility criterion:
 exit averaging **-20.2%**. Full detail:
 `docs/09_experiments/EXP-005_Stage15_Completion_Report.md`.
 
-### 13.8 Where the value is lost, reading 13.1-13.7 together
-
-Populations A -> B -> C -> D form a chain of increasingly negative-but-different
-numbers, each adding a layer:
+### 13.8 What 13.1-13.7 do and do not establish together
 
 ```text
-A (all eligible, 42-session):        +1.44%   <- baseline population drift
-B (shadow top-10, 42-session):      -12.37%   <- the ranking itself, before any policy
-C (108 actually-bought positions):  -24.22%   <- + entry timing, capacity, symbol overlap
-D (EXP-005 portfolio, 230 sessions): -37.20%   <- + real exit policy, position sizing, costs
+A (all eligible, 42-session mean):    +1.44%
+B (shadow top-10, 42-session mean):  -12.37%
+C (108 actually-bought positions, 42-session mean): -24.22%
+D (EXP-005 portfolio, 230-session cumulative result): -37.20%
 ```
 
-The single largest jump is A -> B: **the ranking itself, entirely independent of any
-entry/exit/capacity decision, already selects stocks whose close price underperforms.**
-B -> C -> D show real ADDITIONAL damage from the entry/capacity/exit layers, but the
-ranking is not merely "good stock-picking undermined by a bad exit policy" -- picking
-by this score is itself, on average, picking stocks whose close price goes down over
-the following 5-42 sessions, even though the same score reliably identifies which
-stocks briefly TOUCH a much higher intraday level along the way.
+**A and B are directly comparable and support a firm conclusion:** both are means of the
+identical quantity (a `(date, symbol)` row's forward close return from entry) over the
+identical validation period, differing only in which rows are included. The daily
+shadow top-10 selection's forward close return is sharply negative while the full
+eligible population's is not. **This alone establishes that Model 2's ranking has a
+negative association with sustained forward close-price performance, entirely
+independent of any entry, capacity, or exit decision** -- Section 13.1's daily
+cross-sectional IC (positive vs. the label, negative vs. every forward-close-return
+horizon tested) is the same finding stated more precisely.
 
-**Model 2 is not a suitable investment signal without further, materially different
-economic validation** -- specifically, a label and/or ranking that is validated against
-sustained close-price performance, not intraday touch, would be a prerequisite before
-any future model built on this same target definition is trusted for portfolio
-construction.
+**C and D are NOT mathematically decomposable extensions of B, and this document does
+not claim they are.** They differ from B, and from each other, in scale, population
+definition, and mechanism, not merely by "one more policy layer" stacked on top of a
+common baseline:
+
+- B is a mean over 1,970 overlapping, cross-sectionally-averaged `(date, symbol)`
+  observations, most of which were never actually traded.
+- C is a mean over 108 specific, actually-executed positions, already shaped by which
+  candidates capacity allowed to be filled and when.
+- D is a single realized, path-dependent, capital-constrained portfolio outcome over
+  230 sequential sessions -- not a mean of independent observations at all, and not
+  reproducible by averaging anything in B or C.
+
+**It would therefore overstate what has actually been measured to describe the B -> C
+-> D progression as quantifying the "additional damage" contributed by the
+entry/capacity/exit layers**, or to treat -24.22% and -37.20% as B's -12.37% plus
+successive, separable policy-layer penalties. Establishing how much of C's and D's
+results is attributable to entry timing, capacity constraints, or exit policy
+specifically -- as opposed to Model 2's ranking itself -- would require **controlled
+counterfactual replays** (e.g. an EXP-005-style capital-constrained replay run with the
+entry/exit/capacity policy held fixed while only the candidate-selection input is
+varied, or vice versa), which have not been performed and are out of scope for this
+specification.
+
+**What IS supportable from all four populations together, without claiming a
+decomposition:** the ranking itself (A vs. B) already selects stocks whose close price
+underperforms, even though the same score reliably identifies which stocks briefly
+TOUCH a much higher intraday level along the way (Section 13.1). Separately, and without
+implying a precise causal split, the two realized downstream outcomes -- the 108 actually-
+bought positions (C) and the real capital-constrained portfolio (D) -- were both also
+negative, and materially more negative than B. **Model 2 is not a suitable investment
+signal without further, materially different economic validation** -- specifically, a
+label and/or ranking validated against sustained close-price performance, not intraday
+touch, would be a prerequisite before any future model built on this same target
+definition is trusted for portfolio construction; and if isolating the entry/capacity/
+exit layers' own contribution is later required, that needs its own pre-registered
+counterfactual-replay experiment, not a re-reading of this section's four numbers.
 
 ---
 
